@@ -1,0 +1,54 @@
+// Self-contained KiriKiri integration test. No game scripts, PSBs or saves.
+var portChecks = 0;
+function portAssert(value, label) {
+    if (!value) throw new Exception("PORT FAIL: " + label);
+    portChecks++;
+    Debug.message("[port-test] PASS " + label);
+}
+function portHasPlugin(name) {
+    var list = Plugins.getList();
+    for (var i = 0; i < list.count; i++) if (list[i] == name) return true;
+    return false;
+}
+Plugins.link("definitely_missing_port_test.dll");
+portAssert(!portHasPlugin("definitely_missing_port_test.dll"), "unimplemented DLL is not advertised");
+Plugins.link("csvParser.dll");
+Plugins.link("CSVPARSER.DLL");
+portAssert(portHasPlugin("csvparser.dll"), "real CSV module is registered");
+var csvModules = 0;
+var pluginList = Plugins.getList();
+for (var i = 0; i < pluginList.count; i++) if (pluginList[i] == "csvparser.dll") csvModules++;
+portAssert(csvModules == 1, "duplicate plugin loads are idempotent");
+portAssert(Plugins.unlink("csvparser.dll") == false, "live static plugin cannot be unloaded");
+portAssert(portHasPlugin("csvparser.dll"), "failed unload preserves registry");
+Plugins.link("emoteplayer.dll");
+portAssert(portHasPlugin("emoteplayer.dll"), "native E-mote module registered");
+portAssert(typeof global.Motion.EmotePlayer == "Object", "Motion.EmotePlayer class exists");
+
+var portWindow = new Window();
+portWindow.setInnerSize(640, 360);
+portWindow.caption = "KRKR NS source port regression";
+var portRoot = new Layer(portWindow, null);
+portRoot.setSize(640, 360);
+portRoot.visible = true;
+portRoot.fillRect(0, 0, 320, 180, 0xff2020);
+portRoot.fillRect(320, 0, 320, 180, 0x20dd40);
+portRoot.fillRect(0, 180, 320, 180, 0x2055ff);
+portRoot.fillRect(320, 180, 320, 180, 0xffd020);
+portAssert((portRoot.getMainPixel(639, 359) & 0xffffff) == 0xffd020, "full image reaches bottom-right");
+var portChild = new Layer(portWindow, portRoot);
+portChild.setSize(80, 80);
+portChild.setPos(450, 230);
+portChild.type = ltOpaque;
+portChild.fillRect(0, 0, 80, 80, 0xffffff);
+portChild.visible = true;
+portWindow.visible = true;
+var portPhase = 0;
+var portTimer = new Timer(function() {
+    portPhase++;
+    portRoot.fillRect(540, 260, 60, 60, (portPhase % 2) ? 0xeeeeee : 0x303030);
+    portChild.left = (portPhase % 2) ? 380 : 450;
+    if (portPhase == 4) Debug.message("[port-test] COMPLETE checks=" + portChecks + " local updates active");
+}, "");
+portTimer.interval = 500;
+portTimer.enabled = true;

@@ -1,0 +1,23 @@
+// KRKR-ns compat: k2compat console layer shim (KAG2 compat plugin
+// unavailable on Switch). Provide the common win32 commctrl constants
+// and no-op entry points the game's k2compat_console.tjs uses.
+var ICC_LISTVIEW_CLASSES = 0x00000001;
+var ICC_TREEVIEW_CLASSES = 0x00000002;
+var ICC_BAR_CLASSES = 0x00000004;
+var ICC_TAB_CLASSES = 0x00000008;
+var ICC_UPDOWN_CLASS = 0x00000010;
+var ICC_PROGRESS_CLASS = 0x00000020;
+var ICC_HOTKEY_CLASS = 0x00000040;
+var ICC_ANIMATE_CLASS = 0x00000080;
+var ICC_WIN95_CLASSES = 0x000000FF;
+var ICC_DATE_CLASSES = 0x00000100;
+var ICC_USEREX_CLASSES = 0x00000200;
+var ICC_COOL_CLASSES = 0x00000400;
+var ICC_INTERNET_CLASSES = 0x00000800;
+var ICC_NATIVEFNTCTL_CLASS = 0x00001000;
+var ICC_STANDARD_CLASSES = 0x00004000;
+var ICC_LINK_CLASS = 0x00008000;
+function initComboBoxEx() { return null; }
+function initListView() { return null; }
+function initTrackBar() { return null; }
+function initUpDown() { return null; }

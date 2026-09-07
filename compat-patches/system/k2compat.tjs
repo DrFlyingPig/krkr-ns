@@ -1,0 +1,245 @@
+// KRKR-ns compat: KAG2 plugin classes unavailable on Switch.
+class DebugConsoleCompatDialog {
+    function DebugConsoleCompatDialog(owner) {
+        this.owner = owner;
+        this.items = new Array();
+        this.count = 0;
+    }
+    function show() { return null; }
+    function execute() { return null; }
+    function close() { return null; }
+    function addItem(item) { return this; }
+    function setTitle(t) { return this; }
+    function getText() { return null; }
+    function print(msg) { return null; }
+}
+if (typeof(Debug.console) == "undefined")
+    Debug.console = new DebugConsoleCompatDialog(null);
+
+// Desktop KAG builds can automatically open a native debug pad whenever a
+// recoverable command warning is emitted.  Switch has no secondary desktop
+// window, so keep warnings in the normal KRKR log unless a launcher/user has
+// explicitly selected another value.
+if (System.getArgument("-autoerrlogopen") == "")
+    System.setArgument("-autoerrlogopen", "no");
+
+// windowEx/Krkr2Compat normally provides Pad lazily.  A number of KAG systems
+// define their LogWindow as `class ... extends Pad` even in release builds, so
+// retain the script contract with an inert, stateful modeless window.  It is
+// deliberately UI-agnostic: diagnostics remain available through Debug/logs,
+// while normal game input continues through the SDL Window.
+if (typeof(global.Pad) == "undefined") {
+    class Pad {
+        var owner;
+        var visible = false;
+        var left = 0;
+        var top = 0;
+        var width = 640;
+        var height = 480;
+        var text = "";
+        var statusText = "";
+
+        function Pad(owner) { this.owner = owner; }
+        function finalize() { visible = false; owner = void; }
+        function show() { visible = true; return this; }
+        function close() {
+            visible = false;
+            if (typeof this.onClose == "Object") this.onClose();
+            return this;
+        }
+        function setPos(x, y, w, h) {
+            if (x !== void) left = x;
+            if (y !== void) top = y;
+            return setSize(w, h);
+        }
+        function setSize(w, h) {
+            if (w !== void) width = w;
+            if (h !== void) height = h;
+            return this;
+        }
+    }
+}
+
+// KAG2 compatibility namespace object (plugin-provided in the original).
+function Krkr2CompatUtils() {}
+Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
+Krkr2CompatUtils.getWindowRect = function() { return null; };
+
+// Do not synthesize BaseConductorExtendClass here.  KAG's Conductor.tjs falls
+// back to its complete built-in KAGParser when KAGParserEx.dll is unavailable;
+// an empty stand-in would discard parser state such as debugLevel/ignoreCR.
+
+// Provided by menu.dll in the original. Switch has no native desktop menu bar,
+// but KAG still builds and queries the complete menu tree during start-up.
+// Keep a script-side tree with the same observable members so menu creation is
+// harmless and controller/touch driven games can continue to their own UI.
+class MenuItem {
+    function MenuItem(owner, caption) {
+        this.owner = owner;
+        this.caption = caption;
+        this.text = caption;
+        this.command = null;
+        this.enabled = true;
+        this.accessible = true;
+        this.checked = false;
+        this.visible = true;
+        this.radio = false;
+        this.group = 0;
+        this.index = 0;
+        this.shortcut = "";
+        this.parent = null;
+        this.children = new Array();
+    }
+    function setText(t) { this.text = t; this.caption = t; return this; }
+    function getText() { return this.text; }
+    function setEnabled(e) { this.enabled = e; return this; }
+    function isEnabled() { return this.enabled; }
+    function setChecked(c) { this.checked = c; return this; }
+    function isChecked() { return this.checked; }
+    function setVisible(v) { this.visible = v; return this; }
+    function isVisible() { return this.visible; }
+    function setCommand(c) { this.command = c; return this; }
+    function getCommand() { return this.command; }
+    function add(item) {
+        if (item === void || item === null) return this;
+        item.parent = this;
+        this.children.add(item);
+        return item;
+    }
+    function insert(item, index) {
+        if (item === void || item === null) return this;
+        item.parent = this;
+        if (index < 0 || index >= this.children.count) this.children.add(item);
+        else this.children.insert(index, item);
+        return item;
+    }
+    function remove(item) {
+        var index = this.children.find(item);
+        if (index >= 0) this.children.remove(index, 1);
+        if (item !== void && item !== null) item.parent = null;
+        return item;
+    }
+    function click() {
+        if (!this.enabled || !this.accessible) return null;
+        if (this.command !== null && typeof this.command == "Object")
+            return this.command(this);
+        return this.onClick();
+    }
+    function fireClick() { return this.click(); }
+    function popup(flags, x, y) { return 0; }
+    function onClick() { return null; }
+    function addHook(h) { return this; }
+    function removeHook(h) { return this; }
+    function finalize() { this.children.clear(); this.parent = null; return null; }
+}
+
+// Kirikiri's Window.menu property lazily returns a root MenuItem.  Native
+// desktop ports attach a platform menu here; on Switch one shared inert root
+// provides the same script contract without trying to create OS widgets.
+if (typeof(Window.menu) == "undefined") Window.menu = new MenuItem(null, "");
+// Native window handles are a Win32-only implementation detail.  Scripts pass
+// this value to optional desktop plugins; zero is the conventional null handle.
+if (typeof(Window.HWND) == "undefined") Window.HWND = 0;
+
+// windowEx.dll exposes Win32 message-hook controls. Switch receives input
+// through SDL, so native Windows messages do not exist; retain the public
+// method contract and the notification IDs used while KAG builds key maps.
+Window.getNotificationNum = function(name) {
+    if (name == "KEYDOWN") return 0x0100;
+    if (name == "KEYUP") return 0x0101;
+    if (name == "CHAR") return 0x0102;
+    if (name == "SYSKEYDOWN") return 0x0104;
+    if (name == "SYSKEYUP") return 0x0105;
+    if (name == "SYSCHAR") return 0x0106;
+    return -1;
+};
+Window.getNotificationName = function(number) {
+    if (number == 0x0100) return "KEYDOWN";
+    if (number == 0x0101) return "KEYUP";
+    if (number == 0x0102) return "CHAR";
+    if (number == 0x0104) return "SYSKEYDOWN";
+    if (number == 0x0105) return "SYSKEYUP";
+    if (number == 0x0106) return "SYSCHAR";
+    return "";
+};
+Window.setMessageHook = function(enable, number) { return false; };
+Window.registerExEvent = function(name) { return true; };
+
+// Keep the remaining windowEx state on the TJS Window object.  These values
+// affect Win32 chrome/system menus only; retaining them lets games assign and
+// query the documented members without introducing a second platform window.
+if (typeof(Window.disableResize) == "undefined") Window.disableResize = false;
+if (typeof(Window.enableNCMouseEvent) == "undefined") Window.enableNCMouseEvent = false;
+Window.minimize = function() { return null; };
+Window.maximize = function() { return null; };
+Window.showRestore = function() { return null; };
+Window.resetWindowIcon = function() { return null; };
+Window.setWindowIcon = function(storage) { return null; };
+Window.setOverlayBitmap = function() { return null; };
+Window.ncHitTest = function(x, y) { return false; };
+Window.focusMenuByKey = function(key) { return false; };
+Window.bringTo = function(target) { return null; };
+Window.sendToBack = function() { return null; };
+
+// gamepad.dll is a Windows polling plugin.  SDLApplication already translates
+// Switch controllers into the normal Kirikiri mouse/key events, so expose an
+// empty plugin-shaped port to stop KAGEX from installing a second poller.
+if (typeof(GamepadPort) == "undefined") {
+    class GamepadPort {
+        function GamepadPort() { this.count = 0; }
+        function initialize(hwnd) { this.count = 0; return true; }
+        function getController(index) { return null; }
+        function finalize() { this.count = 0; }
+    }
+}
+
+// Button masks published by gamepad.dll.  Some KAGEX scripts build mapping
+// tables at class-load time even when no plugin controller is present.
+if (typeof(global.gpButtonDpadUp) == "undefined") {
+    global.gpButtonDpadUp        = 0x00000001;
+    global.gpButtonDpadDown      = 0x00000002;
+    global.gpButtonDpadLeft      = 0x00000004;
+    global.gpButtonDpadRight     = 0x00000008;
+    global.gpButtonA             = 0x00000010;
+    global.gpButtonB             = 0x00000020;
+    global.gpButtonX             = 0x00000040;
+    global.gpButtonY             = 0x00000080;
+    global.gpButtonLeftShoulder  = 0x00000100;
+    global.gpButtonRightShoulder = 0x00000200;
+    global.gpLeftTrigger         = 0x00000400;
+    global.gpRightTrigger        = 0x00000800;
+    global.gpButtonBack          = 0x00001000;
+    global.gpButtonStart         = 0x00002000;
+    global.gpButtonLeftThumb     = 0x00004000;
+    global.gpButtonRightThumb    = 0x00008000;
+    global.gpTouchDown           = 1;
+}
+
+Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+Krkr2CompatUtils.isLoaded = function(name) { return true; };
+Krkr2CompatUtils.autoLoad = function() { return null; };
+Krkr2CompatUtils.Window = function() { return null; };
+
+// KAGParserEx normally extends Scripts with object helpers.  Reuse the
+// engine's native Dictionary enumeration methods; TJS2 does not implement
+// JavaScript's `for (key in object)` syntax.
+Scripts.getObjectKeys = function(object) { return Dictionary.keys(object); };
+Scripts.getObjectValues = function(object) { return Dictionary.values(object); };
+Scripts.hasObjectKey = function(object, key) { return Dictionary.contains(object, key); };
+
+// addFont.dll exposes System.addFont on Windows.  krkrsdl2 already has the
+// equivalent archive-aware FreeType implementation as Font.addFont.
+System.addFont = function(storage) { return Font.addFont(storage); };
+
+// getSample.dll adds optional waveform look-ahead helpers.  Audio playback is
+// already provided by the SDL mixer; these members only tune lip-sync sample
+// inspection and are safe to retain as state when the plugin is unavailable.
+if (typeof(WaveSoundBuffer.setDefaultAheads) == "undefined") {
+    WaveSoundBuffer.enableGetSample = false;
+    WaveSoundBuffer.defaultAheads = 0;
+    WaveSoundBuffer.setDefaultAheads = function(value) {
+        WaveSoundBuffer.defaultAheads = value;
+        return null;
+    };
+}

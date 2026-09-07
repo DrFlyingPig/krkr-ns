@@ -1,0 +1,213 @@
+// KRKR-ns launcher. Games live in sdmc:/krkr/<game directory>/ and are
+// treated as read-only; selecting an XP3 mounts that exact entry plus the
+// sibling resource archives from the same game directory.
+// Seed the KAG2 compatibility namespace before a game's initialize.tjs runs.
+if (typeof(global.Krkr2CompatUtils) == "undefined") {
+    function Krkr2CompatUtils() {}
+    global.Krkr2CompatUtils = Krkr2CompatUtils;
+    Krkr2CompatUtils.scriptBase = "";
+    Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
+    Krkr2CompatUtils.getWindowRect = function() { return null; };
+    Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+    Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+    Krkr2CompatUtils.isLoaded = function(name) { return true; };
+    Krkr2CompatUtils.autoLoad = function() { return null; };
+    Krkr2CompatUtils.Window = function() { return null; };
+}
+
+var launcherWindow = new Window(0, 0, 0, 0);
+launcherWindow.caption = "KRKR-ns 游戏启动器";
+launcherWindow.setInnerSize(1280, 720);
+
+var launcherLayer = new Layer(launcherWindow, null);
+launcherWindow.add(launcherLayer);
+launcherLayer.setSize(1280, 720);
+var launcherFontFaces = Font.addFont("notosanssc.ttf");
+if (launcherFontFaces.count == 0) throw "Unable to load the bundled launcher font";
+Font.defaultFaceName = launcherFontFaces[0];
+launcherLayer.font.face = launcherFontFaces[0];
+
+var gameFolders = Storages.getGameDirectoryList();
+var selectedFolder = gameFolders.count > 0 ? 0 : -1;
+var gameFiles = new Array();
+var selectedFile = -1;
+var listTop = 0;
+var statusText = "选择游戏文件夹和 XP3 启动包";
+var launching = false;
+
+function isXP3(name) {
+    return Storages.extractStorageExt(name).toLowerCase() == ".xp3";
+}
+
+function currentFolderName() {
+    return selectedFolder >= 0 ? gameFolders[selectedFolder] : "未找到游戏文件夹";
+}
+
+function selectDefaultXP3() {
+    selectedFile = gameFiles.count > 0 ? 0 : -1;
+    for (var i = 0; i < gameFiles.count; i++) {
+        if (gameFiles[i] == "启动游戏.xp3") selectedFile = i;
+    }
+}
+
+function loadSelectedFolder() {
+    listTop = 0;
+    if (selectedFolder < 0) {
+        gameFiles = new Array();
+        selectedFile = -1;
+        statusText = "请在 SD:/krkr/ 下建立游戏文件夹";
+        return;
+    }
+    gameFiles = Storages.getGameFileList(gameFolders[selectedFolder]);
+    selectDefaultXP3();
+    statusText = gameFiles.count > 0 ? "选择一个 XP3 文件直接启动" : "当前文件夹中没有 XP3";
+}
+
+function changeFolder(delta) {
+    if (launching || gameFolders.count == 0) return;
+    selectedFolder += delta;
+    if (selectedFolder < 0) selectedFolder = gameFolders.count - 1;
+    if (selectedFolder >= gameFolders.count) selectedFolder = 0;
+    loadSelectedFolder();
+    redrawLauncher();
+}
+
+function keepSelectionVisible() {
+    if (selectedFile < listTop) listTop = selectedFile;
+    if (selectedFile >= listTop + 12) listTop = selectedFile - 11;
+    if (listTop < 0) listTop = 0;
+}
+
+function drawText(x, y, text, size, color, bold) {
+    launcherLayer.font.height = size;
+    launcherLayer.font.bold = bold;
+    launcherLayer.drawText(x, y, text, color);
+}
+
+function redrawLauncher() {
+    launcherLayer.fillRect(0, 0, 1280, 720, 0x11151B);
+
+    // Left game card and folder selector.
+    launcherLayer.fillRect(0, 0, 500, 720, 0x171C24);
+    launcherLayer.fillRect(38, 42, 424, 132, 0x0A3769);
+    launcherLayer.fillRect(42, 46, 416, 124, 0x0E2442);
+    launcherLayer.fillRect(42, 46, 6, 124, 0x23B8FF);
+    drawText(72, 66, "KRKR for Nintendo Switch", 23, 0x65D2FF, true);
+    drawText(72, 108, "通用游戏浏览器", 34, 0xFFFFFF, true);
+
+    var folderCounter = selectedFolder >= 0 ? (selectedFolder + 1) + " / " + gameFolders.count : "0 / 0";
+    drawText(44, 205, "游戏文件夹  " + folderCounter, 21, 0x8793A3, false);
+    drawText(44, 244, currentFolderName(), 28, 0xFFFFFF, true);
+    drawText(44, 310, "◀", 34, 0x65D2FF, true);
+    drawText(181, 316, "左右切换游戏", 22, 0xAEB7C4, false);
+    drawText(418, 310, "▶", 34, 0x65D2FF, true);
+    launcherLayer.fillRect(44, 365, 412, 2, 0x343B46);
+
+    var currentName = selectedFile >= 0 ? gameFiles[selectedFile] : "未找到启动文件";
+    drawText(44, 388, currentName, 29, 0xFFFFFF, true);
+    launcherLayer.fillRect(44, 436, 412, 102, selectedFile >= 0 && isXP3(currentName) ? 0x176C9E : 0x343A43);
+    launcherLayer.fillRect(49, 441, 402, 92, selectedFile >= 0 && isXP3(currentName) ? 0x0C4E79 : 0x272C34);
+    drawText(82, 456, "▶", 46, 0xFFFFFF, true);
+    drawText(154, 466, "启动游戏", 34, 0xFFFFFF, true);
+
+    drawText(44, 560, statusText, 20, launching ? 0x65D2FF : 0xAEB7C4, false);
+    drawText(44, 630, "左右：游戏文件夹  上下：文件", 18, 0x727E8D, false);
+    drawText(44, 666, "摇杆移动光标  A / Enter 启动", 18, 0x727E8D, false);
+
+    // Right-side files inside the selected game directory.
+    launcherLayer.fillRect(500, 0, 780, 720, 0x20242A);
+    launcherLayer.fillRect(500, 78, 780, 2, 0x444B55);
+    drawText(536, 22, selectedFolder >= 0 ? currentFolderName() : "SD:/krkr/", 30, 0xF3F5F7, true);
+    drawText(1176, 18, "☰", 42, 0xAAB1BA, true);
+
+    if (gameFolders.count == 0) {
+        drawText(540, 132, "SD:/krkr/ 下没有游戏文件夹", 25, 0xC7CED8, false);
+    } else if (gameFiles.count == 0) {
+        drawText(540, 132, "该游戏文件夹中没有 XP3/TJS", 25, 0xC7CED8, false);
+    } else {
+        for (var row = 0; row < 12; row++) {
+            var fileIndex = listTop + row;
+            if (fileIndex >= gameFiles.count) break;
+            var y = 82 + row * 49;
+            if (fileIndex == selectedFile) {
+                launcherLayer.fillRect(500, y, 780, 48, 0x304E6D);
+                launcherLayer.fillRect(500, y, 7, 48, 0x28B7FF);
+            } else {
+                launcherLayer.fillRect(500, y, 780, 48, 0x24282E);
+            }
+            launcherLayer.fillRect(500, y + 47, 780, 1, 0x5A6068);
+            drawText(532, y + 6, gameFiles[fileIndex], 29,
+                     isXP3(gameFiles[fileIndex]) ? 0xF5F6F8 : 0xA9B1BB,
+                     fileIndex == selectedFile);
+        }
+    }
+}
+
+function launchSelectedGame() {
+    if (launching || selectedFolder < 0 || selectedFile < 0) return;
+    var name = gameFiles[selectedFile];
+    if (!isXP3(name)) {
+        statusText = "该文件不是 XP3 启动包";
+        redrawLauncher();
+        return;
+    }
+    launching = true;
+    statusText = "正在启动 " + name + " …";
+    redrawLauncher();
+    Debug.message("[launcher] click: " + currentFolderName() + "/" + name);
+    try {
+        if (!Storages.launchXP3(currentFolderName(), name, launcherWindow)) {
+            launching = false;
+            statusText = "请按住 R 从游戏进入 hbmenu";
+            redrawLauncher();
+        }
+    } catch (e) {
+        Debug.message("[launcher] failed: " + e.message);
+        throw e;
+    }
+}
+
+launcherWindow.onMouseDown = function(x, y, button, shift) {
+    if (launching) return;
+    if (x >= 500 && y >= 82 && y < 670) {
+        var index = listTop + ((y - 82) \ 49);
+        if (index >= 0 && index < gameFiles.count) {
+            selectedFile = index;
+            redrawLauncher();
+            launchSelectedGame();
+        }
+    } else if (x >= 44 && x < 456 && y >= 436 && y < 538) {
+        launchSelectedGame();
+    } else if (x >= 44 && x < 120 && y >= 292 && y < 360) {
+        changeFolder(-1);
+    } else if (x >= 385 && x < 456 && y >= 292 && y < 360) {
+        changeFolder(1);
+    }
+};
+
+launcherWindow.onKeyDown = function(key, shift) {
+    if (launching) return;
+    if (key == 0x25 || key == 0x1B5) {
+        changeFolder(-1);
+    } else if (key == 0x27 || key == 0x1B7) {
+        changeFolder(1);
+    } else if (gameFiles.count > 0 && (key == 0x26 || key == 0x1B6)) {
+        selectedFile--;
+        if (selectedFile < 0) selectedFile = gameFiles.count - 1;
+        keepSelectionVisible();
+        redrawLauncher();
+    } else if (gameFiles.count > 0 && (key == 0x28 || key == 0x1B8)) {
+        selectedFile++;
+        if (selectedFile >= gameFiles.count) selectedFile = 0;
+        keepSelectionVisible();
+        redrawLauncher();
+    } else if (key == 0x0D || key == 0x20 || key == 0x1C0) {
+        launchSelectedGame();
+    }
+};
+
+loadSelectedFolder();
+keepSelectionVisible();
+redrawLauncher();
+launcherWindow.visible = true;
+Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gameFiles.count);

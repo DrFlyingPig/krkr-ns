@@ -1,0 +1,34 @@
+// RETIRED KRKR-ns compat: Motion class stub (the game ships system/motion.tjs as
+// bytecode that depends on motionplayer plugin classes; this stub satisfies
+// AffineSourceMotion which creates Motion instances).
+// The Switch build does not yet provide the proprietary motionplayer/emote
+// runtime.  This is retained only as historical evidence.  Do not deploy it:
+// the built-in E-mote runtime now needs each game's real system/motion.tjs.
+global.enableSceneAnimEffect = false;
+global.enableMotionAnimEffect = false;
+
+class Motion {
+    function Motion() {
+        this.enabled = true;
+        this.loop = false;
+        this.time = 0;
+        this.duration = 0;
+    }
+    function clear() { return this; }
+    function jump() { return this; }
+    function move() { return this; }
+    function wait() { return this; }
+    function stop() { return this; }
+    function start() { return this; }
+    function tick() { return this; }
+    function setEnabled(e) { this.enabled = e; return this; }
+    function setLoop(l) { this.loop = l; return this; }
+    function getTime() { return this.time; }
+    function setTime(t) { this.time = t; return this; }
+    function getDuration() { return this.duration; }
+    function setDuration(d) { this.duration = d; return this; }
+    function isEnabled() { return this.enabled; }
+    function isLoop() { return this.loop; }
+    function onChanged() { return null; }
+    function finalize() { return null; }
+}

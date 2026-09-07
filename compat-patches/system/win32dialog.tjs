@@ -1,0 +1,39 @@
+// KRKR-ns compat patch: win32dialog plugin unavailable on Switch.
+// Provide stub classes so KAG's wrapper chain (WIN32DialogEX and its
+// subclasses in k2compat_*.tjs) can be defined and instantiated.
+class WIN32DialogEX {
+    function WIN32DialogEX(owner) {
+        this.className = 'WIN32DialogEX';
+        this.owner = owner;
+        this.items = new Array();
+        this.itemNames = new Array();
+        this.itemAlias = new Array();
+        this.itemResults = new Array();
+        this.namedIDnumber = new Array();
+        this.count = 0;
+    }
+    function notify(message, id) { return null; }
+    function dm() { return null; }
+    function removeAllBitmap() { return null; }
+    function add(item) { this.items.add(item); return this; }
+    function multipleid(id) { return this; }
+    function assign(id, value) { return this; }
+    function store() { return this; }
+    function makeAlias(name) { return this; }
+    function getNumber(name) { return null; }
+    function getItemRect(index) { return null; }
+    function finalize() { return null; }
+    function execute() { return null; }
+    function show() { return null; }
+    function makeTemplate() { return null; }
+    function setWindowClass(c) { return this; }
+    function getWindowClass() { return null; }
+}
+class WIN32GenericDialogEX extends WIN32DialogEX {
+    function WIN32GenericDialogEX(owner) { super.WIN32DialogEX(owner); }
+}
+
+// Static plugin-like entry points KAG's wrappers call on the class.
+WIN32DialogEX.modeless = function(owner, template, onClose) { return null; };
+WIN32DialogEX.notify = function(owner, message, id) { return null; };
+WIN32DialogEX.removeAllBitmap = function() { return null; };

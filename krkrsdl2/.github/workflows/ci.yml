@@ -1,0 +1,504 @@
+{
+  "name" : "Continuous Integration",
+  "on" : {
+    "push" : {
+      "paths" : [
+        "**.c",
+        "**.h",
+        "**.cpp",
+        "**.hpp",
+        "**.build",
+        "**.in",
+        "**.py",
+        "**.yml",
+        "**.gradle",
+        "**.cmake",
+        "CMakeLists.txt"
+      ]
+    },
+    "pull_request" : {
+      "paths" : [
+        "**.c",
+        "**.h",
+        "**.cpp",
+        "**.hpp",
+        "**.build",
+        "**.in",
+        "**.py",
+        "**.yml",
+        "**.gradle",
+        "**.cmake",
+        "CMakeLists.txt"
+      ]
+    }
+  },
+  "env" : {
+    "CMAKE_GENERATOR" : "Ninja",
+    "HOMEBREW_NO_ANALYTICS" : "1",
+    "HOMEBREW_NO_AUTO_UPDATE" : "1",
+    "HOMEBREW_NO_INSTALL_UPGRADE" : "1",
+    "HOMEBREW_NO_INSTALL_CLEANUP" : "1",
+    "DEBIAN_FRONTEND" : "noninteractive",
+    "TZ" : "Japan",
+    "EXAMPLE_PROJECT_URL" : "https://github.com/krkrsdl2/krkrsdl2-kag3-demo/releases/download/latest/data.xp3"
+  },
+  "jobs" : {
+    "build-ubuntu" : {
+      "strategy" : {
+        "fail-fast" : false,
+        "matrix" : {
+          "platform" : [
+            {
+              "target-name" : "web",
+              "artifact-to-archive" : "krkrsdl2.wasm krkrsdl2.js index.html",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "emcmake",
+              "cmake-extra-configure-append" : "",
+              "container" : "emscripten/emsdk:3.1.24",
+              "container-options" : " ",
+              "has-brew" : "false",
+              "runs-on" : "ubuntu-latest"
+            },
+            {
+              "target-name" : "ubuntu",
+              "artifact-to-archive" : "krkrsdl2",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "",
+              "container" : "ghcr.io/homebrew/brew:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest"
+            },
+            {
+              "target-name" : "ubuntu-arm64",
+              "artifact-to-archive" : "krkrsdl2",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "",
+              "container" : "ghcr.io/homebrew/brew:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-24.04-arm"
+            },
+            {
+              "target-name" : "win32-i686-gcc",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "i686-w64-mingw32",
+              "cmake-system-compiler" : "i686"
+            },
+            {
+              "target-name" : "win32-amd64-gcc",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "x86_64-w64-mingw32",
+              "cmake-system-compiler" : "amd64"
+            },
+            {
+              "target-name" : "win32-i686-clang",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "i686-w64-mingw32",
+              "cmake-system-compiler" : "i686"
+            },
+            {
+              "target-name" : "win32-amd64-clang",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "x86_64-w64-mingw32",
+              "cmake-system-compiler" : "amd64"
+            },
+            {
+              "target-name" : "win32-arm-clang",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "armv7-w64-mingw32",
+              "cmake-system-compiler" : "arm"
+            },
+            {
+              "target-name" : "win32-arm64-clang",
+              "artifact-to-archive" : "*.exe",
+              "artifact-path" : "build/*.zip",
+              "example-project-path" : "",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_FIND_ROOT_PATH=/dev/null -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY",
+              "container" : "ghcr.io/uyjulian/tvp_win32_build_container:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest",
+              "triplet" : "aarch64-w64-mingw32",
+              "cmake-system-compiler" : "arm64"
+            },
+            {
+              "target-name" : "android",
+              "artifact-to-archive" : "",
+              "artifact-path" : "./krkrsdl2.apk",
+              "example-project-path" : "android-project/app/src/main/assets",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "",
+              "container" : "ghcr.io/homebrew/brew:latest",
+              "container-options" : "--user 0",
+              "has-brew" : "true",
+              "runs-on" : "ubuntu-latest"
+            },
+            {
+              "target-name" : "switch",
+              "artifact-to-archive" : "",
+              "artifact-path" : "build/*.nro",
+              "example-project-path" : ".",
+              "cmake-extra-configure-prepend" : "",
+              "cmake-extra-configure-append" : "-DCMAKE_TOOLCHAIN_FILE=${DEVKITPRO}/cmake/Switch.cmake -DEMBED_DATA_PATH=data.xp3",
+              "container" : "devkitpro/devkita64:20241023",
+              "container-options" : " ",
+              "has-brew" : "false",
+              "runs-on" : "ubuntu-latest"
+            }
+          ]
+        }
+      },
+      "runs-on" : "${{ matrix.platform.runs-on }}",
+      "timeout-minutes" : 20,
+      "container" : {
+        "image" : "${{ matrix.platform.container }}",
+        "options" : "${{ matrix.platform.container-options }}"
+      },
+      "steps" : [
+        {
+          "name" : "Install dependencies (Alphine)",
+          "if" : "matrix.platform.target-name == 'vita'",
+          "run" : "apk update\napk add cmake make ninja git curl\n"
+        },
+        {
+          "name" : "Set up base environment (Ubuntu)",
+          "if" : "matrix.platform.target-name != 'vita' && matrix.platform.target-name != 'switch'",
+          "run" : "apt-get -y update && apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install build-essential"
+        },
+        {
+          "name" : "Install dependencies (Ubuntu)",
+          "if" : "startsWith(matrix.platform.target-name, 'ubuntu')",
+          "run" : "apt-get -y update && apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install libsdl2-dev"
+        },
+        {
+          "name" : "Install additional dependencies (No Homebrew)",
+          "if" : "matrix.platform.target-name == 'web' || matrix.platform.target-name == 'switch' || matrix.platform.target-name == 'ubuntu-arm64'",
+          "run" : "apt-get -y update && apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install p7zip-full cmake make ninja-build git curl"
+        },
+        {
+          "name" : "Set up Homebrew environment for Github Actions",
+          "if" : "matrix.platform.has-brew == 'true'",
+          "run" : "printf '%s\\n' '/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin' >> $GITHUB_PATH"
+        },
+        {
+          "name" : "Set up default build tools (Homebrew)",
+          "if" : "matrix.platform.has-brew == 'true'",
+          "run" : "sudo -H -E -u linuxbrew bash -c 'cd /home/linuxbrew && /home/linuxbrew/.linuxbrew/bin/brew install p7zip make nasm ninja cmake'"
+        },
+        {
+          "name" : "Set up extra CMake parameters",
+          "if" : "startsWith(matrix.platform.target-name, 'win32-')",
+          "run" : "printf '%s\\n' 'CMAKE_EXTRA_PARAMS=-DCMAKE_SYSTEM_PROCESSOR=${{ matrix.platform.cmake-system-compiler }} -DCMAKE_C_COMPILER=${{ matrix.platform.triplet }}-gcc -DCMAKE_CXX_COMPILER=${{ matrix.platform.triplet }}-g++ -DCMAKE_RC_COMPILER=${{ matrix.platform.triplet }}-windres' >> $GITHUB_ENV"
+        },
+        {
+          "name" : "Set up mingw-w64 for Clang",
+          "if" : "contains(matrix.platform.target-name, '-clang')",
+          "run" : "printf '%s\\n' '/opt/llvm-mingw/bin' >> $GITHUB_PATH"
+        },
+        {
+          "name" : "Checkout repository",
+          "uses" : "actions/checkout@v4",
+          "with" : {
+            "submodules" : "recursive"
+          }
+        },
+        {
+          "name" : "Clean current assets folder (Android)",
+          "if" : "matrix.platform.target-name == 'android'",
+          "run" : "rm -rf android-project/app/src/main/assets && mkdir -p android-project/app/src/main/assets"
+        },
+        {
+          "name" : "Download example project",
+          "if" : "matrix.platform.example-project-path != ''",
+          "run" : "cd ${{ matrix.platform.example-project-path }} && curl -LOC - $EXAMPLE_PROJECT_URL"
+        },
+        {
+          "name" : "Set up JDK 17 (Android)",
+          "if" : "matrix.platform.target-name == 'android'",
+          "uses" : "actions/setup-java@v4",
+          "with" : {
+            "distribution" : "temurin",
+            "java-version" : "17"
+          }
+        },
+        {
+          "name" : "Set up Android SDK (Android)",
+          "if" : "matrix.platform.target-name == 'android'",
+          "uses" : "android-actions/setup-android@v3"
+        },
+        {
+          "name" : "Configure project (General)",
+          "if" : "matrix.platform.target-name != 'android'",
+          "run" : "${{ matrix.platform.cmake-extra-configure-prepend }} cmake -S . -B build $CMAKE_EXTRA_PARAMS ${{ matrix.platform.cmake-extra-configure-append }} -DCMAKE_BUILD_TYPE=Release"
+        },
+        {
+          "name" : "Build project (General)",
+          "if" : "matrix.platform.target-name != 'android'",
+          "run" : "cmake --build build"
+        },
+        {
+          "name" : "Build project (Android)",
+          "if" : "matrix.platform.target-name == 'android'",
+          "run" : "cd android-project\n./gradlew assembleRelease -Dcmake.dir=$(dirname $(dirname $(which cmake)))\n"
+        },
+        {
+          "name" : "Archive artifact (General)",
+          "if" : "matrix.platform.artifact-to-archive != ''",
+          "run" : "cd build && 7z a -tzip ${{ github.event.repository.name }}-${{ matrix.platform.target-name }}.zip ${{ matrix.platform.artifact-to-archive }}"
+        },
+        {
+          "name" : "Rename artifact (Android)",
+          "if" : "matrix.platform.target-name == 'android'",
+          "run" : "cp android-project/app/build/outputs/apk/release/krkrsdl2_*.apk ./krkrsdl2.apk"
+        },
+        {
+          "name" : "Upload artifact",
+          "uses" : "actions/upload-artifact@v4",
+          "with" : {
+            "name" : "${{ github.event.repository.name }}-${{ matrix.platform.target-name }}",
+            "path" : "${{ matrix.platform.artifact-path }}"
+          }
+        }
+      ]
+    },
+    "build-macos-cmake" : {
+      "runs-on" : "macos-14",
+      "timeout-minutes" : 20,
+      "strategy" : {
+        "fail-fast" : false,
+        "matrix" : {
+          "appbundle" : [
+            {
+              "enabled" : "false",
+              "cmakeflags" : "-DOPTION_BUILD_MACOS_BUNDLE=OFF",
+              "artifactnameappendix" : ""
+            },
+            {
+              "enabled" : "true",
+              "cmakeflags" : "-DOPTION_BUILD_MACOS_BUNDLE=ON -DEMBED_DATA_PATH=data.xp3",
+              "artifactnameappendix" : "-appbundle"
+            }
+          ]
+        }
+      },
+      "steps" : [
+        {
+          "name" : "Checkout repository",
+          "uses" : "actions/checkout@v4",
+          "with" : {
+            "submodules" : "recursive"
+          }
+        },
+        {
+          "name" : "Download example project",
+          "if" : "matrix.appbundle.enabled == 'true'",
+          "run" : "curl -LOC - $EXAMPLE_PROJECT_URL"
+        },
+        {
+          "name" : "Set up default build tools",
+          "run" : "brew install make nasm ninja cmake"
+        },
+        {
+          "name" : "Configure project",
+          "run" : "cmake -DCMAKE_OSX_ARCHITECTURES='arm64;x86_64' -S . -B build ${{ matrix.appbundle.cmakeflags }}"
+        },
+        {
+          "name" : "Build project",
+          "run" : "cmake --build build"
+        },
+        {
+          "name" : "Archive artifact (command line)",
+          "run" : "ditto -ck --rsrc --sequesterRsrc build/krkrsdl2 build/${{ github.event.repository.name }}-macos.zip",
+          "if" : "matrix.appbundle.enabled == 'false'"
+        },
+        {
+          "name" : "Archive artifact (app bundle)",
+          "run" : "ditto -ck --rsrc --sequesterRsrc --keepParent build/krkrsdl2.app build/${{ github.event.repository.name }}-macos-appbundle.zip",
+          "if" : "matrix.appbundle.enabled == 'true'"
+        },
+        {
+          "name" : "Upload artifact",
+          "uses" : "actions/upload-artifact@v4",
+          "with" : {
+            "name" : "${{ github.event.repository.name }}-macos${{ matrix.appbundle.artifactnameappendix }}",
+            "path" : "build/*.zip"
+          }
+        }
+      ]
+    },
+    "build-ios-cmake" : {
+      "runs-on" : "macos-14",
+      "timeout-minutes" : 20,
+      "steps" : [
+        {
+          "name" : "Checkout repository",
+          "uses" : "actions/checkout@v4",
+          "with" : {
+            "submodules" : "recursive"
+          }
+        },
+        {
+          "name" : "Download example project",
+          "run" : "curl -LOC - $EXAMPLE_PROJECT_URL"
+        },
+        {
+          "name" : "Set up default build tools",
+          "run" : "brew install make nasm ninja cmake"
+        },
+        {
+          "name" : "Configure project",
+          "run" : "cmake -S . -B build -GXcode -DCMAKE_SYSTEM_NAME=iOS -DEMBED_DATA_PATH=data.xp3"
+        },
+        {
+          "name" : "Build project",
+          "run" : "cmake --build build"
+        },
+        {
+          "name" : "Archive artifact",
+          "run" : "ditto -ck --rsrc --sequesterRsrc --keepParent build/Debug-iphoneos/krkrsdl2.app build/${{ github.event.repository.name }}-ios-appbundle.zip"
+        },
+        {
+          "name" : "Upload artifact",
+          "uses" : "actions/upload-artifact@v4",
+          "with" : {
+            "name" : "${{ github.event.repository.name }}-ios-appbundle",
+            "path" : "build/*.zip"
+          }
+        }
+      ]
+    },
+    "generate-tp-stub-ubuntu" : {
+      "runs-on" : "ubuntu-latest",
+      "container" : {
+        "image" : "ghcr.io/homebrew/brew:latest",
+        "options" : "--user 0"
+      },
+      "timeout-minutes" : 20,
+      "steps" : [
+        {
+          "name" : "Checkout repository",
+          "uses" : "actions/checkout@v4",
+          "with" : {
+            "submodules" : "recursive"
+          }
+        },
+        {
+          "name" : "Set up Homebrew environment for Github Actions",
+          "run" : "printf '%s\\n' '/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin' >> $GITHUB_PATH"
+        },
+        {
+          "name" : "Set up python",
+          "run" : "sudo -H -E -u linuxbrew bash -c 'cd /home/linuxbrew && /home/linuxbrew/.linuxbrew/bin/brew install python'"
+        },
+        {
+          "name" : "Create artifact directory",
+          "run" : "mkdir -p build/${{ github.event.repository.name }}-tp_stub"
+        },
+        {
+          "name" : "Generate tp_stub",
+          "run" : "python3 ./src/core/base/sdl2/makestub.py build/${{ github.event.repository.name }}-tp_stub"
+        },
+        {
+          "name" : "Copy CMake build files",
+          "run" : "cp src/config/tp_stub_template.cmake build/${{ github.event.repository.name }}-tp_stub/CMakeLists.txt"
+        },
+        {
+          "name" : "Archive artifact",
+          "run" : "cd build && tar -czf ${{ github.event.repository.name }}-tp_stub.tar.gz ${{ github.event.repository.name }}-tp_stub"
+        },
+        {
+          "name" : "Upload artifact",
+          "uses" : "actions/upload-artifact@v4",
+          "with" : {
+            "name" : "${{ github.event.repository.name }}-tp_stub",
+            "path" : "build/*.tar.gz"
+          }
+        }
+      ]
+    },
+    "create-release" : {
+      "needs" : [
+        "build-ios-cmake",
+        "build-macos-cmake",
+        "build-ubuntu",
+        "generate-tp-stub-ubuntu"
+      ],
+      "runs-on" : "ubuntu-latest",
+      "container" : {
+        "image" : "ubuntu:20.04",
+        "options" : "--user 0"
+      },
+      "timeout-minutes" : 20,
+      "if" : "github.ref == 'refs/heads/main'",
+      "steps" : [
+        {
+          "name" : "Download all artifacts",
+          "uses" : "actions/download-artifact@v4"
+        },
+        {
+          "name" : "Prepare artifacts for release",
+          "run" : "cp -t . ${{ github.event.repository.name }}-*/*.zip\ncp -t . ${{ github.event.repository.name }}-*/*.tar.gz\ncp -t . ${{ github.event.repository.name }}-android/krkrsdl2.apk\ncp -t . ${{ github.event.repository.name }}-switch/krkrsdl2.nro\n"
+        },
+        {
+          "name" : "Create prerelease",
+          "if" : "github.ref == 'refs/heads/main'",
+          "uses" : "marvinpinto/action-automatic-releases@latest",
+          "with" : {
+            "repo_token" : "${{ secrets.GITHUB_TOKEN }}",
+            "prerelease" : "true",
+            "automatic_release_tag" : "latest",
+            "title" : "Latest development builds",
+            "files" : "*.zip\n*.tar.gz\n*.apk\n*.nro\n"
+          }
+        }
+      ]
+    }
+  }
+}
