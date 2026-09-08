@@ -138,6 +138,33 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 - v1 探针（全屏红 quad 四角单像素回读）在模拟器上 **PASS**，但真实立绘右 3/4 缺失：模拟器软件 GLES 只把**整幅 ReadPixels 结果截断为 320×720**（FBO 快照内容 bbox x:0-316；实测 fullRed=25.0% 恰为 320/1280）——单像素角点读取正常，v1 漏检。
 - v2 增加整幅回读：全缓冲红色像素覆盖率 ≥90% 才 PASS。模拟器 `GL probe FAIL fullRed=25.0%` → 自动 CPU；真机应 100% PASS → GL。v1 还有一坑：探针 draw 用 blend=21（enableColor=true）而 uniformColor 默认黑 {0,0,0,1} → 探针把靶面涂黑；已置白修复（v1 在真机上因此误判 FAIL 回退 CPU，run3 实为 CPU 数据）。
 
+
+### P19: Phase 3 Stage 3.1 — GPU 图层合成 (2026-09-07, 构建 md5 82cb67f8)
+- 新模块 `src/core/sdl2/GLComposite.{h,cpp}` + `GLCompositeBridge.h`（引擎侧桥接）：钩子= `tTVPBaseBitmap::Blt/CopyRect`（全引擎合成唯一合流点，经 `LayerManager::DrawBuffer` 注册目标位图）；命中时（dest=compose、32bpp、方法∈{copy/alpha/add}、!hda）改为向私有 ES2 FBO 画纹理 quad；呈现=全屏 quad+SDL_GL_SwapWindow，绕开 surface memcpy/UpdateTexture/RenderCopy 全链。
+- 位图→纹理缓存按 (指针, w,h,pitch,版本) 键；版本在 Blt/CopyRect/Fill/StretchBlt/Assign/DrawGlyph 写入口 bump（`krkrsdl2_glc_bump_version`），光栅经 `krkrsdl2_glc_get_bitmap_raster` 桥接（模块不依赖引擎头）。
+- 标记 `gpu-composite.txt` 开启；**全幅回读探针**（同 E-mote 门）自动拦截坏驱动（模拟器 25% → FAIL → CPU 兜底，实测通过）。
+- 已知 v1 限制：临时位图路径（透明层子层合成）、bmSub 及 PS 系混合、hda 模式仍走 CPU；文字字形走临时位图故文字合成仍 CPU（缓存键保证不陈旧）。呈现直连 GL 后脏矩形/上传/回拷指标不再适用。
+- 编译历程教训：**该 TU 与 E-mote 不同的配置下曾出现 "ActiveTexture was not declared" 假象——实为 LoadGL 内裸名漏 `gl.` 前缀**；SDL_opengles2.h 不带 PFNGL typedef（来自 SDL_opengl.h）；模块最终自建类型化函数表（53 个，免 PFN 依赖）。
+
+
+### P20: Stage 3.2 v1.1 — 帧纯度守卫 + 临时位图 twin 路径 (2026-09-07, 构建 md5 f558e266)
+- **纯度守卫（修 v1 正确性洞）**：`gPureFrame` 每帧重置；任何对合成目标的 CPU 回退写入（方法/hda/8bpp 不命中）→ 本帧走原呈现链（`present()` 返回 false、surface 拷贝恢复）；纯 GPU 帧才用 GL 呈现。杜绝"混合帧内容丢失"。
+- **临时位图上 GPU**：非合成目标位图首次被拦截写入时创建帧内 FBO twin（FindOrCreateTwin，上限 16，end_frame 销毁）；同一帧后续写入与最终 temp→compose 合成都走 twin 纹理（text/消息窗 CPU 开销落入 GL quad）。跨帧持久位图（背景/立绘）仍走版本缓存上传。
+
+
+### P21: v1.2 — 呈现改回读（修真机 GL 卡死） (2026-09-07, 构建 md5 3e327616)
+- 真机带标记复测：探针 100% PASS 后**卡死**（日志停心跳 8、无帧活动）——嫌疑=自建上下文里 `SDL_GL_SwapWindow`（模拟器探针 FAIL 从未走到该路径；E-mote 在真机只证明过 FBO+quad+ReadPixels，swap 未经验证）。
+- v1.2：删掉 swap 呈现；GPU 合成后 `krkrsdl2_glc_readback()` 把合成 FBO **回读进既有 SDL surface**（ReadPixels 自下而上→逐行翻转复制，32bpp 字节序一致），随后走**原始验证过的上传+RenderCopy+RenderPresent 链路**。风险面只剩"合成+回读"（两者真机已被 E-mote 证明可靠）。
+- 呈现包装撤除、SDLBitmapCompletion 恢复始终拷贝（回读后覆盖）。代价：回读 ~10ms + 上传 3.3ms 仍留；收益：compose CPU→GL。
+
+
+### P22: v1.6→v1.7 — 窗口切换后 glc 全灭根因修复 (2026-09-07, run12 3317c53b → v1.7)
+- **真机 run12 破案**：`SDL_CreateWindow` 出现两次（`:76` launcher 窗口、`:1269` 游戏窗口），glc context 建在窗口 1（`gWindow` 在首次 `BeginContext()` 缓存），launcher 窗口销毁后 `SDL_GL_MakeCurrent(死窗口)` 每次失败 → readback 136 次全部死在 `BeginContext()`（`m5 readback ok` 与 `glc-frame.bmp` 从未出现）。这就是所有 glc 构建"只能进软件、进不了游戏"的根因——**游戏窗口上从未有一次成功的 GL 合成**；try_blt 在无有效 context 下 GL 调用空转却返回 true → 引擎跳过 CPU blit → 黑帧/内容丢失。
+- **修复 1 — 窗口变化检测与重建**（GLComposite.cpp）：`BeginContext()` 每次经 `TVPGetPrimarySDLRenderer()` 取当前窗口；`gContext && win != gWindow` → `ResetGLState()`（删旧 context、清空 FBO/纹理缓存/twin 表/版本表、重置探针与里程碑）后在新窗口重建。重建后 m1–m5 重新触发，日志可见第二次 `context ready / probe PASS / m5 readback ok` 序列作为重建证据。
+- **修复 2 — 帧活性门 `gFrameActive`**：`begin_frame` 开头置 false，仅 BeginContext+探针+FBO 全套成功后置 true；`try_blt` 在门未开时直接返回 false（CPU 路径兜底），杜绝"GPU 空转却吞掉 CPU blit"的黑帧。窗口切换当帧自动退化为纯 CPU 帧。
+- **修复 3 — 诊断**：readback 的 `BeginContext()` 失败打印一次 `SDL_GetError()`；快照频率 `%60` → `#1 + %30`，fopen 失败打 `strerror(errno)`。
+- 验证：模拟器 glc probe FAIL（readback 截断）自动禁用，本修复不触及模拟器路径；真机复验只需再跑一次带 `gpu-composite.txt` 的 run——预期日志出现第二次 `context ready` + `m5 readback ok` + `frame snapshot saved`，MTP 可拉 `glc-frame.bmp` 做视觉确认。
+
 ## 模拟器备注
 - Nextendo (Ryujinx fork) 能正常加载/运行 homebrew NRO(已验证 hello.nro 写好 sdmc 文件)。
 - 首次启动会弹 prod.keys 提示(homebrew 不需要密钥,点 OK 即可;要消除需把真机导出的 prod.keys 放入 `portable/system/`)。
@@ -149,3 +176,195 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 2. 或从可达机器拷贝 `libEGL.a/libGLESv2.a/libglapi.a` 等文件;
 3. 或离线构建 mesa for switch(Meson 交叉编译,工作量大)。
 拿到后替换 stub → 重建 → 模拟器/真机应能显示画面 → M1 达成。
+### P23: v1.8→v1.9 — 画面"一点点"根因：shader 预乘 alpha + 字节序 (2026-09-07, v1.8 1eefd01c → v1.9 865f5670)
+- **真机 run13**：v1.8（fallback 修复）全部机制生效（m5 打印、快照落盘、fallback 真实计数），但画面仍"只有一点点，其余黑屏"。MTP 拉 `glc-frame.bmp` 程序化统计=**全黑 0% 非黑**（注：快照是 readback #1 早期帧，title_bg 未加载；真正的后期帧须靠新增的非黑量化日志）。
+- **根因 1 — shader 无条件预乘 alpha**：`gl_FragColor = vec4(c.rgb * c.a * opa, ...)`。KRKR 位图 alpha 通道常为 0（条带/中间位图）→ GPU quad 输出全黑；而 fold 走 `glTexSubImage2D` 直写纹理不经 shader → 颜色正常。**画面 = fold 的"一点点" + quad 的大片黑**，与症状严丝合缝。
+- **根因 2 — 字节序不一致**：KRKR 位图内存 **BGRA**（`b=(v>>0), r=(v>>16)`，blend_function_sse2.cpp:1707 佐证），SDL surface mask 同 BGRA；但 GL 上传/读回全用 `GL_RGBA` → GPU 路径 R/B 互换。
+- **v1.9 修复**：
+  1. shader 改为**非预乘输出** `vec4(c.rgb * opa, c.a * opa)`；混合函数按引擎语义映射——copy（method 0）= blend off；alpha（method 1）= `(SRC_ALPHA, ONE_MINUS_SRC_ALPHA)`（引擎 TVPAlphaBlend：dst=src.rgb*src.a+dst.rgb*(1-src.a)）；add（method 6）= `(ONE, ONE)`（引擎 TVPAddBlend：纯通道加法不乘 alpha）。
+  2. **统一 `KRKRNS_GL_FORMAT = GL_BGRA_EXT`**(0x80E1, llvmpipe 必支持)：上传 TexSubImage2D、fold 直写、ReadPixels 全部 BGRA；probe 红色检查改 B 字节(full[i+2])；BMP 快照写序 B,G,R 修正。
+- 验证注意：模拟器 glc probe FAIL 不跑此路径；真机复验看**新日志行 `[glc] frame content: ... nonblack=%.1f%%`**（每 15 次 readback 一行，量化画面完整性，无需拉 BMP）。
+
+### P24: v1.9→v2.0 — 画面"一点点"终局根因：位图 bottom-up 行方向 (2026-09-07, v1.9 865f5670 → v2.0 8dc213e8)
+- **run14 量化**：新增 `[glc] frame content: readback #15 nonblack=0.8%` —— 画面确实只有 0.8% 非黑。
+- **快照程序化分析（非看图）**：MTP 拉 `glc-frame.bmp`（#15 帧），非黑像素**全部集中在 y=0..7 一个 1280×8 条带**（10240px=1.11%，颜色 BGR=(215,168,102) 为正常内容），其余 712 行全黑。
+- **根因——KRKR 位图 bottom-up 存储**：`tTVPBitmap::GetScanLine(l) = (Height-l-1)*PitchBytes + Bits`（LayerBitmapImpl.cpp:505）。`krkrsdl2_glc_get_bitmap_raster` 返回 `GetScanLine(0)` = **逻辑顶行**（内存末行）。而 UploadBitmap/fold 全部用 `pixels + y*pitch` **向内存深处走** → 从顶行再往下就是越界/垃圾 → 纹理只有第一行有数据、其余黑。fold 折叠逐行上传同样错向。
+- **v2.0 修复**：行遍历统一改为 `pixels - y*pitch`（逻辑顶行在内存末，向低地址取行）：UploadBitmap 的 repack 路径、fold 单 rect 路径、fold 整幅 repack 路径三处。pitch==w*4 的整块上传天然正确（指针即逻辑顶行，纹理行序=逻辑行序）不动。
+- 回读行序审计：GL ReadPixels 返回 bottom-up（行0=FBO底=逻辑底）→ 翻转写 surface（top-down）✓ 与 fold 修复方向自洽；probe 红色检查已在 BGRA 字节序修正（full[i+2]）。
+
+### P25: v2.0→v2.1 — fold 折叠镜像缺失（真机 run15：画面从"顶部一条带"变"底部一条"）(2026-09-07, v2.0 8dc213e8 → v2.1 487ba103)
+- **run15 观察**：用户反馈"最底下一点点非黑像素"+闪退。日志 readback 停在 #3、compose-stats 全缺（合成在早期终止）；尾部 TJS 异常 `bgm.tjs playBuffer`/`sysvoice.tjs start`（`syn_00020.ogg` 播放失败，wuvorbis 不可用）——异常会弹错误框，体感"闪退"，属音频问题另案。
+- **根因（方向链闭合）**：
+  1. render-to-texture 时 GL 把 framebuffer 行 0 放纹理行 0，而 quad 顶点 y0=1-dstY/th*2 使逻辑顶行落在 framebuffer 顶部（=纹理行 H-1）→ quad 内容经 ReadPixels bottom-up + 读回翻转后**恰好正确**；
+  2. fold 直写纹理用 `TexSubImage2D(y = r[1]+row)` → 纹理行 K 出现在 surface 行 H-1-K → **上下颠倒**。v1.9 快照"顶部 y=0..7 一条带"（内容错位到顶部）、v2.0"底部一点点"（上传方向修好后折叠错位更明显）都是同一镜像缺失的表现。
+- **v2.1 修复**：fold 单 rect 路径目标行改 `ch-1-(r[1]+row)`；整幅折叠（>128 rects）逐行镜像（GL 行 t ← 逻辑行 ch-1-t）；加越界防御（r[1]<0 或 r[1]+r[3]>ch 跳过，防 OOB 读=闪退另一嫌疑）。
+- 方向链最终态：UploadBitmap 纹理行 t=源逻辑行 t + quad 顶点翻转 + ReadPixels 读回翻转 + fold 行镜像 = 全链路自洽。
+- 遗留：音频异常（ogg 播放失败弹错误框）可能导致用户体感闪退；下轮顺带查 wuvorbis/音频失败路径。
+
+### P26: v2.1→v2.2 — 条带缓存冻结修复 + cpuonly A/B 探针 (2026-09-07, v2.1 487ba103 → v2.2 9601cc1f)
+- **run16 观察**：闪退消失（v2.1 fold 越界防御 ✓），但 `frame content #15 nonblack=0.5%`。快照程序化分析：非黑 7103px **全部在 y=0..7 顶部一条 1280×8 条带**（暗色，≈黑），其余 719 行全黑。
+- **证据链**：`handled=90` 每帧**恒定** + blt src 指针**恒定**（同一 1280×8 条带对象，krkrz draw-pool 行带）→ 90×8=720 恰为全屏 → 这 90 条带本应铺满画面。
+- **根因——家用缓存把条带内容冻结**：纹理缓存按 (ptr,w,h,pitch,version) 键。但引擎 hook（LayerBitmapIntf.cpp:1144）的 `bump_version(this)` 只在 `try_blt` 返回 **false** 后执行；GPU 成功路径直接 `return true`，**版本从不 bump** → 条带位图每帧重填新像素，纹理却永远停留在首帧内容 → GPU quad 每次都画第一条带 → 顶部一条、其余黑。GPU 处理率逐帧下滑（3152/8138→6577/29563）正是缓存失效的表象。
+- **v2.2 修复**：
+  1. **条带重传**：`sh <= 16`（draw-pool 行带特征）时绕过缓存直接 UploadBitmap 重传——每帧 90 次 × 1280×8×4 = 3.7MB/帧上传，可接受；
+  2. **mode 4 cpuonly A/B 探针**（`gpu-composite-cpuonly.txt`）：try_blt 全短路返回 false（CPU 路径独占 compose），readback fold 整帧折叠 → 若 mode4 画面正确则 fold/readback 链好、问题在 quad/纹理链；若仍黑则 fold/readback 链本坏。这是把"画面只剩一条带"二分定位的决定性实验；
+  3. **blt# 诊断补 xy 坐标**（此前缺失、无法验证条带坐标分布）。
+- 验证：真机先跑 mode 1（gpu-composite.txt 不动）看条带重传是否铺满；若仍一条带则删该文件、建 `gpu-composite-cpuonly.txt` 跑 mode 4 二分。
+
+### P27: v2.2→v2.3 — mode4 A/B 决定性证据 + 快照 y 轴修正 (2026-09-07, v2.2 9601cc1f → v2.3 3e266501)
+- **run17 (mode 4 cpuonly) 决定性结果**：用户反馈"短暂闪过游戏画面之后又变回大部分黑屏，底部一条非黑像素带"。
+  - **"闪过完整游戏画面" = SDLBitmapCompletion 直拷 surface 的 CPU 完整画面**——它只在 readback 覆盖 surface **之前**可见 → **引擎 CPU 合成完好、surface 直拷完好**，问题锁定在 glc 的 fold/ReadPixels 输出链。
+  - mode4 数据吻合：handled=0（全 CPU）、fallback 180→270→360（rect 数随帧增长）、frame content #15=0.0% #30=0.1% → **fold 几乎没把内容写进最终 surface**。
+- **快照 y 轴修正（重要认知纠错）**：BMP 规范是 bottom-up（文件第一行=图像底部），此前快照代码按 surface 顺序直写 → 实际存的是上下颠倒图 → 我程序化分析"y=0..7 顶部一条带"实为**屏幕底部** —— 与用户历次描述（"最底下一点点""底部一条带"）完全一致！v2.3 修正 BMP 写序（先写 h-1 行），分析轴与屏幕一致。
+- **v2.3 诊断增强**：blt# 诊断移到 mode-4 短路之前（mode4 也打 xy 坐标）；fold 增加 **x 轴越界防御**（此前仅 y，r[0]+r[2]>cw 可越界读→mode1 闪退新嫌疑）；fold 打印前 8 个 rect 的 xy 尺寸 + 总 rect/skipped 统计（确认是否大量 rect 被边界检查过滤——若大部分被 skip 则"底部一条带"= 只有最后一个 rect 通过了检查）。
+- 待观察：下轮 mode4 日志的 blt xy 分布（条带 y 是否 0..712 全覆盖）、fold rect 前 8 条、skipped 计数。
+
+### P28: v2.3→v2.4 — mode4 第二阶段 A/B：完全绕开 GL 直拷 (2026-09-07, v2.3 3e266501 → v2.4 f54f3341)
+- **run18（mode 4）用户反馈**："短暂出现游戏开头的视频 → 变回底部花屏条带+黑屏；但按按钮能看到按钮单独渲染出来，游戏逻辑在跑"。
+  - "视频闪过/按钮单独渲染" = SDLBitmapCompletion 直拷 surface 的 CPU 画面在 readback 覆盖前可见 + 局部重绘帧可见 → **CPU 合成+surface 直拷+raster 访问器全部完好**；
+  - blt# 诊断首次带 xy：前 6 条全部 `xy=0,0 sz=1280x8`（条带 blt，mode 4 全 CPU）；fold rect/skipped 日志缺位 → 因 fallback=180/270/360 全部 >128 走**整幅折叠分支**（该分支无日志）——修正认知：并非"大量 rect 被跳过"，而是整幅折叠路径本身。
+- **v2.4 决定性实验**：`gMode == 4` 时 readback **完全不碰 GL**——直接把 compose 位图光栅按 bottom-up 行序（cpix - (ch-1-y)*cpitch）memcpy 进 surface，并打 nonblack 量化。**若直拷画面完整 → 锁定 GL fold/ReadPixels 链路为唯一坏环节**（下一步集中修 GL 环节）；若仍黑 → raster 访问器或行序还有问题（可能性低，因 SDL 直拷路径好）。
+- 附带：mode 4 的 readback 不再依赖 FBO/GL，探测成本更低；日志新增 `mode4-direct copy: ... nonblack=%.1f%%`。
+
+### P29: v2.4 真机里程碑 — 画面首次完全正常 + glc 黑屏机制定案 (2026-09-07, v2.4 f54f3341)
+- 用户确认 run19 游戏画面正常（mode 4）。日志 `mode4-direct: raster unavailable` 贯穿：直拷分支因 `get_bitmap_raster` 返回 null 从未写 surface → 屏幕=SDLBitmapCompletion CPU 直拷 → 画面正常。**并非直拷成功，而是 glc 未干扰**。
+- **黑屏机制定案**：surface 原始内容全程正确（视频/按钮/完整画面临现为证）；坏环=glc readback 覆盖 surface（fold+ReadPixels 输出几乎全黑）。解释 v1.7→v2.3 所有"一条带/全黑"现象。
+- 下轮焦点：readback 时 `krkrsdl2_glc_get_bitmap_raster(gComposeBitmap)` 为何 null（blt 诊断却 destIsCompose=1）→ 查明后修复 fold 链，mode 1 GPU 合成才有意义。
+
+### P30: v2.4→v2.5 — 回归 GL_RGBA 全链（BGRA_EXT 上传被拒嫌疑）+ GL 错误探针 (2026-09-07, v2.4 f54f3341 → v2.5 9620167d)
+- **背景**：用户反馈"游戏正常但太卡"——当前"正常画面"实为 CPU 直拷（mode4 直拷因 raster null 未覆盖 surface），GPU 合成（mode 1）从未成功，性能目标未达成。
+- **新嫌疑（解释 probe 绿/quad 黑的矛盾）**：probe 用 `glClear`（无纹理）→ PASS；mode 1 的 quad 用 `TexSubImage2D(GL_BGRA_EXT)` 上传——若 llvmpipe 拒绝 BGRA_EXT（INVALID_ENUM）→ **纹理上传失败→纹理全空→quad 采样黑→全屏黑**，fold 同因。而 E-mote 后端（真机验证过 FBO+quad+ReadPixels 全链路）**只用 GL_RGBA**。
+- **v2.5**：
+  1. `KRKRNS_GL_FORMAT` 改回 **GL_RGBA**；shader 输出改 `vec4(c.b, c.g, c.r, c.a)*opa`（BGRA 内存上传为 RGBA 后采样通道互换，shader 换回）；
+  2. readback 的 ReadPixels→surface 拷贝加 **R/B 字节交换**（GL_RGBA 字节序 → SDL BGRA）；probe 红色检查改回 `full[i]`（RGBA 的 R 字节）；
+  3. **GL 错误探针**：proc 表加 `GetError`，GLErr() 埋点于 UploadBitmap/DrawQuad/fold/ReadPixels（每会话记录前 6 个错误码）；
+  4. mode4 直拷分支打印 `gComposeBitmap=%p`（解 raster null 之谜：blt 诊断 destIsCompose=1 与 readback raster null 并存）。
+- 待真机 verdict：`[glc] GLerr` 是否出现 0x502（INVALID_ENUM）→ 验证 BGRA 嫌疑；mode4 的 gComposeBitmap 指针是否 null。
+
+### P31: v2.5→v2.5b — shader // 注释吞代码导致 run20 闪退 (2026-09-07, v2.5 9620167d → v2.5b a9ad6c19)
+- **run20（v2.5 mode 1）**：`[glc] shader compile failed: 0:1(129): error: syntax error, unexpected end of file` + 闪退。
+- **根因（我引入的 bug）**：v2.5 在 gFrag 字符串里加了两行 `//` 注释说明——C++ 相邻字符串字面量拼接后 GLSL 源码是**一整行**，`//` 把行尾到 `}` 的全部代码（gl_FragColor 等）注释掉 → shader 编译失败 → EnsureProgram/BeginContext 链崩溃 → 闪退。
+- **教训**：GLSL 字符串常量禁止 `//`（单行注释在拼接后无换行保护）；跨行注释必须用 `/* */` 或干脆不放注释。后续 shader 改动必须在构建后用 GLSL 编译验证（真机日志 shader compile failed 是最早信号）。
+- **v2.5b**：去掉 gFrag 内 `//` 注释；顺带修正非预乘语义——opa 只乘 alpha（`vec4(c.b, c.g, c.r, c.a * opa)`），RGB 不乘（渐隐不再变暗）。
+
+### P32: run21 架构级根因 — gComposeBitmap 不是全屏合成目标 (2026-09-07, v2.5b a9ad6c19)
+- **run21 (v2.5b mode 1)**：shader 修复生效（m1/probe PASS/m4/m5 全过），GLerr 探针 0 条（GL_RGBA 链无 GL 错误，BGRA_EXT 嫌疑排除）；但画面仍"一条带"且闪退。
+- **决定性日志**：`fold rect#... (cw=1280 ch=8)` —— `krkrsdl2_glc_get_bitmap_raster(gComposeBitmap)` 返回的位图**只有 8 行高**！
+- **架构真相**：`LayerManager::GetDrawTargetBitmap(rect)` 按**需求 rect** 创建/复用 DrawBuffer（LayerManager.cpp:81-117），全屏合成在 `InternalComplete2` 被拆成 8 行条带逐条 `Draw`（LayerIntf.cpp:5947）→ DrawBuffer 实际是 8 行高的临时条带目标。**真正的全屏画面**在 `BitmapLayerTreeOwner::NotifyBitmapCompleted` 逐层拷入 `BitmapNI`（完整主位图，BitmapLayerTreeOwner.cpp:96-175），SDL 直拷的就是它。
+- **结论**：glc 从 v1.0 起把"8 行条带 DrawBuffer"当作 1280×720 全屏 compose 目标 → 折叠内容只进 8 行纹理 → 屏幕底部一条带、其余 glClear 黑。**这就是所有"一条带/全黑"现象的终极根源**，与 fold 方向/字节序/缓存等次生问题叠加。
+- **正确方向**：GPU 合成目标=BitmapNI（全屏），hook 点=DrawCompleted→NotifyBitmapCompleted（层结果+坐标+混合类型+透明度），而非 Blt（条带/子层内部混合）。readback 覆盖 surface 仍须只在拿到完整主位图时执行。
+- **闪退**：可能是 8 行 FBO + quad 越界（条带 dest 坐标 > 8 行高时 Viewport/裁剪）或该帧 fold 目标行越界——下轮把 compose target 换到 BitmapNI 后一并消除。
+
+### P33: v2.6 — layer-composite 重写：hook 移到 NotifyBitmapCompleted（架构修正落地）(2026-09-07, v2.5b a9ad6c19 → v2.6 e3b0f719)
+- 按 P32 架构根因落地：**弃用 Blt/DrawBuffer 拦截（8 行条带目标），GPU 合成改走 `BasicDrawDevice::NotifyBitmapCompleted`**——引擎呈现每层最终结果（bits+宽高+行序+cliprect+x/y+type+opacity）的唯一路径，且与 SDL 直拷共用同一语义。
+- **glc_layer()**（GLComposite.cpp）：把层位图按行序（bottom-up 时逻辑顶在内存末）上传为纹理（GL_RGBA，与 E-mote 同款已验证路径），以 cliprect 为源、(x,y) 为目标、type/opacity 为混合画 quad 到**全屏 1280×720 FBO**。混合映射：ltOpaque=copy；ltAlpha/ltAddAlpha（type 2/12）=标准 alpha；ltAdditive（3）/ltAddAlpha=add。
+- **mode 1 语义切换**：try_blt 直接 decline（CPU 合成继续充当地面真值/纹理缓存），readback 的 mode 1 分支=纯 FBO→surface 读回（R/B 字节交换，nonblack 量化 + layers 计数）。gLayerCount 每帧 begin_frame 重置，纹理缓存上限 256 防泄漏。
+- 引擎侧 hook：BasicDrawDevice.cpp include GLCompositeBridge + `<cstdlib>`，NotifyBitmapCompleted 开头取 `TVPBITMAPINFO`（sdl2 类型）调 glc_layer（bottomup=biHeight>0）。
+- 预期：mode1 下 FBO 含完整图层合成 → readback 出完整画面；若颜色/方向/混合有偏差，nonblack 与快照可分辨。
+
+### P34: v2.6→v2.6b — layer 发布门控（修 launcher 黑屏）(2026-09-07, v2.6 e3b0f719 → v2.6b 146a3756)
+- **run22（v2.6 mode1）**：layer hook 生效（`readback #1 layers=1`，launcher），但**整个软件黑屏**——readback 无条件把 FBO（launcher 仅 1 层、nonblack=0.4%）发布到 surface，覆盖了 CPU 直拷的完整画面。
+- **v2.6b 门控**：mode1 readback 先读 FBO、统计 nonblack 与 layers，**仅当 `gLayerCount>=3 && nonblack>15%` 才发布到 surface**，否则 `return false`（保留 CPU 合成画面）。日志标注 `-> PUBLISH` / `-> keep CPU`。
+- 本版=观察+安全接管：GPU 合成正确性通过日志量化持续可见（nonblack/layers），任何时刻画面都不会被空 FBO 覆盖黑。
+
+### P35: v2.6b→v2.6c — PUBLISH 快照 + 层流诊断 (2026-09-07, v2.6b 146a3756 → v2.6c bc32beea)
+- **run23 (v2.6b mode1) 用户反馈："进游戏满屏花屏，但隐约能看见画面"——重大进展**：GPU 合成真正激活！launcher `layers=1 keep CPU`（门控✓不黑屏），进游戏 `readback #1 nonblack=67.3% layers=90 -> PUBLISH`、#15=30.2%、#30=33.8%——满屏内容由 GPU 合成（不再是全黑/一条带）。
+- **问题收敛到视觉细节**：满屏花屏但隐约可见 = 内容画出来了，但颜色/混合/层序有偏差。
+- **v2.6c 诊断**：PUBLISH 帧保存 `glc-layer.bmp`（修正写序）+ 首帧 layer#1 的 (xy,clip,尺寸,type,opa) 日志，用于像素级定位花屏形态（字节序/混合/顺序）。
+- 已知候选：①层位图像素是 B,G,R,A 内存序 → GL_RGBA 上传 → shader c.bgr 换回（已做）；②alpha 混合 SRC_ALPHA（非预乘，引擎同语义）；③层序=通知序（引擎合成序）；④readback R/B 交换（已做）。快照将一锤定音。
+
+### P36: v2.6d→v2.6e — bottomup 条带上传越界读 → 8 行纹波修复 (2026-09-07, v2.6d 0559fddc → v2.6e d1aecd56)
+- **run24/25 快照+诊断定案**：画面 = 8 行纹波（每 8 行完全重复同图案）。layer#2-6 诊断揭示引擎按 **8 行条带**逐条通知（`clip=0,0 1280x8 tex=1280x8`，`xy=0,8/0,16/0,24/0,32` 递增）——每条带是独立 1280×8 位图。
+- **Bug**：glc_layer 的 `pitch==w*4` 分支对 bottomup 位图整块上传——纹理行 0 取 `bits+(h-1)*pitch`（逻辑顶在内存末尾）后**连续读 h 行 = 越界**（读到条带位图外/相邻位图）→ 所有条带采样到相同内存 → 8 行纹波满屏。
+- **v2.6e**：两个分支统一**逐行重排**（bottomup 逻辑行 r 在 `bits+(h-1-r)*pitch`），与 UploadBitmap 同款；80 行斜纹 → 期待完整拼合画面。
+- run25 附带：readback #15 nonblack=95.2%（接近全屏内容）→ GPU 合成内容已接近完整，修复后画面应正确。
+
+### P37: v2.6e→v2.7 — mode5 gpuonly：跳过 CPU 侧合成（双重合成 → 单次合成）(2026-09-07, v2.7 构建中)
+- **用户反馈**：v2.6e 画面正常（条带拼合确认 ✓）但「比之前更卡」。
+- **根因（量化）**：mode1 = **双重合成**。try_blt 全量拒绝（GLComposite.cpp:672）→ 引擎 CPU 合成 90 次条带照跑；NotifyBitmapCompleted hook 又把这些条带**同时**送给 GPU quad（90 次纹理上传 + 90 quad）和 CPU surface blt（BasicDrawDevice.cpp:710-722）；末了 readback 全屏 + 逐像素 R/B 交换 + SDL 侧照旧全幅纹理上传。GPU 路径完全叠加在 CPU 路径之上 → 必然更慢。
+- **v2.7 mode5（gpu-composite-gpuonly.txt）**：
+  - try_blt: mode1+5 均拒绝（CPU 主合成仍权威，防纹理缓存依赖）。
+  - BasicDrawDevice::NotifyBitmapCompleted：mode5 下**跳过 CPU 侧条带 blt**（`!!krkrsdl2_glc_gpuonly()` gate）——GPU quad 成为唯一画面源（Phase 3 性能目标验证版）。
+  - readback gate 放宽：mode5 `gLayerCount>=1`（mode1 保持 >=3），launcher 单层也可发布。
+  - readback swap：逐字节 → **uint32 寄存器旋转**（BGRA 内存序目标），省 3.7MB 逐像素循环。
+  - readback 计时：%15 帧 log `rb=%.1fms`（SDL_GetTicks）。
+- **A/B 判据**：mode5 画面正确 ⇒ CPU 合成可整体移除 ⇒ 下一步呈现链直连 FBO 纹理（杀掉 readback+全幅上传）；模式黑/错 ⇒ CPU 侧合成是 bits 依赖 ⇒ 需 Kirikiroid2 式彻底重写。mode1 保留可回退。
+
+### P38: v2.7→v2.8 — mode5 呈现直连 FBO（消灭 readback+全幅上传）(2026-09-08, 构建中)
+- **真机验证（用户确认"游戏画面正常"）**：mode5（CPU 合成完全跳过、GPU quad 唯一画面源）画面正确 → **A/B 判据通过：CPU 合成可整体移除**。v2.7 日志证据：`marker found mode=5` + `readback #1 ... layers=1 rb=13.0ms -> PUBLISH`（launcher 单层 gate 放宽生效）。
+- **v2.8**：mode5 呈现链从「ReadPixels→surface→逐像素 swap→全幅 UpdateTexture→RenderClear→RenderCopy」改为 **glBlitFramebuffer(FBO→窗口默认帧缓冲)**：
+  - `GLProcs`/LOAD 表新增 `BlitFramebuffer`（ES3 proc，真机 Mesa 3.2 提供；模拟器探针 FAIL 自动关，不受影响）。
+  - readback mode5 分支：blit 全幅（1280x720 → drawable size，dock 模式 LINEAR 缩放），返回 true 表示 GPU 呈现完成。
+  - SDLApplication：`gpuPresented` 标记（声明在 __SWITCH__ guard 之外，非 Switch 恒 false）→ 跳过 upload + RenderClear/Copy，`SDL_RenderPresent` 只 swap；gate 不过的兜底帧走原 SDL 链（残留旧 surface）。
+  - blit 无需垂直翻转（FBO 与窗口同 GL 坐标系，readback 的 flip 已证明引擎顶行=FBO 顶行）。
+- **预期收益**：每帧砍掉 2×3.7MB CPU 往返（ReadPixels+swap 13ms 级 + upload 3.29ms）+ RenderCopy 全幅。llvmpipe 只剩：条带上传+quad 合成+1 次 blit+swap → 对白 60fps / E-mote 30fps 目标路径打通。
+- **风险**：SDL renderer context 与 GLC 独立 context 共享窗口 backbuffer（blit 在 GLC context、swap 在 SDL context）——若真机出现撕裂/黑帧，观察兜底逻辑（gate 不过→SDL 链）是否自动恢复。
+
+### P39: v2.8→v2.8b — 黑闪修复 + 统计 ReadPixels 移除（动画帧率定位）(2026-09-08, v2.8b 7739d41d)
+- **run 反馈**：「已经没有完整动画展示了，一会黑屏一下」。
+- **日志定案**（用户粘贴 00:29 日志）：① `[prof] ... total=93.6ms/f fps=10.7 compose=102.06`——E-mote/动画场景引擎 CPU 合成 102ms 是帧率主因（与 v2.5 时代 E-mote 95-145ms 吻合）；② PUBLISH（99.7%）与 keep CPU（0.2%）以 15 帧间隔交替——**黑闪机制**：gate（nonblack>15%）失败帧走 SDL 链显示**空 surface 黑屏**（mode5 的 CPU 侧已跳过，surface 从未写入）；③ rb=13-16ms = **统计用全屏 ReadPixels 每帧都在跑**（v2.8 没省掉的纯开销）。
+- **v2.8b 修复**：
+  - mode5 **不再做统计 ReadPixels**（省 13-16ms/帧）；gate 放宽为 `gLayerCount>=1` 即 blit——近空但引擎合法的帧（转场/动画间隙）blit 真实内容，不再闪现 SDL 空 surface（黑闪消失）。
+  - glc_layer 计时 `layersMs=`（每帧上传+quad 合计，%15 帧日志）——定位条带开销。
+  - mode1 原逻辑不变（保统计+gate+surface 复制）。
+- 遗留：compose 102ms（引擎 DrawBuffer CPU 合成）→ Stage 3.2（引擎合成 GPU 化/E-mote 图层直通）。
+
+### P40: v2.8b→v2.8c — launcher 黑屏修复尝试：显式 glFlush + FBO 中心探针 (2026-09-08, 16537cfb)
+- **run 反馈**：「软件都打不开了，直接黑屏」（v2.8b）。日志：launcher `layer#1` 通知正常、`-> PUBLISH`、心跳 OK——**画面没上屏**。
+- **差异定位**：v2.8（能进游戏）与 v2.8b（黑屏）launcher 首帧的唯一代码差异 = 13ms 的统计 ReadPixels 被移除。ReadPixels 有**隐式管线 flush** 副作用——软件驱动上直接 blit 可能读到未落地的 quad。**v2.8c**：blit 前后显式 `gl.Flush()`（新增 Flush proc）+ **一次性 FBO 中心 32×32 探针**（`[glc] blit verify: FBO center nonblack=X.X%`）区分「合成黑」与「上屏黑」；探针失败自动降级 SDL 链。
+- **判据**：launcher 恢复显示 → flush 命中；仍黑 → 看探针行：FBO 非黑=上屏链问题（blit/swap），FBO 黑=合成问题（glc_layer）。
+
+### P41: v2.8d→v2.8f — 呈现链三连修：shader 二次交换 / 空队列 Present / 窗口重建重验 (2026-09-08, 6de746c8)
+- **run 反馈**：启动页黑屏（但可点击进游戏）；游戏画面「窗口大小错 + RGB 通道错 + 黑闪一直在」。
+- **证据**：`present verify: WINDOW center nonblack=100.0%`（backbuffer 有内容）但屏幕黑 → **帧画进了缓冲、swap 后不可见** = SDL_RenderPresent 空队列在软件驱动上的 swap 语义不可靠。
+- **根因三件套**：
+  1. **RGB 通道错**：呈现 quad 复用合成 shader（`gl_FragColor = vec4(c.b, g, r, ...)` 无条件 R/B 交换）→ gComposeTex 已是显示序内容，被二次交换。
+  2. **黑屏**：Present 空队列时 swap 不执行/被跳过 → 已验证的 backbuffer 帧不上屏。
+  3. **窗口重建**：game 窗口切换后 verify 不重跑。
+- **v2.8f**：
+  1. shader 加 `uniform int swapRGB`（条带/合成路径=1，呈现 quad=0），DrawQuad 加参数。
+  2. 呈现后 **SDL_GL_SwapWindow(gWindow)** 直换（无条件 eglSwapBuffers），SDL 侧 gpuPresented 帧跳过 SDL_RenderPresent。
+  3. ResetGLState 清 gBlitChecked → 窗口重建后重新 verify（game 窗口的 dw/dh 与内容可见性数据）。
+- **判据**：launcher 全屏显示、游戏画面色彩正确、黑闪消失；日志第二行 verify（若 gWindow 重建）确认 game 窗口缓冲内容。
+
+### P42: v2.8f→v2.8g — 黑闪根治（gate 移除+保留帧呈现）+ 呈现尺寸改 renderer 输出 + 5 点探针 (2026-09-08, 0920a252)
+- **run 反馈**：launcher 可见了（v2.8f SDL_GL_SwapWindow 生效 ✓）；但「画面大小还是不对」「黑闪依旧」「视频播放=黑屏」。
+- **v2.8g 修复**：
+  1. **黑闪根治**：mode5 移除 layers>=1 gate——readback 每次被调用都 quad+swap。引擎无通知帧（未重绘）时 FBO 保留上帧 → 重显示上帧（画面不变），不再走 SDL 链 Clear+Copy 显示黑 surface。
+  2. **尺寸**：呈现目标尺寸改 `SDL_GetRendererOutputSize`（renderer 真实输出=EGL surface；drawable 可能报屏幕分辨率而 surface 更小 → 全屏 quad 被裁剪成 2/3 画面），失败回退 drawable。
+  3. **探针升级**：窗口重建后前 3 帧 × 5 点（center/tl/tr/bl/br 8×8）→ `present probe#N size=WxH center=..% tl=..% ...`——直接读出内容在窗口的位置分布（定案「大小不对」是尺寸还是位置问题）。
+- **视频黑屏**：视频层走 `AssignMainImage`→普通层通知（VideoOvlImpl.cpp:664-683），理论上应进 GPU 链；待 v2.8g 日志看视频帧的层数/内容分布（若视频帧层数据正常但画面黑 → 视频位图格式问题；若层数异常 → 视频路径未进 GPU 链）。Phase 4 视频为最终改造点。
+
+### P43: v2.8g→v2.8h — 大小根因定案：viewport 残留！+ FBO/窗口双采样探针 (2026-09-08, b8ebc8f1)
+- **run 证据**（probe 矩阵立功）：`present probe#1 win=1920x1080 center=100% LL=100% RL=0% LT=0% RT=0%`——内容只在**左下 1280×720** 区域（GL 坐标：左下+中心有，其余角 0）。
+- **根因**：呈现 quad 光栅化时 **viewport 仍是合成 FBO 的 1280×720**（从未设为窗口尺寸）→ 全屏 clip quad 被投射到左下 1280×720 区域 → 「画面只有 2/3/在左下」。这就是从 v2.8e 起「窗口大小不对」的物理根因（launcher 与 game 同病）。
+- **v2.8h**：呈现前 `gl.Viewport(0,0,dw,dh)`。
+- **game 窗口全黑**（帧 846 有 90 层但 probe 全 0%）：探针升级为 **FBO 中心采样 + 窗口四角**（`fbo=..%` vs `LL/RL/LT/RT`）——下一轮日志直接分出：FBO 有内容=呈现链问题（viewport/surface 尺寸），FBO 黑=合成链问题（game 窗口的 glc_layer/引擎）。
+- 视频（opmovie.wmv mode=layer）黑屏待同日数据定位（VideoOvlImpl 走 AssignMainImage→普通层通知，理论上应进 GPU 链）。
+
+### P44: v2.8h 真机收官 — GPU 合成链闭环；视频黑屏=Phase 4 null player (2026-09-08, b8ebc8f1)
+- **真机确认**：`present probe#1 win=1920x1080 fbo=100% LL=100% RL=100% LT=100% RT=100%`——**四角全内容，窗口大小正常**（用户确认「现在窗口大小正常了」）。viewport 修复（v2.8h）命中，呈现链完整：条带上传→quad 合成→全屏呈现→SDL_GL_SwapWindow 直换。
+- **视频黑屏定案（代码级）**：`VideoOvlImpl.cpp:327` Play() 的 __SWITCH__ 分支 = **null player 占位**（注释明说 "until the FFmpeg-backed Switch player is attached"）——Play 立即 SetStatusAsync(Stop)，零帧产出 → 视频层永远黑 → 「播放期间黑屏、播放完出静态画面」完全吻合。**视频=Phase 4 待办**（WA2-ns FFmpeg 管线移植），非 GPU 合成回归。
+- **Phase 3 Stage 3.1/3.2 GPU 合成状态**：mode5（gpu-composite-gpuonly.txt）全链工作。性能遗留：compose 段引擎 CPU 合成（对白 13-35ms，动画 102ms）——Stage 3.2 的主战场。
+
+### P45: Phase 4 v1 — FFmpeg 视频播放器 (2026-09-08, e2caf44b)
+- **背景**：VideoOvlImpl::Play() 的 Switch 分支是 null player 占位（零帧产出→播放期黑屏）。Phase 4 把 WA2-ns 真机验证的 FFmpeg 管线移植为 iTVPVideoOverlay 实现 `SwitchMovieOverlay`（src/core/visual/sdl2/）。
+- **复用**：WA2-ns 编译好的最小静态 FFmpeg 7.1（out/ffmpeg_switch/，同工具链同 CPU）——免去 FFmpeg 编译。
+- **管线**（对齐 WA2-ns 全部真机教训）：SDL 解码线程 4MiB 栈；自定义 AVIO（fopen sdmc + fread 循环 + AVSEEK_SIZE）；强制 asf demuxer（跳过探针）；frame_index/fps 节奏（不用流 pts）；sws_scale 在解码线程（SWS_POINT→**BGRA**+负 stride bottom-up 直写引擎 32bpp 位图双缓冲）；事件 SPSC 环形（EC_UPDATE per 帧 / EC_COMPLETE EOF）；停播=quit+join+codec/avio 顺序释放。
+- **接入**：VideoOvlImpl::Open/Close/Play/Stop/Pause/Rewind 的 __SWITCH__ 分支创建/驱动播放器并走完整 Bitmap+SetVideoBuffer 流程；krmovie.h 补非 Win32 兼容层（__stdcall/HWND/RECT/BYTE/LONG_PTR/long long、tGetAPI typedef 包 win32）。
+- **v1 限制**：无声（音频 v2 待接 TVP 音频链）；Rewind=全量重开（无 seek）。
+- **验证点**：真机 OP 视频应显示画面（帧率=解码速度）→ 播放完 EC_COMPLETE → 游戏继续。
+
+### P46: Phase 4 v1.1 — Switch 视频事件桥、双缓冲与线程生命周期修复 (2026-09-08, da68132a)
+- **静态审计发现**：P45 虽能编译链接，但 `VideoOvlImpl::WndProc` 的 `EC_UPDATE`/`AssignMainImage` 仍只在 Win32 条件内，Switch 解码帧无人消费；解码器始终写 `buffers_[0]` 却交替发布 0/1；线程被 detach 后 Close 最多等待 1 秒即释放 FFmpeg 上下文，存在并发释放风险。
+- **事件链修复**：按 Kirikiroid2 的非 Win32 契约，解码线程经 `NativeEventQueue` 发布一个合并的 `WM_GRAPHNOTIFY`，SDL 主线程排空播放器 SPSC 事件并执行原生 KRKR layer 更新；队列补 `Clear/Deallocate`，对象销毁前移除延迟通知。
+- **帧与生命周期修复**：每帧写入 `frame_index & 1` 对应槽后再以 release 语义发布；SDL 解码线程保持 joinable，Stop/Close 先 join 再释放 codec/AVIO/sws；暂停/恢复会修正墙钟，EOF 延迟到末帧时刻后发送 `EC_COMPLETE`，flush 帧也走正常发布路径。
+- **兼容补齐**：Switch 初始化 Bitmap 指针；启用 layer visible、帧号/FPS/总时长、原始视频尺寸和视频流数量查询；自定义 AVIO 保存并正确释放 context，seek 增加边界/实际位置校验。
+- **诊断**：`[movie] published frame=... slot=...` 证明解码产出；`[video] applied frame=... slot=... layers=...` 证明主线程已把帧交给层；`[movie] complete frames=...` 证明完成事件闭环。
+- **本地验证**：`build_nro.sh` 完整编译、链接、打包成功；NRO MD5 `da68132a3b92706c8892f9852356e7e1`。真机画面、方向、颜色、节奏和完成事件待验证；音频仍不在本版范围。
+
+### P47: Phase 4 v1.2 — 视频改走 KRKR 存储流，支持 XP3/自动路径 (2026-09-08, 48e01d47)
+- **真机日志定案**：`[opened] opmovie.wmv` 与 `[video] open stream=opmovie.wmv size=25177361` 已证明 KRKR 存储层成功定位视频；紧接着播放器报 `[movie] open failed (fopen) errno=2`，说明失败发生在把存储名二次猜成原生文件路径后。此时尚无 `[movie] ready`、解码线程或发布帧日志，屏幕短暂开头后转黑是 `movie.tjs open` 抛出 `Invalid video size` 的结果，不是渲染链回归。
+- **修复**：对齐 KRKRZ Win32 的 IStream 接法，`VideoOvlImpl` 将已由 `TVPCreateStream` 解析成功的同一条 `tTJSBinaryStream` 交给 `SwitchMovieOverlay`；FFmpeg 自定义 AVIO 的 read/seek/size 全部直接调用 KRKR 流，因此松散文件、XP3/7z 条目及 autopath 命中使用同一语义，不再拼 `krkrsdl2_game_dir` 或调用 `fopen`。
+- **生命周期与边界**：播放器无条件接管并在 FFmpeg 上下文之后释放存储流；AVIO 缓冲改为规范的 `av_malloc` 所有权；EOF 返回 `AVERROR_EOF`；seek 校验有符号溢出、范围与实际落点；Rewind 重新创建同名 KRKR 存储流。
+- **本地验证**：`build_nro.sh` 完整编译、链接、打包成功；唯一产物 `build-switch/krkrsdl2.nro`，大小 26,931,617 字节，MD5 `48e01d47ed27a27ed89bd4969dc7df6f`，SHA-256 `8d8096c73019641af5b93a9db0e318648ca4a8bd39a3f095e65330c1981b8ded`。真机应先出现 `[movie] storage ready` 和 `[movie] ready`；画面、节奏、完成事件仍以真机为准，视频音频仍未实现。

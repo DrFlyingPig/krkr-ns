@@ -31,10 +31,9 @@ public:
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
-    // KRKR-ns Phase 2: full-target raster self-test (rejects drivers whose
-    // triangle rasterization clamps to a fraction of the FBO, e.g. the
-    // Nextendo emulator's software GLES which squeezed meshes into the left
-    // 320x720 of a 1280x720 target).
+    // Full-target raster/readback self-test.  It keeps normal full reads on a
+    // conforming driver and automatically selects a verified tiled readback
+    // on compatibility renderers that truncate large rows.
     bool selfTest();
 };
 }

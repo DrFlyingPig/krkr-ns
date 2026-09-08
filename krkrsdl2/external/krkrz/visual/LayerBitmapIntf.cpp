@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "tjsCommHead.h"
+#include "GLCompositeBridge.h"
+
 
 #include "DebugIntf.h"
 #include "LayerBitmapIntf.h"
@@ -21,8 +23,7 @@
 #include "tjsUtils.h"
 #include "ThreadIntf.h"
 #include "ResampleImage.h"
-
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(KRKRNS_RENDER_CAPTURE_DIAGNOSTICS)
 // KRKR-ns diagnostic: append large-blit parameters to an SD trace file so a
 // partial-scene defect can be attributed to the exact draw call. Capped.
 #include <cstdarg>
@@ -40,6 +41,8 @@ static void KrkrBltTrace(const char* fmt, ...)
 	fputc('\n', f);
 	fclose(f);
 }
+#else
+static inline void KrkrBltTrace(const char*, ...) {}
 #endif
 
 //#define TVP_FORCE_BILINEAR
@@ -237,6 +240,7 @@ bool tTVPBaseBitmap::SetPointMask(tjs_int x, tjs_int y, tjs_int mask)
 //---------------------------------------------------------------------------
 bool tTVPBaseBitmap::Fill(tTVPRect rect, tjs_uint32 value)
 {
+	krkrsdl2_glc_bump_version(this);
 	// fill target rectangle represented as "rect", with color ( and opacity )
 	// passed by "value".
 	// value must be : 0xAARRGGBB (for 32bpp) or 0xII ( for 8bpp )
@@ -686,6 +690,11 @@ void tTVPBaseBitmap::PartialFillMask(const PartialFillMaskParam *param)
 bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tjs_int plane)
 {
+	// KRKR-ns Phase 3: GPU composite interception (32bpp main copies only)
+	if(Is32BPP() && plane != TVP_BB_COPY_MASK &&
+		krkrsdl2_glc_try_copy(this, x, y, ref, &refrect))
+		return true;
+	krkrsdl2_glc_bump_version(this);
 	// copy bitmap rectangle.
 	// TVP_BB_COPY_MAIN in "plane" : main image is copied
 	// TVP_BB_COPY_MASK in "plane" : mask image is copied
@@ -806,7 +815,6 @@ bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
           TVPExecThreadTask(&PartialCopyRectEntry, TVP_THREAD_PARAM(param));
         }
         TVPEndThreadTask();
-
         return true;
 }
 
@@ -1131,6 +1139,11 @@ bool tTVPBaseBitmap::Copy9Patch( const tTVPBaseBitmap *ref, tTVPRect& margin )
 bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tTVPBBBltMethod method, tjs_int opa, bool hda)
 {
+	// KRKR-ns Phase 3: GPU composite — direct-to-compose blits become
+	// textured quads; everything else keeps the proven CPU path.
+	if(krkrsdl2_glc_try_blt(this, x, y, ref, &refrect, (tjs_int)method, opa, hda))
+		return true;
+	krkrsdl2_glc_bump_version(this);
 	// blt src bitmap with various methods.
 
 	// hda option ( hold destination alpha ) holds distination alpha,
@@ -1246,7 +1259,6 @@ bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
           TVPExecThreadTask(&PartialBltEntry, TVP_THREAD_PARAM(param));
         }
         TVPEndThreadTask();
-
         return true;
 }
 
@@ -1916,6 +1928,7 @@ bool tTVPBaseBitmap::StretchBlt(tTVPRect cliprect,
 		tTVPRect refrect, tTVPBBBltMethod method, tjs_int opa,
 			bool hda, tTVPBBStretchType mode, tjs_real typeopt )
 {
+	krkrsdl2_glc_bump_version(this);
 	// do stretch blt
 	// stFastLinear is enabled only in following condition:
 	// -------TODO: write corresponding condition--------
@@ -4224,5 +4237,16 @@ void tTVPBaseBitmap::ConvertAlphaToAddAlpha()
 }
 //---------------------------------------------------------------------------
 
-
+// KRKR-ns Phase 3: engine-side raster accessor for the GL composite module.
+const void* krkrsdl2_glc_get_bitmap_raster(const void* bitmap,
+                                           int* w, int* h, int* pitch, int* bpp)
+{
+	const tTVPBaseBitmap* b = static_cast<const tTVPBaseBitmap*>(bitmap);
+	if(!b) return nullptr;
+	if(w) *w = b->GetWidth();
+	if(h) *h = b->GetHeight();
+	if(pitch) *pitch = b->GetPitchBytes();
+	if(bpp) *bpp = (int)b->GetBPP();
+	return b->GetScanLine(0);
+}
 

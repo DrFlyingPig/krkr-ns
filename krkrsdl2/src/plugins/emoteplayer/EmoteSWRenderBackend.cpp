@@ -1081,8 +1081,8 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
                 if (minBand < 48) bandCount = std::max(1, totalRows / 48);
             }
         }
-        // KRKR-ns Phase 1b diag: does the row-band pool actually engage on
-        // the device? (device log showed drawT=4 yet compose barely moved)
+        #if defined(KRKRNS_EMOTE_VERBOSE_DIAGNOSTICS)
+        // Optional row-band diagnostics for profiling the CPU fallback.
         static Uint32 diagCalls = 0, diagTall = 0, diagBanded = 0;
         static Uint64 diagRows = 0, diagBands = 0;
         static bool diagFirstLogged = false;
@@ -1094,6 +1094,7 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
             KRKRNS_LOG("[emote] band first: rows=%d bandCount=%d threadNum=%d",
                        totalRows, bandCount, TVPGetThreadNum());
         }
+        #endif
         if (bandCount <= 1)
         {
             SwRasterizeBand(job);
@@ -1111,6 +1112,7 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
             }
             TVPEndThreadTask();
         }
+        #if defined(KRKRNS_EMOTE_VERBOSE_DIAGNOSTICS)
         if (diagCalls % 240 == 0)
         {
             KRKRNS_LOG("[emote] band diag: calls=%u tall=%u banded=%u rAvg=%.0f bAvg=%.1f",
@@ -1118,6 +1120,7 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
                        (double)diagRows / diagCalls,
                        diagBanded ? (double)diagBands / diagBanded : 0.0);
         }
+        #endif
         (void)f01; (void)f12; (void)f20; (void)tu0; (void)tv0;
         (void)df01_dx; (void)df12_dx; (void)df20_dx; (void)df01_dy; (void)df12_dy; (void)df20_dy;
     }

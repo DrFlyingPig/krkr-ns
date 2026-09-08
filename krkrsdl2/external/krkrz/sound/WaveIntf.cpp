@@ -795,6 +795,9 @@ tTVPWaveDecoder * tTVPWDC_RIFFWave::Create(const ttstr & storagename,
 #ifdef TVP_OPUS_DECODER_IMPLEMENT
 extern void TVPRegisterOpusDecoderCreator();
 #endif
+#ifdef TVP_VORBIS_DECODER_IMPLEMENT
+extern void TVPRegisterVorbisWaveDecoderCreator();
+#endif
 //---------------------------------------------------------------------------
 // tTVPWaveDecoder interface management
 //---------------------------------------------------------------------------
@@ -808,6 +811,11 @@ struct tTVPWaveDecoderManager
 	{
 		TVPWaveDecoderManagerAvail = true;
 		TVPRegisterWaveDecoderCreator(&RIFFWaveDecoderCreator);
+#ifdef TVP_VORBIS_DECODER_IMPLEMENT
+		// Keep Opus last: decoder lookup runs in reverse registration order,
+		// and many Kirikiroid packages use .ogg for both codecs.
+		TVPRegisterVorbisWaveDecoderCreator();
+#endif
 #ifdef TVP_OPUS_DECODER_IMPLEMENT
 		TVPRegisterOpusDecoderCreator();
 #endif

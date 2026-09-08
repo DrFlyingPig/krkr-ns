@@ -58,7 +58,6 @@ bool TVPFreeUnusedLayerCache = false;
 	// (layer cache is not freed until system compact event if this is false)
 //---------------------------------------------------------------------------
 
-
 //---------------------------------------------------------------------------
 // temporary bitmap management
 //---------------------------------------------------------------------------
@@ -295,7 +294,16 @@ void TVPTempBitmapHolderRelease()
 //---------------------------------------------------------------------------
 // global options
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+// The legacy 8-scanline splitter was tuned for old single-core cache
+// behaviour.  On Switch it turns one E-mote invalidation into hundreds of
+// tiny one-thread blend batches, defeating the four-core adaptive draw pool.
+// Keep command-line -gsplit overrides intact, but use one complete dirty
+// rectangle by default so the bitmap kernels can split useful work themselves.
+tTVPGraphicSplitOperationType TVPGraphicSplitOperationType = gsotNone;
+#else
 tTVPGraphicSplitOperationType TVPGraphicSplitOperationType = gsotSimple;
+#endif
 bool TVPDefaultHoldAlpha = false;
 //---------------------------------------------------------------------------
 
@@ -6106,7 +6114,6 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 
 	InCompletion = false;
 	AfterCompletion();
-
 }
 //---------------------------------------------------------------------------
 tTVPBaseBitmap * tTJSNI_BaseLayer::Complete(const tTVPRect & rect)

@@ -7,7 +7,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <set>
+#ifdef __SWITCH__
+#include <arm_neon.h>
+#endif
 
 #include "tjsCommHead.h"
 #include "LayerIntf.h"
@@ -39,8 +44,11 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                                     void* target,
                                     tTJSNI_BaseLayer* layer,
                                     int sourceWidth,
-                                    int sourceHeight)
+                                    int sourceHeight,
+                                    tTVPRect* dirtyRect)
 {
+    if (dirtyRect)
+        dirtyRect->clear();
     if (!renderer || !target || !layer || sourceWidth <= 0 || sourceHeight <= 0)
         return false;
 
@@ -67,15 +75,10 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
 
     static bool loggedLayout = false;
     static bool loggedFailure = false;
-    static int dumpCount = 0;
     static int lastLoggedW = -1, lastLoggedH = -1;
     if (canCopy)
     {
-        // KRKR-ns diagnostic: log copies whose dimensions change and save the
-        // first few render-target readbacks, so a partial render can be
-        // attributed to the FBO content vs the copy vs the layer.
-        if (!loggedLayout || sourceWidth != lastLoggedW || sourceHeight != lastLoggedH ||
-            dumpCount < 5)
+        if (!loggedLayout || sourceWidth != lastLoggedW || sourceHeight != lastLoggedH)
         {
             TVPConsoleLog("target-to-layer copy src=%dx%d pitch=%d dst=%ux%u pitch=%d copy=%dx%d",
                           sourceWidth, sourceHeight, sourcePitch,
@@ -85,6 +88,8 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
             lastLoggedW = sourceWidth;
             lastLoggedH = sourceHeight;
         }
+        #if defined(__SWITCH__) && defined(KRKRNS_EMOTE_CAPTURE_DIAGNOSTICS)
+        static int dumpCount = 0;
         if (dumpCount < 5)
         {
             dumpCount++;
@@ -98,7 +103,11 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                 SDL_FreeSurface(shot);
             }
         }
-        const Uint64 swapStart = SDL_GetPerformanceCounter();
+        #endif
+        int dirtyLeft = copyWidth;
+        int dirtyTop = copyHeight;
+        int dirtyRight = 0;
+        int dirtyBottom = 0;
         for (int y = 0; y < copyHeight; ++y)
         {
             uint8_t* destinationRow =
@@ -107,25 +116,67 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                 source + static_cast<std::ptrdiff_t>(y) * sourceStride;
             // The E-mote backend is RGBA, while a 32-bpp Kirikiri Layer is
             // BGRA in memory.  Preserve G/A and exchange R/B at the boundary.
-            for (int x = 0; x < copyWidth; ++x)
+            // Compare against the previous layer at the same time so Kirikiri
+            // only recomposes the pixels that actually changed.  This also
+            // catches transparent pixels left behind when a sprite moves.
+            int rowLeft = copyWidth;
+            int rowRight = 0;
+            int x = 0;
+#ifdef __SWITCH__
+            // Convert four RGBA pixels to Kirikiri BGRA at once.  The prior
+            // memcpy-per-pixel loop was measurable after GPU rendering became
+            // fast, especially when several full-stage E-mote layers coexist.
+            static const uint8_t swizzleBytes[16] = {
+                2, 1, 0, 3, 6, 5, 4, 7,
+                10, 9, 8, 11, 14, 13, 12, 15};
+            const uint8x16_t swizzle = vld1q_u8(swizzleBytes);
+            for (; x + 4 <= copyWidth; x += 4)
             {
-                destinationRow[x * 4 + 0] = sourceRow[x * 4 + 2];
-                destinationRow[x * 4 + 1] = sourceRow[x * 4 + 1];
-                destinationRow[x * 4 + 2] = sourceRow[x * 4 + 0];
-                destinationRow[x * 4 + 3] = sourceRow[x * 4 + 3];
+                const uint8x16_t rgba = vld1q_u8(sourceRow + static_cast<size_t>(x) * 4u);
+                const uint8x16_t bgra = vqtbl1q_u8(rgba, swizzle);
+                const uint8x16_t old = vld1q_u8(destinationRow + static_cast<size_t>(x) * 4u);
+                const uint32x4_t changed = vmvnq_u32(vceqq_u32(
+                    vreinterpretq_u32_u8(old), vreinterpretq_u32_u8(bgra)));
+                const bool c0 = vgetq_lane_u32(changed, 0) != 0;
+                const bool c1 = vgetq_lane_u32(changed, 1) != 0;
+                const bool c2 = vgetq_lane_u32(changed, 2) != 0;
+                const bool c3 = vgetq_lane_u32(changed, 3) != 0;
+                if (c0 || c1 || c2 || c3)
+                {
+                    if (rowLeft == copyWidth)
+                        rowLeft = x + (c0 ? 0 : c1 ? 1 : c2 ? 2 : 3);
+                    rowRight = x + (c3 ? 4 : c2 ? 3 : c1 ? 2 : 1);
+                }
+                vst1q_u8(destinationRow + static_cast<size_t>(x) * 4u, bgra);
+            }
+#endif
+            auto* destinationPixels = reinterpret_cast<std::uint32_t*>(destinationRow);
+            const auto* sourcePixels = reinterpret_cast<const std::uint32_t*>(sourceRow);
+            for (; x < copyWidth; ++x)
+            {
+                const std::uint32_t sourcePixel = sourcePixels[x];
+                const std::uint32_t convertedPixel =
+                    (sourcePixel & 0xff00ff00u) |
+                    ((sourcePixel & 0x000000ffu) << 16) |
+                    ((sourcePixel & 0x00ff0000u) >> 16);
+                if (destinationPixels[x] != convertedPixel)
+                {
+                    destinationPixels[x] = convertedPixel;
+                    if (rowLeft == copyWidth)
+                        rowLeft = x;
+                    rowRight = x + 1;
+                }
+            }
+            if (rowLeft < rowRight)
+            {
+                dirtyLeft = std::min(dirtyLeft, rowLeft);
+                dirtyTop = std::min(dirtyTop, y);
+                dirtyRight = std::max(dirtyRight, rowRight);
+                dirtyBottom = y + 1;
             }
         }
-        {
-            static int copyProf = 0;
-            if (++copyProf >= 60)
-            {
-                copyProf = 0;
-                const double ms = (SDL_GetPerformanceCounter() - swapStart) * 1000.0 /
-                                  SDL_GetPerformanceFrequency();
-                KRKRNS_LOG("[emote] target-to-layer copy %.2fms (%dx%d)", ms, copyWidth,
-                           copyHeight);
-            }
-        }
+        if (dirtyRect && dirtyLeft < dirtyRight && dirtyTop < dirtyBottom)
+            *dirtyRect = tTVPRect(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
     }
     else if (!loggedFailure)
     {
@@ -542,8 +593,10 @@ void D3DAdaptor::captureCanvas(iTJSDispatch2* targetLayer)
         renderer->UnlockTarget(_target);
         return;
     }
-    if (CopyRenderTargetToLayer(renderer, _target, ths, _width, _height))
-        ths->Update();
+    tTVPRect dirtyRect;
+    if (CopyRenderTargetToLayer(renderer, _target, ths, _width, _height, &dirtyRect) &&
+        !dirtyRect.is_empty())
+        ths->Update(dirtyRect);
 }
 void D3DAdaptor::unloadUnusedTextures()
 {
@@ -978,6 +1031,7 @@ void EmotePlayer::progress(tjs_real mstime)
         if (_playing)
         {
             const tjs_real divisor = speedRatio > 0.0 ? speedRatio : 20.0;
+#if defined(KRKRNS_EMOTE_VERBOSE_DIAGNOSTICS)
             if (progressLogCount < 8)
             {
                 TVPConsoleLog("progress dtMs=%.3f divisor=%.3f frameBefore=%.3f",
@@ -985,6 +1039,7 @@ void EmotePlayer::progress(tjs_real mstime)
                               static_cast<double>(clockPassed));
                 ++progressLogCount;
             }
+#endif
             clockPassed += mstime / divisor;
         }
         std::vector<emoteRender> empty;
@@ -1117,8 +1172,11 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
         if (!withD3DAdaptor)
         {
             // 回读 CPU 像素并交给图层（GL 后端经 glReadPixels，软渲染后端零拷贝）
-            if (CopyRenderTargetToLayer(renderer, target, ths, _width, _height))
-                ths->Update();
+            tTVPRect dirtyRect;
+            if (CopyRenderTargetToLayer(renderer, target, ths, _width, _height,
+                                        &dirtyRect) &&
+                !dirtyRect.is_empty())
+                ths->Update(dirtyRect);
         }
         else
         {
@@ -1228,13 +1286,6 @@ void EmotePlayer::setDrawAffineTranslateMatrix(
 {
     if (emtEngine._mainfile != nullptr)
     {
-        static int affineLogs = 0;
-        if (affineLogs < 20)
-        {
-            affineLogs++;
-            TVPConsoleLog("[emote] setAffine a=%.4f b=%.4f c=%.4f d=%.4f tx=%d ty=%d", a, b, c,
-                          d, tx, ty);
-        }
         _affineTrans = glm::mat4(a, -c, 0.0f, 0.0f, -b, d, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, tx,
                                  ty, 0.0f, 1.0f);
         updateTransMat();
@@ -1572,15 +1623,6 @@ void EmotePlayer::updateTransMat()
     _renderMethod.currAngle = currAngle;
     _renderMethod.currZx = currZx;
     _renderMethod.currZy = currZy;
-    static int transLogs = 0;
-    if (transLogs < 20)
-    {
-        transLogs++;
-        TVPConsoleLog(
-            "[emote] transMat limit w=%.1f h=%.1f ox=%.1f oy=%.1f zMax=%.1f currZx=%.4f Zy=%.4f cx=%.1f cy=%.1f",
-            _limitArea.width, _limitArea.height, _limitArea.originX, _limitArea.originY,
-            _limitArea.zMax, currZx, currZy, currCoordx, currCoordy);
-    }
 }
 void EmotePlayer::ResetDrawArea(tjs_int width, tjs_int height)
 {

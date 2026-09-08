@@ -101,8 +101,11 @@ struct EmoteGLRenderBackend::Impl
     Image* mask = nullptr;
     int blend = 0;
     float color[4] = {};
-    uint64_t drawTicks = 0, readTicks = 0, drawCalls = 0;
-    unsigned frames = 0;
+    // 0 means one normal full-rectangle glReadPixels call.  Some Switch
+    // compatibility renderers correctly rasterize the whole FBO but cap a
+    // single readback row, so IsAvailable() can select a verified tile width.
+    int readTileWidth = 0;
+    std::vector<uint8_t> readScratch;
 
     void end()
     {
@@ -238,6 +241,44 @@ struct EmoteGLRenderBackend::Impl
         BindFramebuffer(GL_FRAMEBUFFER, image->fbo);
         Viewport(0, 0, image->width, image->height);
     }
+    void readPixels(Image* image, uint8_t* destination, int tileWidth,
+                    bool clearBeforeRead = false)
+    {
+        if (!image || !image->target || !destination)
+            throw std::runtime_error("Invalid E-mote readback target");
+        bind(image);
+        PixelStorei(GL_PACK_ALIGNMENT, 1);
+        const size_t rowBytes = size_t(image->width) * 4;
+        if (clearBeforeRead)
+            std::memset(destination, 0, rowBytes * image->height);
+
+        if (tileWidth <= 0 || tileWidth >= image->width)
+        {
+            ReadPixels(0, 0, image->width, image->height,
+                       GL_RGBA, GL_UNSIGNED_BYTE, destination);
+            return;
+        }
+
+        // Do not rely on GL_PACK_ROW_LENGTH (not core in GLES2).  Read each
+        // vertical tile into a tightly packed scratch buffer, then scatter its
+        // rows into the full-width CPU image.  This also avoids trusting the
+        // file extension, window size, or a renderer-specific byte limit.
+        for (int x = 0; x < image->width; x += tileWidth)
+        {
+            const int width = std::min(tileWidth, image->width - x);
+            const size_t tileRowBytes = size_t(width) * 4;
+            const size_t tileBytes = tileRowBytes * image->height;
+            readScratch.resize(tileBytes);
+            if (clearBeforeRead)
+                std::fill(readScratch.begin(), readScratch.end(), 0);
+            ReadPixels(x, 0, width, image->height,
+                       GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+            for (int y = 0; y < image->height; ++y)
+                std::memcpy(destination + size_t(y) * rowBytes + size_t(x) * 4,
+                            readScratch.data() + size_t(y) * tileRowBytes,
+                            tileRowBytes);
+        }
+    }
     void* create(int width, int height, bool renderTarget)
     {
         if (width <= 0 || height <= 0) return nullptr;
@@ -323,10 +364,11 @@ bool EmoteGLRenderBackend::IsAvailable()
 
 bool EmoteGLRenderBackend::selfTest()
 {
-    // Draw a full-target quad through the same public API the compositor
-    // uses, then verify every corner received the expected opaque red. A
-    // driver that clamps rasterization to part of the FBO (the emulator's
-    // software GLES chops meshes to the left 320x720) fails the corners.
+    // Draw a full-target quad through the same public API the compositor uses.
+    // Verify rasterization with independent corner reads, then choose the
+    // largest readback width that reconstructs the complete target.  A tiled
+    // readback is a correctness workaround for compatibility renderers that
+    // return only the first part of each row for a large single call.
     const int W = 1280, H = 720;
     void* target = CreateTarget(W, H);
     void* tex = CreateTexture(1, 1);
@@ -355,8 +397,10 @@ bool EmoteGLRenderBackend::selfTest()
     std::memcpy(savedColor, impl->color, sizeof(savedColor));
     const float white[4] = {1.f, 1.f, 1.f, 1.f};
     std::memcpy(impl->color, white, sizeof(white));
-    bool ok = true;
-    uint8_t corners[4][4];
+    bool cornersOk = true;
+    bool readbackOk = false;
+    uint8_t corners[4][4] = {};
+    double selectedRedFrac = 0.0;
     try
     {
         DrawMesh(verts, 4, idx, 6, tex, 1.0f);
@@ -366,31 +410,41 @@ bool EmoteGLRenderBackend::selfTest()
         {
             corners[p][0] = corners[p][1] = corners[p][2] = corners[p][3] = 0;
             impl->ReadPixels(probes[p][0], probes[p][1], 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, corners[p]);
-            if (corners[p][0] < 200 || corners[p][3] < 200) ok = false;
+            if (corners[p][0] < 200 || corners[p][3] < 200) cornersOk = false;
         }
-        // Full-rect readback check: the emulator's software GLES delivers
-        // only the left 320x720 of a full-surface ReadPixels (its 1280x720
-        // readbacks truncate — FBO snapshots show content confined to
-        // x:0-316), while single-pixel corner reads still work. The real
-        // compositor consumes full-rect readbacks, so verify the whole
-        // buffer actually came back.
         std::vector<uint8_t> full((size_t)W * H * 4);
-        impl->ReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, full.data());
-        unsigned redPx = 0;
-        for (size_t i = 0; i < full.size(); i += 4)
+        const int candidates[] = {W, 512, 320, 256, 128, 64};
+        int previous = -1;
+        for (int candidate : candidates)
         {
-            if (full[i] > 200 && full[i + 3] > 200) redPx++;
+            candidate = std::min(candidate, W);
+            if (candidate == previous) continue;
+            previous = candidate;
+            const int mode = candidate == W ? 0 : candidate;
+            impl->readPixels(impl->find(target), full.data(), mode, true);
+            unsigned redPx = 0;
+            for (size_t i = 0; i < full.size(); i += 4)
+                if (full[i] > 200 && full[i + 3] > 200) redPx++;
+            selectedRedFrac = (double)redPx / ((double)W * H);
+            KRKRNS_LOG("[emote] GL readback probe %s%d fullRed=%.1f%%",
+                       mode ? "tile=" : "full=", mode ? mode : W,
+                       selectedRedFrac * 100.0);
+            if (selectedRedFrac >= 0.90)
+            {
+                impl->readTileWidth = mode;
+                readbackOk = true;
+                break;
+            }
         }
-        const double redFrac = (double)redPx / ((double)W * H);
-        if (redFrac < 0.90) ok = false;
-        if (!ok)
-            KRKRNS_LOG("[emote] GL probe readback: corner_px=%d%d%d%d fullRed=%.1f%%",
+        if (!cornersOk || !readbackOk)
+            KRKRNS_LOG("[emote] GL probe readback: corner_px=%d%d%d%d bestRed=%.1f%%",
                        corners[0][0], corners[1][0], corners[2][0], corners[3][0],
-                       redFrac * 100.0);
+                       selectedRedFrac * 100.0);
     }
     catch (...)
     {
-        ok = false;
+        cornersOk = false;
+        readbackOk = false;
     }
     std::memcpy(impl->color, savedColor, sizeof(savedColor));
     impl->blend = savedBlend;
@@ -399,8 +453,10 @@ bool EmoteGLRenderBackend::selfTest()
     DestroyTexture(tex);
     const char* rend = (const char*)impl->GetString(GL_RENDERER);
     const char* ver = (const char*)impl->GetString(GL_VERSION);
-    KRKRNS_LOG("[emote] GL probe %s x=%d y=%d corners=%s %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x renderer=%s version=%s",
-               ok ? "PASS" : "FAIL", W, H, ok ? "red" : "MISMATCH",
+    const bool ok = cornersOk && readbackOk;
+    KRKRNS_LOG("[emote] GL probe %s x=%d y=%d corners=%s readback=%s%d %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x renderer=%s version=%s",
+               ok ? "PASS" : "FAIL", W, H, cornersOk ? "red" : "MISMATCH",
+               impl->readTileWidth ? "tile=" : "full=", impl->readTileWidth ? impl->readTileWidth : W,
                corners[0][0], corners[0][1], corners[0][2], corners[0][3],
                corners[1][0], corners[1][1], corners[1][2], corners[1][3],
                corners[2][0], corners[2][1], corners[2][2], corners[2][3],
@@ -432,17 +488,7 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
     if (!target || !target->target) return nullptr;
     impl->bind(target);
     pitch = target->width * 4;
-    const uint64_t start = SDL_GetPerformanceCounter();
-    impl->PixelStorei(GL_PACK_ALIGNMENT, 1);
-    impl->ReadPixels(0, 0, target->width, target->height, GL_RGBA, GL_UNSIGNED_BYTE, target->pixels.data());
-    impl->readTicks += SDL_GetPerformanceCounter() - start;
-    if (++impl->frames == 60)
-    {
-        const double scale = 1000.0 / SDL_GetPerformanceFrequency() / impl->frames;
-        KRKRNS_LOG("[emote] GL profile frames=%u draw=%.2fms readback=%.2fms calls=%.1f",
-            impl->frames, impl->drawTicks * scale, impl->readTicks * scale, double(impl->drawCalls) / impl->frames);
-        impl->frames = 0; impl->drawTicks = impl->readTicks = impl->drawCalls = 0;
-    }
+    impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
     // Preserve the upstream framebuffer's RGBA/alpha equations exactly.
     // Row 0 maps to logical row 0 of E-mote's clip-space mesh at the Layer bridge.
     return target->pixels.data();
@@ -472,11 +518,11 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
     if (!image || !gl.target || gl.blend == 6 || !vertices || !indices || count <= 0 || indexCount <= 0) return;
     for (int i = 0; i < indexCount; ++i)
         if (indices[i] >= count) throw std::runtime_error("E-mote mesh index out of bounds");
-    const uint64_t start = SDL_GetPerformanceCounter();
     gl.bind(gl.target);
     gl.UseProgram(gl.program);
     gl.BindBuffer(GL_ARRAY_BUFFER, gl.vbo);
     gl.BufferData(GL_ARRAY_BUFFER, size_t(count) * 4 * sizeof(float), vertices, GL_STREAM_DRAW);
+#if defined(KRKRNS_EMOTE_VERBOSE_DIAGNOSTICS)
     {
         // KRKR-ns diagnostic: actual clip-space vertex bounds per mesh draw.
         static int boundsLogs = 0;
@@ -544,6 +590,7 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
                        gl.target->width, gl.target->height, gl.target->fbo);
         }
     }
+#endif
     gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl.ibo);
     gl.BufferData(GL_ELEMENT_ARRAY_BUFFER, size_t(indexCount) * sizeof(uint16_t), indices, GL_STREAM_DRAW);
     gl.EnableVertexAttribArray(0); gl.EnableVertexAttribArray(1);
@@ -574,7 +621,7 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
         break;
     }
     gl.DrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_SHORT, nullptr);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_CAPTURE_DIAGNOSTICS)
     // KRKR-ns diagnostic: snapshot the target after each of the first draws so
     // the exact call that produces (or destroys) visible content is identified.
     static int fboSnaps = 0;
@@ -598,7 +645,5 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
         }
     }
 #endif
-    gl.drawTicks += SDL_GetPerformanceCounter() - start;
-    ++gl.drawCalls;
 }
 }

@@ -36,8 +36,76 @@
 
 /* Mixer Thread */
 
+#ifdef __SWITCH__
+typedef struct FAudioSwitchAudioState
+{
+	FAudio *audio;
+	SDL_AudioDeviceID device;
+	float *mixBuffer;
+	uint32_t sampleCapacity;
+	int priorityConfigured;
+} FAudioSwitchAudioState;
+#endif
+
 static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
 {
+#ifdef __SWITCH__
+	FAudioSwitchAudioState *state = (FAudioSwitchAudioState*) userdata;
+	FAudio *audio = state->audio;
+	uint32_t sampleCount = ((uint32_t) len) / sizeof(int16_t);
+	uint32_t i;
+
+	/* devkitPro's SDL2 Switch pthread backend maps HIGH to 0x2B, but maps
+	 * TIME_CRITICAL (which SDL_RunAudio requests) to the low/preemptive 0x3B
+	 * priority.  Correct the priority from inside the actual mixer thread;
+	 * doing this during device creation would modify the caller instead. */
+	if (!state->priorityConfigured)
+	{
+		int priorityResult;
+		state->priorityConfigured = 1;
+		priorityResult = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
+		SDL_Log(
+			"FAudio Switch mixer priority HIGH: %s",
+			priorityResult == 0 ? "ok" : SDL_GetError()
+		);
+	}
+
+	FAudio_zero(stream, len);
+	if (!audio->active || state->mixBuffer == NULL)
+	{
+		return;
+	}
+
+	/* The Switch SDL2 backend accepts PCM S16 only.  Keep FAudio's mixer in
+	 * float, then hand audout one native S16 quantum directly without an
+	 * additional SDL_AudioStream conversion stage. */
+	FAudio_zero(
+		state->mixBuffer,
+		state->sampleCapacity * sizeof(float)
+	);
+	FAudio_INTERNAL_UpdateEngine(audio, state->mixBuffer);
+
+	if (sampleCount > state->sampleCapacity)
+	{
+		sampleCount = state->sampleCapacity;
+	}
+	for (i = 0; i < sampleCount; i += 1)
+	{
+		float sample = state->mixBuffer[i];
+		if (sample >= 1.0f)
+		{
+			((int16_t*) stream)[i] = 32767;
+		}
+		else if (sample <= -1.0f)
+		{
+			((int16_t*) stream)[i] = -32768;
+		}
+		else
+		{
+			((int16_t*) stream)[i] = (int16_t) (sample * 32768.0f);
+		}
+	}
+#else
 	FAudio *audio = (FAudio*) userdata;
 
 	FAudio_zero(stream, len);
@@ -48,6 +116,7 @@ static void FAudio_INTERNAL_MixCallback(void *userdata, Uint8 *stream, int len)
 			(float*) stream
 		);
 	}
+#endif
 }
 
 /* Platform Functions */
@@ -87,14 +156,34 @@ void FAudio_PlatformInit(
 
 	FAudio_assert(mixFormat != NULL);
 	FAudio_assert(updateSize != NULL);
+	*platformDevice = NULL;
+
+#ifdef __SWITCH__
+	FAudioSwitchAudioState *switchState = (FAudioSwitchAudioState*)
+		audio->pMalloc(sizeof(FAudioSwitchAudioState));
+	if (switchState == NULL)
+	{
+		return;
+	}
+	FAudio_zero(switchState, sizeof(FAudioSwitchAudioState));
+	switchState->audio = audio;
+#endif
 
 	/* Build the device spec */
 	want.freq = mixFormat->Format.nSamplesPerSec;
+#ifdef __SWITCH__
+	want.format = AUDIO_S16SYS;
+#else
 	want.format = AUDIO_F32;
+#endif
 	want.channels = mixFormat->Format.nChannels;
 	want.silence = 0;
 	want.callback = FAudio_INTERNAL_MixCallback;
+#ifdef __SWITCH__
+	want.userdata = switchState;
+#else
 	want.userdata = audio;
+#endif
 	if (flags & FAUDIO_1024_QUANTUM)
 	{
 		/* Get the sample count for a 21.33ms frame.
@@ -183,6 +272,9 @@ iosretry:
 		}
 
 		FAudio_assert(0 && "Failed to open audio device!");
+#ifdef __SWITCH__
+		audio->pFree(switchState);
+#endif
 		return;
 	}
 
@@ -195,8 +287,29 @@ iosretry:
 	);
 	*updateSize = have.samples;
 
+#ifdef __SWITCH__
+	switchState->device = device;
+	switchState->sampleCapacity = have.samples * have.channels;
+	switchState->mixBuffer = (float*) audio->pMalloc(
+		switchState->sampleCapacity * sizeof(float)
+	);
+	if (switchState->mixBuffer == NULL)
+	{
+		SDL_CloseAudioDevice(device);
+		audio->pFree(switchState);
+		return;
+	}
+	*platformDevice = switchState;
+	SDL_Log(
+		"FAudio Switch direct S16 output: %u Hz, %u channels, %u frames",
+		(unsigned int) have.freq,
+		(unsigned int) have.channels,
+		(unsigned int) have.samples
+	);
+#else
 	/* SDL_AudioDeviceID is a Uint32, anybody using a 16-bit PC still? */
 	*platformDevice = (void*) ((size_t) device);
+#endif
 
 	/* Start the thread! */
 	SDL_PauseAudioDevice(device, 0);
@@ -204,7 +317,21 @@ iosretry:
 
 void FAudio_PlatformQuit(void* platformDevice)
 {
+#ifdef __SWITCH__
+	FAudioSwitchAudioState *state = (FAudioSwitchAudioState*) platformDevice;
+	if (state == NULL)
+	{
+		return;
+	}
+	SDL_CloseAudioDevice(state->device);
+	if (state->mixBuffer != NULL)
+	{
+		state->audio->pFree(state->mixBuffer);
+	}
+	state->audio->pFree(state);
+#else
 	SDL_CloseAudioDevice((SDL_AudioDeviceID) ((size_t) platformDevice));
+#endif
 }
 
 uint32_t FAudio_PlatformGetDeviceCount()

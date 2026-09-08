@@ -123,6 +123,32 @@ void krkrsdl2_drain_pending_native_events()
 	}
 }
 
+void NativeEventQueueImplement::Clear(unsigned int message)
+{
+	if (!krkrsdl2_pending_events_initialized) return;
+	SDL_LockMutex(krkrsdl2_pending_events_mutex);
+	for (auto it = krkrsdl2_pending_events->begin();
+		it != krkrsdl2_pending_events->end();)
+	{
+		NativeEvent *ev = *it;
+		if (ev->queue == this && (message == 0 || ev->Message == message))
+		{
+			delete ev;
+			it = krkrsdl2_pending_events->erase(it);
+		}
+		else
+		{
+			++it;
+		}
+	}
+	SDL_UnlockMutex(krkrsdl2_pending_events_mutex);
+}
+
+void NativeEventQueueImplement::Deallocate()
+{
+	Clear();
+}
+
 void NativeEventQueueImplement::PostEvent(const NativeEvent& ev) {
 	if (NativeEventQueueImplement::native_event_queue_custom_event_type == 0)
 	{

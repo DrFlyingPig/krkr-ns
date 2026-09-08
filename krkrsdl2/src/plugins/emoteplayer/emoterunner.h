@@ -3,6 +3,7 @@
 #include <vector>
 #include <list>
 #include <memory>
+#include <unordered_map>
 
 #include "emotefile.h"
 
@@ -117,8 +118,16 @@ namespace emoteplayer
             float x, y; // clip space position
             float u, v; // texture coordinate
         };
+        struct SurfaceBezierStep
+        {
+            glm::mat4 affineBefore = glm::mat4(1.0f);
+            int surfaceIndex = -1;
+        };
         int _meshDivX = 8;
         int _meshDivY = 8;
+        std::vector<glm::mat4> _surfaceMatrices;
+        std::vector<SurfaceBezierStep> _surfaceBezierSteps;
+        glm::mat4 _surfaceFinalAffine = glm::mat4(1.0f);
         std::vector<MeshVertex> _meshVertices;
         std::vector<uint16_t> _meshIndices;
     };
@@ -148,6 +157,11 @@ namespace emoteplayer
 
         // 核心: 按priority排序的ref列表，平行于currentMotion->nodeList
         std::vector<emotenoderef> _nodeCache;
+        // Motion data is immutable after parsing.  Keep a direct lookup beside
+        // the persistent refs instead of rebuilding the tree and linearly
+        // scanning nodeList for every child on every frame.
+        emotemotion* _cachedMotion = nullptr;
+        std::unordered_map<emotenode*, emotenoderef*> _nodeLookup;
         // 子motion引用缓存(progress阶段创建，draw阶段使用)
         std::vector<emotemotionref*> _subMotionRefs;
 
@@ -199,6 +213,3 @@ namespace emoteplayer
         std::vector<emoterect> shapeList;
     };
 }
-
-
-

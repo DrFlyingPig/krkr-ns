@@ -6,6 +6,7 @@
 #include "DebugIntf.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
+#include "GLCompositeBridge.h"
 #include <SDL.h>
 
 TVPSDLBitmapCompletion::TVPSDLBitmapCompletion()

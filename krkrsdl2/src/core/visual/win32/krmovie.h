@@ -13,6 +13,29 @@
 #ifndef __KRMOVIE_H__
 #define __KRMOVIE_H__
 
+// Non-Win32 builds (Switch) have no __stdcall; it is a no-op there, and
+// the Win32 handle/rect typedefs must be supplied locally.
+#ifndef __stdcall
+#define __stdcall
+#endif
+#ifndef _WIN32
+#include <stdint.h>
+typedef void *HWND;
+typedef void *HDC;
+typedef unsigned char BYTE;
+typedef intptr_t LONG_PTR;
+#ifndef EC_USER
+#define EC_USER 0x8000
+#endif
+#ifndef WM_USER
+#define WM_USER 0x0400
+#endif
+struct RECT
+{
+    long left, top, right, bottom;
+};
+#endif
+
 #define TVP_KRMOVIE_VER   0x0001000C
 
 
@@ -36,8 +59,8 @@ public:
 	virtual void __stdcall Play() = 0;
 	virtual void __stdcall Stop() = 0;
 	virtual void __stdcall Pause() = 0;
-	virtual void __stdcall SetPosition(unsigned __int64 tick) = 0;
-	virtual void __stdcall GetPosition(unsigned __int64 *tick) = 0;
+	virtual void __stdcall SetPosition(unsigned long long tick) = 0;
+	virtual void __stdcall GetPosition(unsigned long long *tick) = 0;
 	virtual void __stdcall GetStatus(tTVPVideoStatus *status) = 0;
 	virtual void __stdcall GetEvent(long *evcode, LONG_PTR *param1,
 			LONG_PTR *param2, bool *got) = 0;
@@ -49,7 +72,7 @@ public:
 	virtual void __stdcall GetFrame( int *f ) = 0;
 	virtual void __stdcall GetFPS( double *f ) = 0;
 	virtual void __stdcall GetNumberOfFrame( int *f ) = 0;
-	virtual void __stdcall GetTotalTime( __int64 *t ) = 0;
+	virtual void __stdcall GetTotalTime( long long *t ) = 0;
 
 	virtual void __stdcall GetVideoSize( long *width, long *height ) = 0;
 	virtual void __stdcall GetFrontBuffer( BYTE **buff ) = 0;
@@ -117,10 +140,12 @@ public:
 //---------------------------------------------------------------------------
 
 //---------------------------------------------------------------------------
+#ifdef _WIN32
 typedef void (__stdcall *tGetAPIVersion)(DWORD *version);
 typedef void  (__stdcall *tGetVideoOverlayObject)(
 	HWND callbackwin, IStream *stream, const wchar_t * streamname,
-	const wchar_t *type, unsigned __int64 size, iTVPVideoOverlay **out);
+	const wchar_t *type, unsigned long long size, iTVPVideoOverlay **out);
+#endif
 //---------------------------------------------------------------------------
 
 //---------------------------------------------------------------------------
@@ -132,5 +157,4 @@ typedef void  (__stdcall *tGetVideoOverlayObject)(
 
 
 #endif
-
 

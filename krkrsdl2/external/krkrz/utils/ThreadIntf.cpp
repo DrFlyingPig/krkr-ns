@@ -365,6 +365,8 @@ class DrawThreadPool {
 #endif
 #ifdef KRKRZ_USE_SDL_THREADS
 	SDL_atomic_t running_thread_count;
+	SDL_mutex *completion_mtx;
+	SDL_cond *completion_cv;
 #else
 #if (!defined(__EMSCRIPTEN__)) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))
 	std::atomic<int> running_thread_count;
@@ -380,7 +382,9 @@ private:
 public:
 	DrawThreadPool() : 
 #ifdef KRKRZ_USE_SDL_THREADS
-	running_thread_count( { 0 } ), 
+	running_thread_count( { 0 } ),
+	completion_mtx( SDL_CreateMutex() ),
+	completion_cv( SDL_CreateCond() ),
 #else
 	running_thread_count( 0 ), 
 #endif
@@ -393,11 +397,21 @@ public:
 			th->WaitFor();
 			delete th;
 		}
+#ifdef KRKRZ_USE_SDL_THREADS
+		SDL_DestroyCond(completion_cv);
+		SDL_DestroyMutex(completion_mtx);
+#endif
 	}
 	inline void DecCount()
 	{
 #ifdef KRKRZ_USE_SDL_THREADS
-		SDL_AtomicDecRef(&running_thread_count);
+		// Wake the submitting thread exactly when the last worker finishes.
+		// The old SDL_Delay(0) polling path could turn every parallel bitmap
+		// operation into a scheduler-quantum stall on Horizon/emulators.
+		SDL_LockMutex(completion_mtx);
+		const bool finished = SDL_AtomicDecRef(&running_thread_count) == SDL_TRUE;
+		if( finished ) SDL_CondSignal(completion_cv);
+		SDL_UnlockMutex(completion_mtx);
 #else
 		running_thread_count--;
 #endif
@@ -406,7 +420,10 @@ public:
 		task_num = taskNum;
 		task_count = 0;
 #if (!defined(__EMSCRIPTEN__)) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))
-		PoolThread( taskNum );
+		// A one-item batch is executed synchronously by ExecTask.  Avoid doing
+		// thread-pool bookkeeping for the hundreds of tiny layer operations in
+		// an animated E-mote frame.
+		if( taskNum > 1 ) PoolThread( taskNum );
 #endif
 	}
 	void ExecTask( TVP_THREAD_TASK_FUNC func, TVP_THREAD_PARAM param ) {
@@ -425,19 +442,17 @@ public:
 		DrawThread* thread = workers[task_count];
 		task_count++;
 		thread->SetTask( func, param );
-#ifdef KRKRZ_USE_SDL_THREADS
-		SDL_Delay(0);
-#else
+#ifndef KRKRZ_USE_SDL_THREADS
 		std::this_thread::yield();
 #endif
 #endif
 	}
 	void WaitForTask() {
 #ifdef KRKRZ_USE_SDL_THREADS
+		SDL_LockMutex(completion_mtx);
 		while (SDL_AtomicGet(&running_thread_count) != 0)
-		{
-			SDL_Delay(0);
-		}
+			SDL_CondWait(completion_cv, completion_mtx);
+		SDL_UnlockMutex(completion_mtx);
 #else
 #if (!defined(__EMSCRIPTEN__)) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))
 		int expected = 0;
@@ -562,11 +577,13 @@ void TVPBeginThreadTask( tjs_int taskNum ) {
 	if (taskNum > poolTaskMax) poolTaskMax = taskNum;
 	gPoolBeginsTotal++;
 	if (taskNum >= 2) gPoolBigBegins++;
+	#if defined(KRKRNS_RENDER_VERBOSE_DIAGNOSTICS)
 	if (poolBegins % 500 == 0)
 	{
 		KRKRNS_LOG("[pool] use: begins=%u avgNum=%.1f max=%d",
 			poolBegins, (double)poolTaskSum / poolBegins, poolTaskMax);
 	}
+	#endif
 	TVPTheadPool.BeginTask( taskNum );
 }
 //---------------------------------------------------------------------------

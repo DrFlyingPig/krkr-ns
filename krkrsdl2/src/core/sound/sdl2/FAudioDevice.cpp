@@ -61,6 +61,12 @@ public:
 		TVPAddLog(TJS_W("FAudio initializing..."));
 
 		uint32_t flags = 0;
+#ifdef __SWITCH__
+		/* The stock 10 ms FAudio quantum leaves only two 480-frame audout
+		 * buffers on Switch.  Use FAudio's supported 1024-frame quantum so
+		 * short rendering/decoder scheduling spikes cannot drain the device. */
+		flags |= FAUDIO_1024_QUANTUM;
+#endif
 		uint32_t hr = FAudioCreate(&FAudioObj, flags, FAUDIO_DEFAULT_PROCESSOR);
 		if (hr != 0)
 		{

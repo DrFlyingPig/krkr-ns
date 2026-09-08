@@ -51,6 +51,11 @@ class tTJSNI_VideoOverlay : public tTJSNI_BaseVideoOverlay
 #ifdef _WIN32
 	class tTVPBaseBitmap	*Bitmap[2];	//!< Layer描画用バッファ用Bitmap
 	BYTE			*BmpBits[2];
+#elif defined(__SWITCH__)
+	// Phase 4: same frame-buffer pair for the FFmpeg player
+	class tTVPBaseBitmap	*Bitmap[2];
+	unsigned char		*BmpBits[2];
+	tjs_uint		VideoFramesApplied;
 #endif
 
 	bool	IsPrepare;			//!< 準備モードかどうか

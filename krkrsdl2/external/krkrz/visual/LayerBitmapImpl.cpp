@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #define _USE_MATH_DEFINES
 #include "tjsCommHead.h"
+#include "GLCompositeBridge.h"
 
 #include <memory>
 #include <stdlib.h>
@@ -639,6 +640,7 @@ bool tTVPNativeBaseBitmap::Is8BPP() const
 //---------------------------------------------------------------------------
 bool tTVPNativeBaseBitmap::Assign(const tTVPNativeBaseBitmap &rhs)
 {
+	krkrsdl2_glc_bump_version(this);
 	if(this == &rhs || Bitmap == rhs.Bitmap) return false;
 
 	Bitmap->Release();
@@ -1111,6 +1113,7 @@ void tTVPNativeBaseBitmap::DrawGlyph(iTJSDispatch2* glyph, const tTVPRect &destr
 			tjs_int shwidth, tjs_int shofsx, tjs_int shofsy,
 			tTVPComplexRect *updaterects )
 {
+	krkrsdl2_glc_bump_version(this);
 	if(!Is32BPP()) TVPThrowExceptionMessage(TVPInvalidOperationFor8BPP);
 
 	if(bltmode == bmAlphaOnAlpha)

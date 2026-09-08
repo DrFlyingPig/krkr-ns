@@ -545,6 +545,7 @@ set(SDL2_LIBRARIES SDL2-static)
 elseif(NINTENDO_SWITCH)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+pkg_check_modules(VORBIS_STACK REQUIRED IMPORTED_TARGET vorbisfile vorbis ogg)
 
 # KRKR-ns built-ins: homebrew cannot load the Win32 psbfile plug-in, while
 # modern games commonly use PSB/PIMG UI archives containing PNG/TLG/WebP.
@@ -580,6 +581,7 @@ src/plugins/emoteplayer/emoteplayer.cpp
 src/plugins/emoteplayer/EmoteSWRenderBackend.cpp
 src/plugins/emoteplayer/EmoteGLRenderBackend.cpp
 src/plugins/emoteplayer/TVPCompositor.cpp
+src/core/sound/sdl2/VorbisWaveDecoder.cpp
 )
 list(APPEND KRKRSDL2COMMON_INCLUDES
 src/plugins
@@ -597,6 +599,7 @@ list(APPEND KRKRSDL2_DEFINITIONS
 	KRKRSDL2_ENABLE_CSVPARSER
 	KRKRSDL2_ENABLE_TEXTRENDER
 	KRKRSDL2_ENABLE_EMOTEPLAYER
+	TVP_VORBIS_DECODER_IMPLEMENT
 	TVP_IMAGE_ENABLE_WEBP
 	USE_OBSOLETE_FUNCTIONS
 )
@@ -610,7 +613,27 @@ list(APPEND KRKRSDL2_LDFLAGS
 
 list(APPEND KRKRSDL2_LIBS
 	PkgConfig::SDL2
+	PkgConfig::VORBIS_STACK
 	webp
+)
+
+# Phase 4: static FFmpeg (minimal build, WA2-ns toolchain) for the movie
+# overlay player (SwitchMovieOverlay.cpp).
+list(APPEND KRKRSDL2_LDFLAGS
+	-L${CMAKE_CURRENT_SOURCE_DIR}/../out/ffmpeg_switch/lib
+)
+list(APPEND KRKRSDL2COMMON_INCLUDES
+	${CMAKE_CURRENT_SOURCE_DIR}/../out/ffmpeg_switch/include
+)
+list(APPEND KRKRSDL2COMMON_SRC
+	src/core/visual/sdl2/SwitchMovieOverlay.cpp
+)
+list(APPEND KRKRSDL2_LIBS
+	avformat
+	avcodec
+	avutil
+	swscale
+	swresample
 )
 else()
 find_package(SDL2 REQUIRED)

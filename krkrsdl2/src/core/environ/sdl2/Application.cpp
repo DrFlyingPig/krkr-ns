@@ -862,6 +862,7 @@ void tTVPApplication::Run() {
 		if (SDL_WasInit(SDL_INIT_EVENTS) != 0)
 		{
 #ifndef __EMSCRIPTEN__
+			krkrsdl2_heartbeat_main_progress(); // idle wait still counts as alive
 			SDL_WaitEvent(NULL);
 #endif
 		}

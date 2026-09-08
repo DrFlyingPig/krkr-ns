@@ -461,6 +461,7 @@ src/core/msg/sdl2/MsgImpl.cpp
 src/core/msg/sdl2/MsgLoad.cpp
 src/core/sdl2/SDLApplication.cpp
 src/core/sdl2/SDLBitmapCompletion.cpp
+src/core/sdl2/GLComposite.cpp
 src/core/sound/sdl2/AudioDeviceCreator.cpp
 src/core/sound/sdl2/FAudioDevice.cpp
 src/core/sound/sdl2/NullAudioDevice.cpp

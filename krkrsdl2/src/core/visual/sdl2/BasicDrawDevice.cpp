@@ -16,12 +16,14 @@
 #include "WindowImpl.h"
 #include "SDLBitmapCompletion.h"
 #include "KrkrNSLog.h"
+#include "GLCompositeBridge.h"
 
 #if 0
 #include <d3d9.h>
 #include <mmsystem.h>
 #endif
 #include <algorithm>
+#include <cstdlib>
 #ifndef ZeroMemory
 #define ZeroMemory(p,n) memset(p, 0, n)
 #endif
@@ -691,9 +693,29 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::NotifyBitmapCompleted(iTVPLayerManager
 	tjs_int x, tjs_int y, const void * bits, const class BitmapInfomation * bmpinfo,
 	const tTVPRect &cliprect, tTVPLayerType type, tjs_int opacity)
 {
-	if (bitmap_completion)
+	// KRKR-ns Phase 3 v2.6: this is the single presentation path where the
+	// engine hands over each finished layer (bits + position + clip + blend).
+	// Feed it to the GPU compositor on the *full-screen* FBO (the old
+	// layer-manager DrawBuffer was only an 8-row strip target).
+	const TVPBITMAPINFO *bi = bmpinfo ? bmpinfo->GetBITMAPINFO() : nullptr;
+	if (bi)
 	{
-		bitmap_completion->NotifyBitmapCompleted(manager, x, y, bits, bmpinfo, cliprect, type, opacity);
+		krkrsdl2_glc_layer(x, y, bits, bi->bmiHeader.biWidth,
+			(bi->bmiHeader.biHeight < 0) ? -bi->bmiHeader.biHeight
+			                             : bi->bmiHeader.biHeight,
+			bi->bmiHeader.biWidth * 4,
+			cliprect, (tjs_int)type, opacity,
+			bi->bmiHeader.biHeight > 0);
+	}
+	// Mode 5 (gpu-composite-gpuonly.txt): the GPU quads above are the only
+	// composition — skip the CPU-side layer blit to the present surface so
+	// this frame costs one composition instead of two.
+	if (!krkrsdl2_glc_gpuonly())
+	{
+		if (bitmap_completion)
+		{
+			bitmap_completion->NotifyBitmapCompleted(manager, x, y, bits, bmpinfo, cliprect, type, opacity);
+		}
 	}
 #if 0
 	const BITMAPINFO *bitmapinfo = bmpinfo->GetBITMAPINFO();

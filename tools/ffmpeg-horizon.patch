@@ -1,0 +1,26 @@
+diff --git a/configure b/configure
+index d77a55b..d704702 100755
+--- a/configure
++++ b/configure
+@@ -5970,6 +5970,10 @@ case $target_os in
+         ;;
+     minix)
+         ;;
++    horizon)
++        enable section_data_rel_ro
++        add_extralibs -lnx
++        ;;
+     none)
+         ;;
+     *)
+@@ -7719,6 +7723,10 @@ haiku)
+         disable memalign
+     fi
+     ;;
++horizon)
++    disable sysctl
++    disable sysctlbyname
++    ;;
+ esac
+ 
+ flatten_extralibs(){

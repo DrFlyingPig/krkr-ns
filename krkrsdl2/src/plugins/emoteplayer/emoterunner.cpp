@@ -50,31 +50,21 @@ static void evalBezierSurface(const float controlPts[32], float u, float v,
     outY = ry;
 }
 
-// Evaluate the full surface chain (same logic as the old tess eval shader)
-// Start with UV (u,v), iterate surfaces from innermost to outermost,
-// applying bezier deformation and matrix transform at each level.
-// The outermost surface (index 0) includes projection and outputs clip space [-1,1].
-// Inner surfaces have model-only matrices and output pixel space (relative to parent);
-// their output is normalized back to UV [0,1] (with axis swap) for the next surface.
-static void evaluateSurfaceChain(
-    const std::vector<emoteRender>& renderMethod,
-    float u, float v,
-    float& outClipX, float& outClipY)
+// Build the transform portion of a surface chain once.  The old prototype did
+// all of this GLM/trigonometry work again for every tessellated vertex even
+// though it is constant for the entire icon draw.
+static void prepareSurfaceChain(const std::vector<emoteRender>& renderMethod,
+                                std::vector<glm::mat4>& matrices,
+                                std::vector<emotenoderef::SurfaceBezierStep>& bezierSteps,
+                                glm::mat4& finalAffine)
 {
-    float lastX = 0;
-    float lastY = 0;
-    glm::vec4 trans = glm::vec4(1.0f);
-    int surfaceCount = (int)renderMethod.size();
+    const int surfaceCount = static_cast<int>(renderMethod.size());
+    matrices.resize(renderMethod.size());
     uint32_t currInheritMask = 0xFFFFFFF;
-
-    // Iterate in reverse: renderMethod[surfaceCount-1] is innermost (first in shader)
     for (int i = surfaceCount - 1; i >= 0; i--)
     {
-        // inheritMask
         currInheritMask &= renderMethod[i].currInheritMask;
-        // 构建变换矩阵 平移 currCoordx/currCoordy → 剪切 sx/sy → 缩放 zx/zy → 旋转 angle
         glm::mat4 model = glm::mat4(1.0f); // 注:复合顺序是反过来的
-        // 考察InheritMask
         if (i < surfaceCount - 1 && i > 0 && ((currInheritMask & 0x1FC) != 0x1FC))
         {
             model = glm::translate(
@@ -143,44 +133,86 @@ static void evaluateSurfaceChain(
         // 加入attach矩阵
         model = renderMethod[i].attachMat * model;
         GLM_ASSERT_VALID(model);
-
-        if (renderMethod[i].type == 3)
-        {
-            // Layout层 直接计算
-            trans = model * trans;
-        }
-        else
-        {
-            // 获取 lastX,lastY
-            if (i < surfaceCount - 1)
-            {
-                // Inner surfaces have model-only matrices; output is in parent's pixel space.
-                // Normalize back to UV [0,1] (with axis swap: parent-Y→U, parent-X→V)
-                // for the next (outer) surface's Bezier input.
-                lastX = (trans.y + renderMethod[i].originY) / renderMethod[i].height; // Y → U
-                lastY = (trans.x + renderMethod[i].originX) / renderMethod[i].width;  // X → V
-            }
-            else
-            {
-                lastX = u;
-                lastY = v;
-            }
-
-            // Evaluate bezier surface
-            float bx, by;
-            if (renderMethod[i].type == 1)
-            {
-                evalBezierSurface(renderMethod[i].controlPts, lastX, lastY, bx, by);
-            }
-            else
-            {
-                bx = lastY, by = lastX;
-            }
-
-            // Apply transformation matrix
-            trans = model * glm::vec4(bx, by, 0.0f, 1.0f);
-        }
+        matrices[static_cast<size_t>(i)] = model;
     }
+
+    // Type 2 and 3 surfaces are affine.  Collapse every consecutive run
+    // between Bezier (type 1) surfaces, reducing a typical 30-40-level E-mote
+    // chain to only a handful of per-vertex matrix operations.
+    bezierSteps.clear();
+    glm::mat4 pending(1.0f);
+    for (int i = surfaceCount - 2; i >= 0; --i)
+    {
+        if (renderMethod[i].type == 1)
+        {
+            bezierSteps.push_back({pending, i});
+            pending = glm::mat4(1.0f);
+            continue;
+        }
+
+        glm::mat4 affine = matrices[static_cast<size_t>(i)];
+        if (renderMethod[i].type != 3)
+        {
+            // The non-layout path normalizes the preceding surface's x/y to
+            // this surface's UV before applying its model matrix.
+            glm::mat4 normalize(0.0f);
+            normalize[0][0] = 1.0f / renderMethod[i].width;
+            normalize[1][1] = 1.0f / renderMethod[i].height;
+            normalize[3][0] = renderMethod[i].originX / renderMethod[i].width;
+            normalize[3][1] = renderMethod[i].originY / renderMethod[i].height;
+            normalize[3][3] = 1.0f;
+            affine = affine * normalize;
+        }
+        pending = affine * pending;
+    }
+    finalAffine = pending;
+}
+
+// Evaluate the full surface chain (same logic as the old tess eval shader).
+// The matrices have already been prepared once for all vertices in this draw.
+static void evaluatePreparedSurfaceChain(
+    const std::vector<emoteRender>& renderMethod,
+    const std::vector<glm::mat4>& matrices,
+    const std::vector<emotenoderef::SurfaceBezierStep>& bezierSteps,
+    const glm::mat4& finalAffine,
+    float u, float v,
+    float& outClipX, float& outClipY)
+{
+    const int surfaceCount = static_cast<int>(renderMethod.size());
+    if (surfaceCount == 0)
+    {
+        outClipX = outClipY = 0.0f;
+        return;
+    }
+
+    const int inner = surfaceCount - 1;
+    const emoteRender& innerSurface = renderMethod[static_cast<size_t>(inner)];
+    glm::vec4 trans;
+    if (innerSurface.type == 3)
+    {
+        trans = matrices[static_cast<size_t>(inner)] * glm::vec4(1.0f);
+    }
+    else
+    {
+        float bx = v;
+        float by = u;
+        if (innerSurface.type == 1)
+            evalBezierSurface(innerSurface.controlPts, u, v, bx, by);
+        trans = matrices[static_cast<size_t>(inner)] * glm::vec4(bx, by, 0.0f, 1.0f);
+    }
+
+    for (const auto& step : bezierSteps)
+    {
+        trans = step.affineBefore * trans;
+        const emoteRender& surface = renderMethod[static_cast<size_t>(step.surfaceIndex)];
+        const float patchU = (trans.y + surface.originY) / surface.height;
+        const float patchV = (trans.x + surface.originX) / surface.width;
+        float bx, by;
+        evalBezierSurface(surface.controlPts, patchU, patchV, bx, by);
+        trans = matrices[static_cast<size_t>(step.surfaceIndex)] *
+                glm::vec4(bx, by, 0.0f, 1.0f);
+    }
+    trans = finalAffine * trans;
 
     // Final Y flip (same as shader: gl_Position = lastPt * vec4(1, -1, 1, 1))
     outClipX = trans.x;
@@ -190,6 +222,9 @@ static void evaluateSurfaceChain(
 // Build subdivided mesh for a given icon node
 static void buildSubdivMesh(
     const std::vector<emoteRender>& renderMethod,
+    const std::vector<glm::mat4>& matrices,
+    const std::vector<emotenoderef::SurfaceBezierStep>& bezierSteps,
+    const glm::mat4& finalAffine,
     int divX, int divY,
     std::vector<emotenoderef::MeshVertex>& outVerts,
     std::vector<uint16_t>& outIndices)
@@ -204,7 +239,8 @@ static void buildSubdivMesh(
         for (int gx = 0; gx <= divX; gx++) {
             float u = (float)gx / (float)divX;
             float clipX, clipY;
-            evaluateSurfaceChain(renderMethod, u, v, clipX, clipY);
+            evaluatePreparedSurfaceChain(renderMethod, matrices, bezierSteps, finalAffine,
+                                         u, v, clipX, clipY);
             // tessCoord in old shader was (gl_TessCoord.y, gl_TessCoord.x) = (v, u)
             outVerts.push_back({ clipX, clipY, v, u });
         }
@@ -231,6 +267,9 @@ static void buildSubdivMesh(
 }
 // Build simple rectangle mesh (two triangles)
 static void buildRectMesh(const std::vector<emoteRender>& renderMethod,
+                          const std::vector<glm::mat4>& matrices,
+                          const std::vector<emotenoderef::SurfaceBezierStep>& bezierSteps,
+                          const glm::mat4& finalAffine,
                           std::vector<emotenoderef::MeshVertex>& outVerts,
                           std::vector<uint16_t>& outIndices)
 {
@@ -242,7 +281,8 @@ static void buildRectMesh(const std::vector<emoteRender>& renderMethod,
     for (int i = 0; i < 4; i++)
     {
         float clipX, clipY;
-        evaluateSurfaceChain(renderMethod, cornerUV[i][0], cornerUV[i][1], clipX, clipY);
+        evaluatePreparedSurfaceChain(renderMethod, matrices, bezierSteps, finalAffine,
+                                     cornerUV[i][0], cornerUV[i][1], clipX, clipY);
         outVerts.push_back({clipX, clipY, cornerUV[i][1], cornerUV[i][0]});
     }
 
@@ -259,10 +299,23 @@ static void buildRectMesh(const std::vector<emoteRender>& renderMethod,
 
 void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderList, emotelimit lim)
 {
+    // emotenoderef instances persist across frames.  Reset the transient state
+    // that used to be initialized implicitly when the whole ref tree was
+    // reconstructed every frame.
+    isNeedDraw = false;
+    isIcon = false;
+    isLayout = false;
+    frame = nullptr;
+    nextframe = nullptr;
+    currentMtn = nullptr;
+    originX = 0.0f;
+    originY = 0.0f;
+    width = 0.0f;
+    height = 0.0f;
+
     // 不绘制进行节点传递
     if (renderList.size() > 0 && renderList.back().type == 0)
     {
-        isNeedDraw = false;
         return;
     }
 
@@ -272,7 +325,6 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
         isNeedDraw = false;
         return;
     }
-    frame = nullptr;
     size_t currFrameIdx = -1;
     for (size_t i = 0; i < currentNode->frameList.size(); i++)
     {
@@ -290,7 +342,6 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
         isNeedDraw = false;
         return;
     }
-    nextframe = nullptr;
     if (currFrameIdx >= 0 && currFrameIdx < currentNode->frameList.size() - 1)
         nextframe = currentNode->frameList.at(currFrameIdx + 1);
     if (nextframe != nullptr && !nextframe->hasContent)
@@ -298,8 +349,6 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
 
     // 节点基础信息获取
     isNeedDraw = true;
-    isIcon = false;
-    isLayout = false;
     emoteicon* tmpic = currentNode-> _filePtr->findsourceByName(frame->src);
     if (tmpic == nullptr)
         currentMtn = refTop->findmotionByName(frame->src);
@@ -309,15 +358,15 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
     {
         isIcon = true;
 
-        if (tmpic != ic) // 直接比对ic
+        if (tmpic != ic) // 纹理只需在图标切换时确认加载
         {
             ic = tmpic;
             ic->ensureLoad();
-            width = ic->width;
-            height = ic->height;
-            originX = ic->originX;
-            originY = ic->originY;
         }
+        width = ic->width;
+        height = ic->height;
+        originX = ic->originX;
+        originY = ic->originY;
         // 设置混色
         currbm = frame->bm;
     }
@@ -381,6 +430,8 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
 }
 void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, emotelimit lim)
 {
+    shapeList.clear();
+
     // 参数化时可能改变
     currTick = tick;
     // 对于motion，增加终结机制, 即无法越过selfSyncTime
@@ -577,6 +628,12 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
         if (renderMethod.size() > 0 && currentNode->stencilCompositeMaskLayerList.size() > 0 && currentNode->type == 12)
         {
             renderMethod.at(0).hasStencil = true;
+            // A nested stencil starts a new mask group.  Appending it to the
+            // inherited group turns nested clipping into a union: the large
+            // portrait trimming rectangle then overwhelms the small eye mask
+            // and lets the iris leak through a closed eyelid.  Keep only the
+            // innermost group; its geometry is already inside the outer clip.
+            renderMethod.at(0).layerNode.clear();
             for (auto nodeName : currentNode->stencilCompositeMaskLayerList)
             {
                 // 让父类去找节点
@@ -628,13 +685,29 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
         renderMethod.push_back(emt);
     }
 
+    const bool isShapeNode = !isIcon && frame != nullptr &&
+                             frame->src.rfind("shape/", 0) == 0;
+    if ((isIcon || isShapeNode) && !renderMethod.empty())
+    {
+        prepareSurfaceChain(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                            _surfaceFinalAffine);
+    }
+    else
+    {
+        _surfaceMatrices.clear();
+        _surfaceBezierSteps.clear();
+        _surfaceFinalAffine = glm::mat4(1.0f);
+    }
+
     // 对于icon保存大小信息
     if (isIcon && renderMethod.size() > 0)
     {
         // 两个端点就够了
         float ot1x, ot1y, ot2x, ot2y;
-        evaluateSurfaceChain(renderMethod, 0, 0, ot1x, ot1y);
-        evaluateSurfaceChain(renderMethod, 1, 1, ot2x, ot2y);
+        evaluatePreparedSurfaceChain(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                                     _surfaceFinalAffine, 0, 0, ot1x, ot1y);
+        evaluatePreparedSurfaceChain(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                                     _surfaceFinalAffine, 1, 1, ot2x, ot2y);
         glm::vec2 pt1(0, 0), pt2(1, 1);
         // 边界缩放（最外层 surface 输出 clip → screen）
         pt1.x = (ot1x / 2.0 + 0.5) * currentNode->_filePtr->_screenSize.width;
@@ -652,15 +725,17 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
 
     // 对于shape节点保存面积信息(用于contains检测和getLayerGetter的shape返回)
     // 注: shape节点可能没有hasContent，用src判断即可
-    if (!isIcon && frame != nullptr && refMtn != nullptr)
+    if (isShapeNode && refMtn != nullptr)
     {
-        std::string src(frame->src);
-        if (src.rfind("shape/", 0) == 0 && renderMethod.size() > 0)
+        const std::string& src = frame->src;
+        if (renderMethod.size() > 0)
         {
             // 两个端点就够了
             float ot1x, ot1y, ot2x, ot2y;
-            evaluateSurfaceChain(renderMethod, 0, 0, ot1x, ot1y);
-            evaluateSurfaceChain(renderMethod, 1, 1, ot2x, ot2y);
+            evaluatePreparedSurfaceChain(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                                         _surfaceFinalAffine, 0, 0, ot1x, ot1y);
+            evaluatePreparedSurfaceChain(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                                         _surfaceFinalAffine, 1, 1, ot2x, ot2y);
             glm::vec2 pt1(0, 0), pt2(1, 1);
             // 边界缩放（最外层 surface 输出 clip → screen）
             pt1.x = (ot1x / 2.0 + 0.5) * currentNode->_filePtr->_screenSize.width;
@@ -710,12 +785,15 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
             // 细分并变形
             _meshDivX = div;
             _meshDivY = div;
-            buildSubdivMesh(renderMethod, _meshDivX, _meshDivY, _meshVertices, _meshIndices);
+            buildSubdivMesh(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                            _surfaceFinalAffine, _meshDivX, _meshDivY,
+                            _meshVertices, _meshIndices);
         }
         else
         {
             // 进行简单三角剖分
-            buildRectMesh(renderMethod, _meshVertices, _meshIndices);
+            buildRectMesh(renderMethod, _surfaceMatrices, _surfaceBezierSteps,
+                          _surfaceFinalAffine, _meshVertices, _meshIndices);
         }
     }
     else
@@ -737,12 +815,28 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
             }
         }
 
-        // 处理子motion: 创建子emotemotionref递归处理
+        // 处理子motion。Motion/节点数据加载后保持不变，因此引用树可以跨帧
+        // 复用；只在该节点首次遇到某个子motion时创建一次。
         if (currentMtn != nullptr)
         {
-            // 在引擎中创建持久化的子motion ref
-            currentMtnRef = new emotemotionref(currentMtn, refTop, this);
-            refMtn->_subMotionRefs.push_back(currentMtnRef);
+            if (currentMtnRef == nullptr || currentMtnRef->currentMotion != currentMtn)
+            {
+                currentMtnRef = nullptr;
+                for (auto* cached : refMtn->_subMotionRefs)
+                {
+                    if (cached != nullptr && cached->parent == this &&
+                        cached->currentMotion == currentMtn)
+                    {
+                        currentMtnRef = cached;
+                        break;
+                    }
+                }
+                if (currentMtnRef == nullptr)
+                {
+                    currentMtnRef = new emotemotionref(currentMtn, refTop, this);
+                    refMtn->_subMotionRefs.push_back(currentMtnRef);
+                }
+            }
             currentMtnRef->progress(tick + currTimeOffset, renderMethod,
                             {originX, originY, width, height, lim.zMax});
             // 收集子motion的shape
@@ -767,32 +861,30 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
     {
         renderer->SetTarget(maskTarget);
         renderer->ClearTarget(true);
-        bool hasDraw = false;
+        const bool hasResolvedMaskLayer = !renderMethod.at(0).layerNode.empty();
         for (auto maskLayer : renderMethod.at(0).layerNode)
         {
-            if (maskLayer != nullptr && maskLayer->currOpa > 0)
+            if (maskLayer != nullptr)
             {
-                // hasDraw means a mask layer actually rasterized something;
-                // structural nodes that never built meshes don't count, and
-                // an empty mask target would discard every masked part.
-                hasDraw = maskLayer->draw(renderer, maskTarget, lim, nullptr, true) || hasDraw;
+                // A stencil source is allowed to be invisible in the normal
+                // pass (for example the portrait trimming frame has opa=0).
+                // Its texture alpha still defines the stencil, so never gate
+                // the mask pass on currOpa.
+                maskLayer->draw(renderer, maskTarget, lim, nullptr, true);
             }
         }
-        if (!hasDraw)
+        if (!hasResolvedMaskLayer)
         {
             static int emptyMaskLogs = 0;
             if (emptyMaskLogs < 6)
             {
                 emptyMaskLogs++;
-                KRKRNS_LOG("[emote] EMPTY MASK disabled stencil (layers=%d)",
+                KRKRNS_LOG("[emote] UNRESOLVED MASK disabled stencil (layers=%d)",
                            (int)renderMethod.at(0).layerNode.size());
             }
             renderMethod.at(0).hasStencil = false;
         }
-        // 排除异常蒙版
-        if (!hasDraw)
-            renderMethod.at(0).hasStencil = false;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_CAPTURE_DIAGNOSTICS)
         // KRKR-ns diagnostic: snapshot the mask target so a partial mask
         // (which would discard everything outside its covered area) can be
         // told apart from a geometry problem.
@@ -825,9 +917,15 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
     renderer->SetMask(renderMethod.at(0).hasStencil ? maskTarget : nullptr);
 
     // 透明度与混色
-    float totalOpa = currOpa;
-    for (size_t i = 0; i < renderMethod.size(); i++)
-        totalOpa *= renderMethod.at(i).opa;
+    // Stencil sources use their texture alpha even when the source layer is
+    // hidden (opa=0) in the normal scene.  Normal drawing still receives the
+    // complete inherited opacity chain.
+    float totalOpa = inMaskPass ? 1.0f : currOpa;
+    if (!inMaskPass)
+    {
+        for (size_t i = 0; i < renderMethod.size(); i++)
+            totalOpa *= renderMethod.at(i).opa;
+    }
     int blendMode = currbm;
     if (blendMode == 6 && inMaskPass)
         blendMode = 0; // 蒙版形状按普通 alpha 轮廓绘制，写入蒙版目标
@@ -844,7 +942,8 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
         return false; // 普通通道不绘制（GL 后端原行为）；蒙版通道已改写为 0 绘制轮廓
 
     // 绘制网格（MeshVertex 布局与接口的交错 xyuv 格式一致，直接传递）
-    // KRKR-ns diagnostic: dump the per-surface chain values once in a while so
+#if defined(KRKRNS_EMOTE_VERBOSE_DIAGNOSTICS)
+    // KRKR-ns diagnostic: dump the per-surface chain values so
     // a wrong scale/origin (native-texture-size rendering) can be attributed
     // to the exact surface. First 3 + last 3 surfaces of the chain.
     static int surfaceLogs = 0;
@@ -864,6 +963,7 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
         KRKRNS_LOG("[emote] draw totalOpa=%.3f blend=%d tex=%.0fx%.0f", totalOpa, blendMode,
                    ic ? ic->texWidth : 0.0, ic ? ic->texHeight : 0.0);
     }
+#endif
     renderer->DrawMesh((const float*)_meshVertices.data(), (int)_meshVertices.size(),
                        _meshIndices.data(), (int)_meshIndices.size(), ic->selftexture, totalOpa);
     return true;
@@ -936,13 +1036,8 @@ float emotemotionref::getTickByIdx(int32_t idx)
 }
 emotenoderef* emotemotionref::getNodeRef(emotenode* node)
 {
-    // 在_nodeCache中查找指定node的ref
-    for (auto& ref : _nodeCache)
-    {
-        if (ref.currentNode == node)
-            return &ref;
-    }
-    return nullptr;
+    const auto it = _nodeLookup.find(node);
+    return it != _nodeLookup.end() ? it->second : nullptr;
 }
 void emotemotionref::progress(float tick, std::vector<emoteRender>& renderList, emotelimit lim)
 {
@@ -952,20 +1047,29 @@ void emotemotionref::progress(float tick, std::vector<emoteRender>& renderList, 
     renderMethod.clear();
     renderMethod = renderList;
 
-    // 按priority顺序构建_nodeCache
-    _nodeCache.clear();
     if (currentMotion == nullptr) return;
-    size_t count = currentMotion->nodeList.size();
-    _nodeCache.reserve(count);
-    for (size_t i = 0; i < count; i++)
-    {
-        _nodeCache.emplace_back(currentMotion->nodeList[i], refTop, this);
-    }
 
-    // 清理旧的子motion ref
-    for (auto sub : _subMotionRefs)
-        delete sub;
-    _subMotionRefs.clear();
+    // References hold only per-playback state; the parsed motion/node graph is
+    // immutable.  Rebuild only when the selected motion actually changes.
+    if (_cachedMotion != currentMotion)
+    {
+        // Submotion parent pointers refer into _nodeCache, so release them
+        // before replacing the node vector.
+        for (auto* sub : _subMotionRefs)
+            delete sub;
+        _subMotionRefs.clear();
+
+        _nodeLookup.clear();
+        _nodeCache.clear();
+        const size_t count = currentMotion->nodeList.size();
+        _nodeCache.reserve(count);
+        for (size_t i = 0; i < count; ++i)
+            _nodeCache.emplace_back(currentMotion->nodeList[i], refTop, this);
+        _nodeLookup.reserve(count);
+        for (auto& ref : _nodeCache)
+            _nodeLookup.emplace(ref.currentNode, &ref);
+        _cachedMotion = currentMotion;
+    }
 
     //  对每个layer节点调用对应的ref->progress
     //  注意: ref的progress内部会通过_parentMotion递归处理children和sub-motion
@@ -980,12 +1084,11 @@ void emotemotionref::progress(float tick, std::vector<emoteRender>& renderList, 
                 actualTick = std::fmod(tick, currentMotion->loopTime);
         }
 
+        // A type-3 node can attach a child motion below a stencil group.  The
+        // child motion normally starts with a type-2 layout node, but that is
+        // not a stencil boundary: dropping the inherited state here loses the
+        // portrait trimming frame as soon as we enter all_parts/全体構造.
         std::vector<emoteRender> localRender = renderList;
-        if (localRender.size() > 0 && ch->type == 2)
-        {
-            localRender.at(0).hasStencil = false;
-            localRender.at(0).layerNode.clear();
-        }
 
         emotenoderef* ref = getNodeRef(ch);
         if (ref)
@@ -1522,4 +1625,3 @@ void emoteengine::updatePhysics(float tick)
 {
 }
 }
-

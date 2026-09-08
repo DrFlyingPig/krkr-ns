@@ -107,7 +107,11 @@ public:
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE)
 	void Deallocate();
 #else
-	void Deallocate() {}
+	void Deallocate();
+	// Remove queued callbacks owned by this queue.  This mirrors the
+	// Kirikiroid2 user-message filter and prevents a delayed background
+	// notification from dispatching into an object after it is destroyed.
+	void Clear(unsigned int message = 0);
 #endif
 
 	void PostEvent( const NativeEvent& event );

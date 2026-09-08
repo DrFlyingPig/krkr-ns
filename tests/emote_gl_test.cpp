@@ -1,5 +1,6 @@
 #include "EmoteGLRenderBackend.h"
 #include "EmoteSWRenderBackend.h"
+#include "ThreadIntf.h"
 #include <SDL.h>
 #include <array>
 #include <cmath>
@@ -11,6 +12,10 @@
 
 static SDL_Renderer* primary;
 SDL_Renderer* TVPGetPrimarySDLRenderer() { return primary; }
+tjs_int TVPGetThreadNum() { return 1; }
+void TVPBeginThreadTask(tjs_int) {}
+void TVPExecThreadTask(TVP_THREAD_TASK_FUNC func, TVP_THREAD_PARAM param) { func(param); }
+void TVPEndThreadTask() {}
 static unsigned checks;
 static void check(bool value, const char* message)
 {

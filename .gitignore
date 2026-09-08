@@ -1,0 +1,17 @@
+# 构建产物与中间目录(根级构建均输出到这些目录)
+out/
+build-*/
+build_nro.log
+*.o
+
+# 代理会话工具目录(上游克隆 / 调试截图 / 日志,不入库)
+.zcode/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# IDE / 编辑器
+.vscode/
+.idea/
+build_nps.log

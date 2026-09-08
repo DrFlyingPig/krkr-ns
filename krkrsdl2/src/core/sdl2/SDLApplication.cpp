@@ -59,6 +59,7 @@
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
 #include "ThreadIntf.h"
+#include "GLCompositeBridge.h"
 
 #ifdef __SWITCH__
 #include <fcntl.h>
@@ -2143,6 +2144,14 @@ void TVPWindowWindow::TickBeat()
 					SDL_RenderSetLogicalSize(this->renderer, logical_rect.w, logical_rect.h);
 				}
 #endif
+				// Phase 3 v2.8: mode5 (gpu-composite-gpuonly.txt) blits the
+				// compose FBO straight onto the window backbuffer inside
+				// krkrsdl2_glc_readback; when it returns true the surface
+				// upload + RenderClear/Copy are skipped and the empty SDL
+				// queue is presented (swap only). Declared outside the
+				// __SWITCH__ guards so the upload gate below compiles on
+				// every platform (always false off-Switch).
+				bool gpuPresented = false;
 #ifdef __SWITCH__
 				if (!this->texture && this->renderer)
 				{
@@ -2221,8 +2230,18 @@ void TVPWindowWindow::TickBeat()
 							}
 						}
 #endif
+#ifdef __SWITCH__
+						// Phase 3: GPU-composed frame read back into the
+						// surface; the validated upload/present chain follows.
+						// Mode 5 returns true when the frame was blitted to
+						// the window backbuffer directly (see gpuPresented).
+						if (this->surface)
+							gpuPresented = krkrsdl2_glc_readback(this->surface->pixels,
+								this->surface->w, this->surface->h,
+								this->surface->pitch);
+#endif
 						const Uint64 uploadStart = SDL_GetPerformanceCounter();
-						if (TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect) != 0)
+						if (!gpuPresented && TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect) != 0)
 						{
 							KRKRNS_LOG("[win] bitmap upload failed: %s", SDL_GetError());
 							return; // Keep pending damage for the next frame.
@@ -2264,8 +2283,13 @@ void TVPWindowWindow::TickBeat()
 #elif defined(__SWITCH__)
 						// The Switch swapchain does not preserve untouched pixels after
 						// Present, so redraw the complete resident texture each time.
-						SDL_RenderClear(this->renderer);
-						SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+						// (Skipped on GPU-presented frames: the blit already wrote the
+						// backbuffer and the queue below is empty -> swap only.)
+						if (!gpuPresented)
+						{
+							SDL_RenderClear(this->renderer);
+							SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+						}
 #elif defined(KRKRSDL2_RENDERER_FULL_UPDATES)
 						SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
 #else
@@ -2297,7 +2321,12 @@ void TVPWindowWindow::TickBeat()
 #ifdef __SWITCH__
 				const Uint64 presentStart = SDL_GetPerformanceCounter();
 #endif
-				SDL_RenderPresent(this->renderer);
+				// GPU-presented frames were already swapped inside
+				// krkrsdl2_glc_readback (SDL_GL_SwapWindow); presenting an
+				// empty SDL queue again is a no-op at best and a skipped
+				// swap at worst on this driver.
+				if (!gpuPresented)
+					SDL_RenderPresent(this->renderer);
 #ifdef __SWITCH__
 				krkrsdl2_prof_accum_present(
 					(SDL_GetPerformanceCounter() - presentStart) * 1000.0 /
@@ -3960,6 +3989,9 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 static char krkrsdl2_stage_buf[2][224];
 static volatile int krkrsdl2_stage_idx = 0;
 static volatile unsigned krkrsdl2_stage_version = 0; // bumped on every set
+static volatile unsigned long long krkrsdl2_main_tick_val = 0;
+void krkrsdl2_heartbeat_main_progress() { krkrsdl2_main_tick_val++; }
+unsigned long long krkrsdl2_heartbeat_main_tick() { return krkrsdl2_main_tick_val; }
 static volatile unsigned krkrsdl2_frozen_version = 0; // last version seen by watchdog
 static volatile int krkrsdl2_frozen_ticks = 0;       // watchdog consecutive same-version beats
 static volatile bool krkrsdl2_watchdog_kick = false;
@@ -3978,10 +4010,24 @@ const char* krkrsdl2_get_stage() { return krkrsdl2_stage_buf[krkrsdl2_stage_idx]
 static int krkrsdl2_heartbeat_thread(void* /*unused*/)
 {
     int n = 0;
+    unsigned long long lastMain = 0;
+    int mainStill = 0;
     while (true)
     {
         SDL_Delay(3000);
-        KRKRNS_LOG("[heartbeat] alive %d stage=[%s]", ++n, krkrsdl2_get_stage());
+        const unsigned long long nowMain = krkrsdl2_heartbeat_main_tick();
+        if (nowMain == lastMain) ++mainStill; else mainStill = 0;
+        lastMain = nowMain;
+        KRKRNS_LOG("[heartbeat] alive %d stage=[%s] main=%s",
+                   ++n, krkrsdl2_get_stage(),
+                   mainStill >= 2 ? "STALLED" : "ok");
+        if (mainStill >= 2)
+        {
+            KRKRNS_LOG("[heartbeat] MAIN THREAD STALLED for at least %d seconds "
+                       "-- last stage=%s, tick=%llu",
+                       mainStill * 3, krkrsdl2_get_stage(),
+                       (unsigned long long)lastMain);
+        }
         if (krkrsdl2_stage_version == krkrsdl2_frozen_version)
         {
             ++krkrsdl2_frozen_ticks;
@@ -4125,6 +4171,7 @@ void krkrsdl2_run_main_loop(void)
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	emscripten_set_main_loop(process_events, 0, 0);
 #else
+	krkrsdl2_heartbeat_main_progress();
 	while (process_events());
 #endif
 }

@@ -22,6 +22,8 @@
 #include "DebugIntf.h"
 #include "LayerTreeOwner.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSLog.h"
+#include "GLCompositeBridge.h"
 
 
 
@@ -88,6 +90,7 @@ tTVPBaseBitmap * tTVPLayerManager::GetDrawTargetBitmap(const tTVPRect &rect,
 	{
 		// create draw buffer
 		DrawBuffer = new tTVPBaseBitmap(w, h, 32);
+		krkrsdl2_glc_set_compose_target(DrawBuffer);
 	}
 	else
 	{
@@ -1060,8 +1063,49 @@ void TJS_INTF_METHOD tTVPLayerManager::UpdateToDrawDevice()
 {
 	// drawdevice -> layer
 	if(!Primary) return;
+#ifdef __SWITCH__
+	// Keep this aggregate cheap enough for production builds: it tells us
+	// whether a slow scene is genuinely repainting most of the screen or is
+	// spending its time traversing the layer tree for a small dirty region.
+	static unsigned regionFrames = 0;
+	static unsigned long long regionRects = 0;
+	static unsigned long long regionPixels = 0;
+	static unsigned long long regionBounds = 0;
+	static unsigned long long regionMaxPixels = 0;
+	unsigned long long framePixels = 0;
+	tTVPComplexRect::tIterator regionIt = UpdateRegion.GetIterator();
+	while(regionIt.Step())
+	{
+		const tTVPRect &r = *regionIt;
+		if(r.get_width() > 0 && r.get_height() > 0)
+			framePixels += static_cast<unsigned long long>(r.get_width()) *
+				static_cast<unsigned long long>(r.get_height());
+	}
+	regionRects += UpdateRegion.GetCount();
+	regionPixels += framePixels;
+	if(framePixels > regionMaxPixels) regionMaxPixels = framePixels;
+	if(UpdateRegion.GetCount() > 0)
+	{
+		const tTVPRect &b = UpdateRegion.GetBound();
+		if(b.get_width() > 0 && b.get_height() > 0)
+			regionBounds += static_cast<unsigned long long>(b.get_width()) *
+				static_cast<unsigned long long>(b.get_height());
+	}
+	if(++regionFrames >= 60)
+	{
+		KRKRNS_LOG("[layer] update-region rects=%.1f pixels=%.0f bound=%.0f max=%llu/921600",
+			(double)regionRects / regionFrames,
+			(double)regionPixels / regionFrames,
+			(double)regionBounds / regionFrames,
+			regionMaxPixels);
+		regionFrames = 0;
+		regionRects = regionPixels = regionBounds = regionMaxPixels = 0;
+	}
+#endif
 	krkrsdl2_prof_begin_compose();
+	krkrsdl2_glc_begin_frame();
 	Primary->CompleteForWindow(this);
+	krkrsdl2_glc_end_frame();
 	krkrsdl2_prof_end_compose();
 }
 //---------------------------------------------------------------------------

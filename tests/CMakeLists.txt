@@ -16,6 +16,7 @@ add_executable(emote_gl_test emote_gl_test.cpp
     "${PORT_ROOT}/src/plugins/emoteplayer/EmoteGLRenderBackend.cpp"
     "${PORT_ROOT}/src/plugins/emoteplayer/EmoteSWRenderBackend.cpp")
 target_include_directories(emote_gl_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/stubs"
     "${PORT_ROOT}/src/plugins/emoteplayer" "${PORT_ROOT}/src/core/sdl2")
 target_compile_definitions(emote_gl_test PRIVATE SDL_MAIN_HANDLED NOMINMAX)
 target_link_libraries(emote_gl_test PRIVATE SDL2::SDL2)

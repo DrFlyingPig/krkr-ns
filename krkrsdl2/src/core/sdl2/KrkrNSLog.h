@@ -11,6 +11,7 @@
 extern void krkrsdl2_logf_impl(const char *fmt, ...);
 extern void krkrsdl2_set_stage(const char *stage);
 extern const char * krkrsdl2_get_stage();
+extern void krkrsdl2_heartbeat_main_progress();
 #define KRKRNS_LOG(...) krkrsdl2_logf_impl(__VA_ARGS__)
 // Publish what the main thread is currently doing; the heartbeat thread
 // reports it periodically, so a hang pinpoints its own stage.

@@ -67,7 +67,7 @@ public:
 		int err = 0;
 		OpusFileCallbacks callbacks = { read_func, seek_func, tell_func, close_func };
 		InputFile.reset( op_open_callbacks( this, &callbacks, NULL, 0, &err) );
-		if( err != 0 ) {
+		if( err != 0 || !InputFile ) {
 			// error!
 			return false;
 		}
@@ -84,11 +84,11 @@ public:
 		memset( &Format, 0, sizeof(Format) );
 		Format.SamplesPerSec = 48000; // Opus always output 48kHz
 		Format.Channels = oh->channel_count;
-		Format.BitsPerSample = FloatExtraction ? (0x10000 + 32) :  16;
+		Format.BitsPerSample = FloatExtraction ? 32 : 16;
 		Format.BytesPerSample = Format.BitsPerSample / 8;
 		Format.SpeakerConfig = 0;
 		Format.IsFloat = FloatExtraction;
-		Format.Seekable = true;
+		Format.Seekable = op_seekable(InputFile.get()) != 0;
 
 		ogg_int64_t pcmtotal = op_pcm_total(InputFile.get(), -1); // PCM total samples
 		if( pcmtotal < 0 ) pcmtotal = 0;
@@ -160,7 +160,7 @@ public:
 	*/
 	bool SetPosition(tjs_uint64 samplepos)  override {
 		// set PCM position (seek)
-		if(!InputFileInit) return false;
+		if(!InputFileInit || !Format.Seekable) return false;
 
 		if( 0 != op_pcm_seek(InputFile.get(), samplepos) ) {
 			return false;
@@ -195,9 +195,12 @@ private:
 			seek_type = TJS_BS_SEEK_END;
 			break;
 		}
-		tjs_uint64 curpos = decoder->Stream->GetPosition();
-		tjs_uint64 newpos = decoder->Stream->Seek(static_cast<tjs_int64>(offset), seek_type);
-		return curpos != newpos ? 0 : 1;
+		try {
+			decoder->Stream->Seek(static_cast<tjs_int64>(offset), seek_type);
+			return 0;
+		} catch(...) {
+			return -1;
+		}
 	}
 	int static close_func(void *stream) {
 		tTVPWD_Opus * decoder = (tTVPWD_Opus*)stream;
@@ -223,7 +226,10 @@ public:
 //---------------------------------------------------------------------------
 tTVPWaveDecoder * tTVPWDC_Opus::Create(const ttstr & storagename, const ttstr &extension)
 {
-	if(extension != TJS_W(".opus")) return nullptr;
+	// Kirikiroid distributions commonly retain the generic .ogg extension
+	// even when the first packet is OpusHead.  libopusfile validates the
+	// stream, so trying both extensions does not steal Vorbis files.
+	if(extension != TJS_W(".opus") && extension != TJS_W(".ogg")) return nullptr;
 
 	try {
 		std::unique_ptr<tTJSBinaryStream> stream( TVPCreateStream(storagename) );
@@ -232,6 +238,7 @@ tTVPWaveDecoder * tTVPWDC_Opus::Create(const ttstr & storagename, const ttstr &e
 			if( decoder->CheckFormat() == false ) {
 				return nullptr;
 			}
+			TVPAddLog(ttstr(TJS_W("[audio] built-in Opus opened: ")) + storagename);
 			return decoder.release();
 		}
 	} catch(...) {
