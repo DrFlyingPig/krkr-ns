@@ -368,3 +368,12 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 - **修复**：对齐 KRKRZ Win32 的 IStream 接法，`VideoOvlImpl` 将已由 `TVPCreateStream` 解析成功的同一条 `tTJSBinaryStream` 交给 `SwitchMovieOverlay`；FFmpeg 自定义 AVIO 的 read/seek/size 全部直接调用 KRKR 流，因此松散文件、XP3/7z 条目及 autopath 命中使用同一语义，不再拼 `krkrsdl2_game_dir` 或调用 `fopen`。
 - **生命周期与边界**：播放器无条件接管并在 FFmpeg 上下文之后释放存储流；AVIO 缓冲改为规范的 `av_malloc` 所有权；EOF 返回 `AVERROR_EOF`；seek 校验有符号溢出、范围与实际落点；Rewind 重新创建同名 KRKR 存储流。
 - **本地验证**：`build_nro.sh` 完整编译、链接、打包成功；唯一产物 `build-switch/krkrsdl2.nro`，大小 26,931,617 字节，MD5 `48e01d47ed27a27ed89bd4969dc7df6f`，SHA-256 `8d8096c73019641af5b93a9db0e318648ca4a8bd39a3f095e65330c1981b8ded`。真机应先出现 `[movie] storage ready` 和 `[movie] ready`；画面、节奏、完成事件仍以真机为准，视频音频仍未实现。
+
+### P48: xgkfg 固定位置闪退定案 — layerExImage 缺失 + 心跳线程退出竞态 (2026-09-09, d9e66768)
+- **现象**：星光咖啡馆与死神之蝶（xgkfg）每次到 OP 开场 logo 动画结束的固定位置闪退；真机上进程死亡后大气层 `bsdsocket` 触发 User Break，整机崩溃。模拟器同样复现。
+- **模拟器日志定案（干净证据）**：`ServiceAm Exit` 之后，崩溃线程是**我们自己的 heartbeat 线程**——`krkrsdl2_heartbeat_thread → krkrsdl2_logf_impl → write → _write_r → armGetTls` 空指针（`Invalid memory access at 0x0`，TPIDR_EL0 已被 libnx 回收）。heartbeat 是 detached 且 `while(true)`，进程退出后仍继续写日志。真机崩溃报告里 41 个线程停在同一 h264 地址、PC 落在无关代码，是进程死亡后内存被踩坏的次生现象；模拟器符号完整，给出真实落点。
+- **触发根因**：游戏 `system/LayerEx.tjs` 用 `Plugins.link("layerExImage.dll")` 向 **Layer 基类**注册 11 个扩展方法（含 `clipAlphaRect`）；Switch 的 `TVPLoadPlugin` 只打 `plugin unavailable` 警告即返回，方法从未注册。`KAGLayer.tjs` 本身不含该成员（字符串表已核对），调用点来自 `world.tjs onPaint → AffineLayer.tjs onPaint`。异常发生在 immediate onPaint 事件内，KAG 无法恢复 → 弹致命错误框（`start.ks 行:31`）→ 进程退出 → 上述心跳竞态崩溃。
+- **修复 1（脚本层）**：`compat-patches/system/k2compat.tjs` 增加 `Layer.clipAlphaRect` 垫片。签名 `(dx, dy, src, sx, sy, sw, sh, opa)` 由两处独立证据确定：游戏日志寄存器 dump，以及 `.zcode/affine-image-decompiled.tjs` 的反编译调用点（`clipAlphaRect(maskleft, masktop, tempLayer, 0, 0, imageWidth, imageHeight, 0)`）。实现委托给引擎原生 `Layer.copyRect`（已做 alpha 保留的矩形拷贝），尾部 opacity 接受但忽略。加载顺序已核对：`k2compat.tjs` 在 `LayerEx.tjs` 之前（日志 377 vs 384 行），且 `LayerEx.tjs` 只做 DLL link、不重新定义方法，垫片不会被覆盖。
+- **修复 2（C++ 层）**：`krkrsdl2_log_shutdown` 闸门——`krkrsdl2_logf_impl` 首行检查、心跳循环退出条件、`krkrsdl2_cleanup()` 在 `delete Application` 前置位。即使将来还有别的脚本异常，也不会再拖崩进程/系统。
+- **模拟器验证**：`clipAlphaRect` 异常 0 次（修复前每帧抛）、消息框 0 个（修复前弹致命框）、OP 动画正常播完（yuzulogo/m2logo）、游戏持续运行至正式对白（heartbeat 持续增长、`main=ok`、音频推进到 `noz001_058.ogg`、50–153 fps）。NRO MD5 `d9e66768fd300475d5487d7867d20e36`，27,843,745 字节。
+- **真机待验证**：同样路径应不再闪退，且不再有大气层崩溃报告。

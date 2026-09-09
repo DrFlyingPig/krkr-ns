@@ -65,8 +65,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
+// Set once the process starts tearing down.  The diagnostic heartbeat thread
+// is detached and would otherwise keep calling write() after libnx has
+// reclaimed its thread-local storage, faulting in armGetTls (observed as an
+// "Invalid memory access at 0x0" right after the guest issued Exit).
+volatile bool krkrsdl2_log_shutdown = false;
 void krkrsdl2_logf_impl(const char *fmt, ...)
 {
+	if (krkrsdl2_log_shutdown) return;
 	static int logfd = -1;
 	if (logfd < 0)
 		logfd = open("sdmc:/krkrsdl2_debug.log", O_WRONLY | O_CREAT | O_TRUNC);
@@ -4012,9 +4018,10 @@ static int krkrsdl2_heartbeat_thread(void* /*unused*/)
     int n = 0;
     unsigned long long lastMain = 0;
     int mainStill = 0;
-    while (true)
+    while (!krkrsdl2_log_shutdown)
     {
         SDL_Delay(3000);
+        if (krkrsdl2_log_shutdown) break;
         const unsigned long long nowMain = krkrsdl2_heartbeat_main_tick();
         if (nowMain == lastMain) ++mainStill; else mainStill = 0;
         lastMain = nowMain;
@@ -4178,6 +4185,11 @@ void krkrsdl2_run_main_loop(void)
 
 void krkrsdl2_cleanup(void)
 {
+#ifdef __SWITCH__
+	// Stop the detached diagnostic heartbeat before teardown: its log writes
+	// would otherwise race libnx thread/TLS destruction and fault.
+	krkrsdl2_log_shutdown = true;
+#endif
 	// delete application and exit forcely
 	// this prevents ugly exception message on exit
 	delete ::Application;
