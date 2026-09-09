@@ -572,6 +572,7 @@ src/plugins/psbfile/PSBData.cpp
 src/plugins/kagparser/KAGParser.cpp
 src/plugins/csvparser/CSVParser.cpp
 src/plugins/textrender/TextRenderBase.cpp
+src/plugins/layerexbtoa/LayerExBTOA.cpp
 src/plugins/ncbind/ncbind.cpp
 src/plugins/emoteplayer/BinaryAccessor.cpp
 src/plugins/emoteplayer/emotefile.cpp
@@ -589,6 +590,7 @@ src/plugins/psbfile
 src/plugins/kagparser
 src/plugins/csvparser
 src/plugins/textrender
+src/plugins/layerexbtoa
 src/plugins/ncbind
 src/plugins/emoteplayer
 external/krkrz/external/glm

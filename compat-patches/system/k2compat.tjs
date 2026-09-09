@@ -243,23 +243,3 @@ if (typeof(WaveSoundBuffer.setDefaultAheads) == "undefined") {
         return null;
     };
 }
-
-// layerExImage.dll extends Layer with clipAlphaRect.  Yuzusoft KAG systems
-// (CafeStella and siblings) call it from AffineLayer/world onPaint; a missing
-// member raises inside an immediate event that KAG cannot recover from, so the
-// game aborts at the opening animation and the port's detached heartbeat
-// thread then faults during process teardown.  The engine's native
-// Layer.copyRect already performs an alpha-preserving rectangular copy, so the
-// shim forwards to it.  Signature: (dx, dy, src, sx, sy, sw, sh, opa); the
-// trailing opacity is accepted and ignored (full opacity) rather than
-// throwing, matching the other unavailable-plugin shims.
-if (typeof(Layer.clipAlphaRect) != "Function") {
-    Layer.clipAlphaRect = function(dx, dy, src, sx, sy, sw, sh, opa) {
-        if (src === void || src === null) return;
-        if (sx === void) sx = 0;
-        if (sy === void) sy = 0;
-        if (sw === void || sw === 0) sw = src.imageWidth;
-        if (sh === void || sh === 0) sh = src.imageHeight;
-        this.copyRect(dx, dy, src, sx, sy, sw, sh);
-    };
-}

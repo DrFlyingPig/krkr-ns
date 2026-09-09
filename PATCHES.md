@@ -377,3 +377,19 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 - **修复 2（C++ 层）**：`krkrsdl2_log_shutdown` 闸门——`krkrsdl2_logf_impl` 首行检查、心跳循环退出条件、`krkrsdl2_cleanup()` 在 `delete Application` 前置位。即使将来还有别的脚本异常，也不会再拖崩进程/系统。
 - **模拟器验证**：`clipAlphaRect` 异常 0 次（修复前每帧抛）、消息框 0 个（修复前弹致命框）、OP 动画正常播完（yuzulogo/m2logo）、游戏持续运行至正式对白（heartbeat 持续增长、`main=ok`、音频推进到 `noz001_058.ogg`、50–153 fps）。NRO MD5 `d9e66768fd300475d5487d7867d20e36`，27,843,745 字节。
 - **真机待验证**：同样路径应不再闪退，且不再有大气层崩溃报告。
+
+### P49: xgkfg 上半屏变暗修正 — clipAlphaRect 改为原生 alpha 遮罩语义 (2026-09-09, e47db9a8)
+- **现象**：P48 修复闪退后，游戏可运行，但画面上约 62% 高度处出现全宽锐利亮度突变（上半屏亮度约为下半屏的 0.22–0.28 倍），像被蒙了一层暗色。
+- **根因**：P48 的脚本垫片把 `clipAlphaRect` 实现成了 `Layer.copyRect`——**拷贝 RGB 和 alpha**。而上游权威实现（`.zcode/upstream-krkrsdl3/plugins/LayerExBTOA.cpp`）的语义是**只把源图 alpha 与目标 alpha 相乘**（遮罩），完全不碰 RGB：
+  ```c
+  unsigned long n = (*p) * (*q);              // dst_alpha * src_alpha
+  *p = (unsigned char)((n + (n >> 7)) >> 8);  // 只写 alpha 字节
+  ```
+  游戏用遮罩图做屏幕遮罩时，垫片把遮罩的黑色 RGB 整块贴了上去，于是被遮罩区域整体变暗。
+- **修复**：移除脚本垫片，改为**移植上游原生实现** `krkrsdl2/src/plugins/layerexbtoa/LayerExBTOA.cpp`（`layerExBTOA.dll`，挂 6 个 Layer 扩展方法：clipAlphaRect / fillAlpha / copyAlphaToProvince / fillByProvince / copyRightBlueToLeftAlpha / copyBottomBlueToTopAlpha）。
+  - 引擎早已暴露所需属性（`mainImageBuffer` / `mainImageBufferForWrite` / `mainImageBufferPitch` / `provinceImageBuffer*` / `hasImage`，LayerIntf.cpp:9508-9598），无需新增接口。
+  - 上游用 `TJS_N`（窄串），本项目 `tjs_char` 是 char16_t，全部改为 `TJS_W`。
+  - 静态库链接锚点：`krkrsdl2_link_layerexbtoa_plugin()`（同 emoteplayer 模式），否则注册表静态初始化被链接器丢弃（表现为符号不在最终 ELF）。
+  - `PluginImpl.cpp` 加 `layerexbtoa.dll` 分支走 `ncbAutoRegister::LoadModule`（该插件不注册新类，只给 Layer 挂函数，无法用 `TVPHasSwitchBuiltin` 检测）。
+- **模拟器验证**：日志 `(info) loaded built-in plugin: layerexbtoa.dll`（不再是 unavailable）；`clipAlphaRect` 异常 0 次；OP 播完进入对白；程序化像素分析确认亮度剖面平整（原 62% 处的 4.5 倍突变消失，仅剩 UI 元素边缘的 ±30）。NRO MD5 `e47db9a81ababade2289ced7713f25b4`。
+- **教训**：DLL 插件扩展方法必须按上游实现移植，不能凭签名猜语义；`TJS_N`→`TJS_W` 与静态库链接锚点是本仓库移植 ncbind 插件的两个固定步骤。

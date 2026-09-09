@@ -59,6 +59,8 @@
 #include "ncbind/ncbind.hpp"
 extern "C" void krkrsdl2_link_emoteplayer_plugin();
 #endif
+// Static-archive anchor for the layerExBTOA built-in (see layerexbtoa).
+extern "C" void krkrsdl2_link_layerexbtoa_plugin();
 
 
 //---------------------------------------------------------------------------
@@ -498,9 +500,9 @@ static bool TVPPluginLoading = false;
 // the set of actual registrations, never the set of attempted DLL loads.
 static std::set<ttstr> ns_builtin_plugins;
 static std::set<ttstr> ns_unavailable_plugins;
-#ifdef KRKRSDL2_ENABLE_EMOTEPLAYER
+// Populated by the ncbind auto-register table (see plugins/ncbind/ncbind.cpp);
+// used to confirm that a statically linked module really registered.
 extern std::set<ttstr> TVPRegisteredPlugins;
-#endif
 static bool TVPHasSwitchBuiltin(const ttstr& name)
 {
 	const tjs_char* class_name = nullptr;
@@ -562,6 +564,22 @@ void TVPLoadPlugin(const ttstr & name)
 		if (ns_builtin_plugins.insert(short_name).second)
 			TVPAddLog(ttstr(TJS_W("(info) loaded built-in plugin: ")) + short_name);
 		return;
+	}
+	// layerExBTOA attaches extension functions directly to the Layer class
+	// (clipAlphaRect and friends) rather than registering a new class, so it
+	// cannot be detected through TVPHasSwitchBuiltin.  Route it through the
+	// ncbind auto-register table like the E-mote module.
+	if (short_name == TJS_W("layerexbtoa.dll"))
+	{
+		// Force the translation unit out of the static archive first.
+		krkrsdl2_link_layerexbtoa_plugin();
+		ncbAutoRegister::LoadModule(short_name);
+		if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())
+		{
+			if (ns_builtin_plugins.insert(short_name).second)
+				TVPAddLog(ttstr(TJS_W("(info) loaded built-in plugin: ")) + short_name);
+			return;
+		}
 	}
 	// Kirikiroid2 tolerates requests for unsupported desktop modules, but
 	// does not advertise them in getList(). Scripts retain their fallback.
