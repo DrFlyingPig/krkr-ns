@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include "StorageImpl.h"
 //---------------------------------------------------------------------------
 
@@ -1473,9 +1474,18 @@ static bool TVPGraphicCacheEnabled = false;
 static tjs_uint64 TVPGraphicCacheLimit = 0;
 static tjs_uint64 TVPGraphicCacheTotalBytes = 0;
 tjs_uint64 TVPGraphicCacheSystemLimit = 0; // maximum possible value of  TVPGraphicCacheLimit
+// KRKR-ns: the cache is touched from BOTH the main thread (synchronous
+// TVPLoadGraphic / TVPCheckImageCache) and the async image loader thread
+// (GraphicsLoadThread calls TVPPushGraphicCache/TVPHasImageCache after
+// decoding).  tTJSHashTable is not thread-safe; concurrent access corrupts
+// the table and hangs the process (observed as "game freezes after opening a
+// few UI panels").  Recursive so nested helpers (CheckLimit inside Push /
+// SetLimit) do not deadlock.
+static std::recursive_mutex gGraphicCacheLock;
 //---------------------------------------------------------------------------
 static void TVPCheckGraphicCacheLimit()
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	while(TVPGraphicCacheTotalBytes > TVPGraphicCacheLimit)
 	{
 		// chop last graphics
@@ -1496,6 +1506,7 @@ static void TVPCheckGraphicCacheLimit()
 //---------------------------------------------------------------------------
 void TVPClearGraphicCache()
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	TVPGraphicCache.Clear();
 	TVPGraphicCacheTotalBytes = 0;
 }
@@ -1517,6 +1528,7 @@ static bool TVPClearGraphicCacheCallbackInit = false;
 //---------------------------------------------------------------------------
 void TVPPushGraphicCache( const ttstr& nname, tTVPBaseBitmap* bmp, std::vector<tTVPGraphicMetaInfoPair>* meta )
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	if( TVPGraphicCacheEnabled ) {
 		// graphic compact initialization
 		if(!TVPClearGraphicCacheCallbackInit)
@@ -1565,6 +1577,7 @@ void TVPPushGraphicCache( const ttstr& nname, tTVPBaseBitmap* bmp, std::vector<t
 //---------------------------------------------------------------------------
 bool TVPCheckImageCache( const ttstr& nname, tTVPBaseBitmap* dest, tTVPGraphicLoadMode mode, tjs_uint dw, tjs_uint dh, tjs_int32 keyidx, iTJSDispatch2** metainfo )
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	tjs_uint32 hash;
 	tTVPGraphicsSearchData searchdata;
 	if(TVPGraphicCacheEnabled)
@@ -1594,6 +1607,7 @@ bool TVPCheckImageCache( const ttstr& nname, tTVPBaseBitmap* dest, tTVPGraphicLo
 // 検索だけする
 bool TVPHasImageCache( const ttstr& nname, tTVPGraphicLoadMode mode, tjs_uint dw, tjs_uint dh, tjs_int32 keyidx )
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	tjs_uint32 hash;
 	tTVPGraphicsSearchData searchdata;
 	if(TVPGraphicCacheEnabled)
@@ -1870,6 +1884,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 
 	if(TVPGraphicCacheEnabled)
 	{
+		std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 		searchdata.Name = nname;
 		searchdata.KeyIdx = keyidx;
 		searchdata.Mode = mode;
@@ -1907,6 +1922,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 
 		if(TVPGraphicCacheEnabled)
 		{
+			std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 			data = new tTVPGraphicImageData();
 			data->AssignBitmap(dest);
 			data->ProvinceName = pn;
@@ -2029,6 +2045,7 @@ void TVPTouchImages(const std::vector<ttstr> & storages, tjs_int64 limit,
 	count--;
 	for(;count >= 0; count--)
 	{
+		std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 		tTVPGraphicsSearchData searchdata;
 		searchdata.Name = TVPNormalizeStorageName(storages[count]);
 		searchdata.KeyIdx = TVP_clNone;
@@ -2061,6 +2078,7 @@ void TVPTouchImages(const std::vector<ttstr> & storages, tjs_int64 limit,
 void TVPSetGraphicCacheLimit(tjs_uint64 limit)
 {
 	// set limit of graphic cache by total bytes.
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	if(limit == 0 )
 	{
 		TVPGraphicCacheLimit = limit;

@@ -16,6 +16,7 @@
 #include "WindowImpl.h"
 #include "SDLBitmapCompletion.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSProf.h"
 #include "GLCompositeBridge.h"
 
 #if 0
@@ -700,6 +701,10 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::NotifyBitmapCompleted(iTVPLayerManager
 	const TVPBITMAPINFO *bi = bmpinfo ? bmpinfo->GetBITMAPINFO() : nullptr;
 	if (bi)
 	{
+		// KRKR-ns: per-layer compose volume (cliprect pixels) — decomposes the
+		// compose segment in [prof] (layers/lpxM) to separate "many layers"
+		// from "huge blended area" on animated scenes.
+		krkrsdl2_prof_accum_layer(cliprect.get_width(), cliprect.get_height());
 		krkrsdl2_glc_layer(x, y, bits, bi->bmiHeader.biWidth,
 			(bi->bmiHeader.biHeight < 0) ? -bi->bmiHeader.biHeight
 			                             : bi->bmiHeader.biHeight,

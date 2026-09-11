@@ -3,6 +3,7 @@
 #include <SDL.h>
 #include <SDL_opengles2.h>
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include <stdexcept>
@@ -89,6 +90,29 @@ struct EmoteGLRenderBackend::Impl
         bool target;
         GLuint texture = 0, fbo = 0;
         std::vector<uint8_t> pixels;
+        // Region of this render target touched since the last LockTarget.
+        // Readback only needs these pixels: the CPU mirror keeps the rest from
+        // the previous frame, and the mesh vertices are the only writers.
+        // A clear wipes the target, so the mirror is zeroed on the next
+        // readback instead of being re-read from the GPU.
+        int dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
+        bool dirtyValid = false;
+        bool cleared = false;
+        void markDirty(int x0, int y0, int x1, int y1)
+        {
+            if (x0 >= x1 || y0 >= y1) return;
+            if (!dirtyValid) { dirtyX0 = x0; dirtyY0 = y0; dirtyX1 = x1; dirtyY1 = y1; dirtyValid = true; return; }
+            if (x0 < dirtyX0) dirtyX0 = x0;
+            if (y0 < dirtyY0) dirtyY0 = y0;
+            if (x1 > dirtyX1) dirtyX1 = x1;
+            if (y1 > dirtyY1) dirtyY1 = y1;
+        }
+        void clearDirty()
+        {
+            dirtyValid = false;
+            cleared = false;
+            dirtyX0 = dirtyY0 = dirtyX1 = dirtyY1 = 0;
+        }
     };
     std::vector<std::unique_ptr<Image>> images;
     SDL_Window* window = nullptr;
@@ -251,6 +275,50 @@ struct EmoteGLRenderBackend::Impl
         const size_t rowBytes = size_t(image->width) * 4;
         if (clearBeforeRead)
             std::memset(destination, 0, rowBytes * image->height);
+
+        // Only the touched region needs to come back from the GPU: the CPU
+        // mirror already holds every untouched pixel from the previous frame.
+        // Reading a 1920x1080 target in full cost ~8MB per E-mote draw, which
+        // the device logs showed as the dominant cost of animated scenes.
+        // A clear() is handled on the CPU side (the FBO is cleared to
+        // transparent), so it zeroes the mirror instead of forcing a full read.
+        if (!clearBeforeRead)
+        {
+            if (image->cleared)
+                std::memset(destination, 0, rowBytes * size_t(image->height));
+            if (!image->dirtyValid)
+                return; // nothing was drawn: the mirror is already correct
+            const int x0 = std::max(0, image->dirtyX0);
+            const int y0 = std::max(0, image->dirtyY0);
+            const int x1 = std::min(image->width, image->dirtyX1);
+            const int y1 = std::min(image->height, image->dirtyY1);
+            if (x0 >= x1 || y0 >= y1) return;
+            const int w = x1 - x0;
+            const int h = y1 - y0;
+            const size_t scratchRow = size_t(w) * 4;
+            if (tileWidth <= 0 || tileWidth >= w)
+            {
+                readScratch.resize(scratchRow * size_t(h));
+                ReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+                for (int r = 0; r < h; ++r)
+                    std::memcpy(destination + size_t(y0 + r) * rowBytes + size_t(x0) * 4,
+                                readScratch.data() + size_t(r) * scratchRow, scratchRow);
+                return;
+            }
+            // Tiled readback (compatibility renderers that cap a single
+            // readback row): read one tight tile at a time and scatter it.
+            for (int tx = x0; tx < x1; tx += tileWidth)
+            {
+                const int tw = std::min(tileWidth, x1 - tx);
+                const size_t tileRow = size_t(tw) * 4;
+                std::vector<uint8_t> tile(tileRow * size_t(h));
+                ReadPixels(tx, y0, tw, h, GL_RGBA, GL_UNSIGNED_BYTE, tile.data());
+                for (int r = 0; r < h; ++r)
+                    std::memcpy(destination + size_t(y0 + r) * rowBytes + size_t(tx) * 4,
+                                tile.data() + size_t(r) * tileRow, tileRow);
+            }
+            return;
+        }
 
         if (tileWidth <= 0 || tileWidth >= image->width)
         {
@@ -480,6 +548,10 @@ void EmoteGLRenderBackend::ClearTarget(bool clear)
     {
         impl->bind(impl->target);
         impl->ClearColor(0, 0, 0, 0); impl->Clear(GL_COLOR_BUFFER_BIT);
+        // The whole target was wiped. The CPU mirror is zeroed on the next
+        // readback instead of re-reading the cleared FBO from the GPU.
+        impl->target->cleared = true;
+        impl->target->dirtyValid = false;
     }
 }
 uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
@@ -489,6 +561,7 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
     impl->bind(target);
     pitch = target->width * 4;
     impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+    target->clearDirty();
     // Preserve the upstream framebuffer's RGBA/alpha equations exactly.
     // Row 0 maps to logical row 0 of E-mote's clip-space mesh at the Layer bridge.
     return target->pixels.data();
@@ -621,6 +694,29 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
         break;
     }
     gl.DrawElements(GL_TRIANGLES, indexCount, GL_UNSIGNED_SHORT, nullptr);
+    // Track the drawn region in target pixels so LockTarget can read back only
+    // what this frame actually touched (a0 clip space -> framebuffer pixels).
+    {
+        float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+        for (int i = 0; i < count; ++i)
+        {
+            const float x = vertices[i * 4 + 0], y = vertices[i * 4 + 1];
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+        if (minX <= maxX && minY <= maxY)
+        {
+            const float w = float(gl.target->width), h = float(gl.target->height);
+            // 1px margin absorbs the linear-filter footprint at the edges.
+            const int x0 = std::max(0, int(std::floor((minX + 1.0f) * 0.5f * w)) - 1);
+            const int x1 = std::min(gl.target->width, int(std::ceil((maxX + 1.0f) * 0.5f * w)) + 1);
+            const int y0 = std::max(0, int(std::floor((minY + 1.0f) * 0.5f * h)) - 1);
+            const int y1 = std::min(gl.target->height, int(std::ceil((maxY + 1.0f) * 0.5f * h)) + 1);
+            gl.target->markDirty(x0, y0, x1, y1);
+        }
+    }
 #if defined(__SWITCH__) && defined(KRKRNS_EMOTE_CAPTURE_DIAGNOSTICS)
     // KRKR-ns diagnostic: snapshot the target after each of the first draws so
     // the exact call that produces (or destroys) visible content is identified.

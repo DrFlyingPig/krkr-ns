@@ -393,3 +393,114 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
   - `PluginImpl.cpp` 加 `layerexbtoa.dll` 分支走 `ncbAutoRegister::LoadModule`（该插件不注册新类，只给 Layer 挂函数，无法用 `TVPHasSwitchBuiltin` 检测）。
 - **模拟器验证**：日志 `(info) loaded built-in plugin: layerexbtoa.dll`（不再是 unavailable）；`clipAlphaRect` 异常 0 次；OP 播完进入对白；程序化像素分析确认亮度剖面平整（原 62% 处的 4.5 倍突变消失，仅剩 UI 元素边缘的 ±30）。NRO MD5 `e47db9a81ababade2289ced7713f25b4`。
 - **教训**：DLL 插件扩展方法必须按上游实现移植，不能凭签名猜语义；`TJS_N`→`TJS_W` 与静态库链接锚点是本仓库移植 ncbind 插件的两个固定步骤。
+
+### P50: 上传链优化 + 部分更新自检（横纹残留根因坐实）(2026-09-09, 15347831)
+- **动机**（真机日志 xgkfg）：稳态帧 8.5ms 花在每帧全幅上传 1920×1080（upMB/f=7.9）而引擎脏区常仅 2016px。
+- **改动**：
+  1. 剖析器口径修正——`total/fps` 原取单帧间隔冒充每帧均值；现 emit 时用整窗口时间除以帧数（`windowStart` 只在 emit 时推进）。
+  2. 上传优化（diff-rows）：surface 与上次上传内容做 shadow 逐行 memcmp，只上传变化行带；shadow 仅在**上传成功后**更新；`InvalidateFullSurface`（纹理/表面重建）清空 shadow 强制全幅；每 60 帧一次全幅兜底。
+  3. E-mote GL 后端脏区回读：`Image` 记录本帧绘制包围盒（DrawMesh 顶点 + ClearTarget 全清），`LockTarget` 只回读脏区，未动区保留 CPU mirror（full-frame 时零拷贝语义不变）。
+  4. **部分更新自检 `KRKRNS_UploadProbe`**：真实尺寸 1920×1080 纹理 + 三个不同高度 band（红/绿/蓝）+ 间隙行保持灰，RenderCopy 后按 SDL_RenderReadPixels 小 probe 验证。**关键**——2×2 与 1920×2 小探针在模拟器 PASS 但无法复现故障；全尺寸 1080 行探针才暴露问题。
+- **横纹残留根因（真机/模拟器 A/B + 探针实证）**：模拟器（Nextendo NV120 软 GL）对**全尺寸纹理的部分行更新**不正确——band 更新后该区域读回为黑/错乱（探针 red/green/blue-band 全 MISMATCH、rgb 读到 0），间隙区保持灰因此画面呈现"横纹残留"；而 full-frame 整幅上传正常（用户 A/B：full-frame 无残留、diff-rows 有）。模拟器 ReadPixels 整幅截断（320 宽）同源——该驱动只可靠支持全幅/小块操作。
+- **修复形态**：`fullframe-upload.txt`（强制全幅）/`diffrows-upload.txt`（强制 diff-rows）标记 + **默认运行探针**：BROKEN → 自动 full-frame（正确，稍慢），OK → diff-rows（省带宽）。模拟器探针 BROKEN → 自动 full-frame（画面正常，用户确认）；真机硬件 GL 预期 OK → diff-rows 生效。日志：`[win] upload probe ... partial-update=BROKEN/OK` + `[win] upload mode=...`。
+- **模拟器验证**：探针 6 点全打日志；自动回退 full-frame 后画面正常（用户确认无横纹）；NRO MD5 `153478313262f72471d49521a0b6c150`。
+- **真机待验证**：探针应为 OK 且 diff-rows 生效（upload 大幅下降）；如真机某驱动也 BROKEN 会同样自动回退，安全。
+
+### P51: Auto Path 表增量构建 — 加载期秒级停顿消除 (2026-09-09)
+- **现象**（真机日志 xgkfg）：启动/场景切换时 `(info) Rebuilding Auto Path Table ... Total 97531 file(s) found (220-550ms)` 反复出现几十次，伴随 `MAIN THREAD STALLED for at least 6/9/12/15/18/21 seconds` 一连串，加载要卡数秒到十几秒。
+- **根因**（StorageIntf.cpp）：KAG 启动每挂载一个归档就调 `TVPAddAutoPath`，其内部 `TVPClearAutoPathCache()` **清空整个表并置 AutoPathTableInit=false** → 下一次 `TVPGetPlacedPath` 查找触发 `TVPRebuildAutoPathTable()` 全量重建（枚举所有已挂载归档的全部文件名）。挂载 N 个归档 → N 次全量重建，每次 220-550ms。
+- **修复**（增量构建）：
+  - `TVPAddAutoPath` 只清 `TVPAutoPathCache`（文件名查找缓存，新路径可能遮蔽旧文件，必须失效），**保留表**。
+  - 新增 `AutoPathBuiltCount` 记录已入表的路径数；`TVPRebuildAutoPathTable` 在表已建时只枚举 `[BuiltCount..end)` 的新路径**追加**（顺序与全量一致，`tTJSHashTable::Add` 覆盖语义不变），无新增时静默返回。
+  - 提取 `TVPEnumerateAutoPathEntry(path)` 单路径枚举，全量/增量共用（archive> 与目录两分支逻辑逐字保留）。
+  - `TVPClearAutoPathCache`（compact 回调等）仍全清+重置 BuiltCount。
+- **模拟器验证**：Rebuilding 从几十次全量 → 首次一次性 288ms（48018 文件）+ 之后每次 0-10ms 增量；`STALLED` 0 次；游戏正常进入（heartbeat ok）。探针再次确认模拟器部分更新 BROKEN（红色 band 错位写进 green-band 位置）→ 自动 full-frame 保画面正确。
+
+### P52: compose 细分计数（layers/lpxM）— Stage 3.2 立项数据 (2026-09-09)
+- `BasicDrawDevice::NotifyBitmapCompleted` 每层一次 `krkrsdl2_prof_accum_layer(cliprect)` → `[prof]` 行新增 `layers=`（每帧层数）与 `lpxM=`（每帧合成百万像素）。
+- **模拟器（星光咖啡馆 logo 场景）首轮数据**：`layers=1.0 lpxM≈2.0`（=1920×1080 单层全屏），compose=20-42ms。**结论：单层 1080p 的 CPU 合成本身就 20-42ms**——瓶颈是引擎层内容生成+混合的像素量，不是层数/遍历。真机动画场景 compose 47-54ms 同源。
+- **Stage 3.2（图层=GL 纹理、混合走着色器）收益预期**：单层 1080p quad 在 GPU <1ms，compose 可降 20-50×；这是动画场景 30fps 的唯一路径，数据已足够立项。
+
+### P53: 真机启动闪退修复 — 自动上传探针停用，默认回 full-frame (2026-09-09, ed793403)
+- **现象**：P50 之后构建真机一打开就闪退，日志停在 `[glc] marker absent (CPU composite) mode=0`（launcher 首次 TickBeat 的上传决策处），模拟器完全正常。
+- **根因**：P50 的 `KRKRNS_UploadProbe` 自动探针在**首次渲染前**执行：创建 1920×1080 `SDL_TEXTUREACCESS_TARGET` 纹理 + `SDL_RenderClear/RenderCopy` + **`SDL_RenderReadPixels`**。真机（Mesa 20.1.0-rc3 / nouveau）上该序列崩溃；模拟器跑过掩盖了它。同一驱动之前还表现出整幅 ReadPixels 截断（E-mote 探针 320 宽 bug）——`SDL_RenderReadPixels` 不可靠是已知模式。
+- **修复**：上传模式**默认 full-frame**（回归 P50 之前的安全路径），不再自动运行探针；diff-rows 改为显式标记 `diffrows-upload.txt` 开启（可真机验证驱动后使用）。`KRKRNS_UploadProbe` 函数保留但不再自动调用。
+- **模拟器验证**：`[win] upload mode=full-frame`，游戏正常（heartbeat ok）。
+- **真机待验证**：应能正常打开；如需 diff-rows 性能，放 `diffrows-upload.txt` 后再跑一轮确认无残留/无崩溃。
+
+### P54: 默认启用解码图像缓存 — 点击菜单/对话框卡顿修复 (2026-09-09)
+- **现象**（真机，P50-P53 之后仍存在）：点击游戏内各种按钮（系统菜单/快速存取/对话框）瞬间明显卡顿，**某个 CPU 核 100%**。
+- **定位**：打开 quickmenu/dialog/file（存档列表）时，主线程**逐个解码 psb 容器内的 TLG 图标**（quickmenu 32 个、dialog 50、**file.pimg 99**）。引擎图像缓存机制（`TVPGraphicCache`：按存储名缓存解码位图，`TVPLoadGraphic` 命中直接拷贝、解码后自动入缓存）**从未启用**——只有脚本 `System.graphicCacheLimit` 属性才调用 `TVPSetGraphicCacheLimit`，本游戏未设置 → `TVPGraphicCacheEnabled=false` → **每次点开菜单都重新解码**。
+- **修复**（SysInitImpl.cpp，Switch）：算出 `TVPGraphicCacheSystemLimit`（物理内存/10，上限 512MB）后，若当前 limit==0 则 `TVPSetGraphicCacheLimit(SystemLimit)` 默认启用。日志 `[ns] graphic cache enabled: %lluMB`。游戏脚本仍可显式覆盖。
+- **效果**：启动期已加载的 UI 资源解码结果留在缓存 → **再次打开同一菜单/对话框命中缓存、零解码、秒开**；首次打开仍解码（不可避免）。模拟器验证 `graphic cache enabled: 40MB`（模拟器报告内存小；真机 3GB → ~307MB）运行正常。
+- **待真机验证**：点系统菜单/快速存取不再卡；若仍有切换场景类卡顿（非 UI 资源），下一步可加 FreeType 字形缓存。
+
+### P55: 图像缓存并发锁 — 修复"点多 UI 后卡死" (2026-09-09)
+- **现象**（真机）：P54 启用缓存后反复打开同一 UI 变快，但**连续打开多个不同 UI 后游戏卡死**。
+- **根因**：`TVPGraphicCache` 是无锁 `tTJSHashTable`，被**两个线程**访问——主线程同步 `TVPLoadGraphic`/`TVPCheckImageCache`（读写）与**异步图片加载线程**（`GraphicsLoadThread::LoadingThread` 解码后 `TVPPushGraphicCache`/`TVPHasImageCache` 写/读）。启用缓存前这两个异步路径因 `Enabled=false` 从不碰表；启用后并发读写哈希表 → 表结构损坏 → 死循环/卡死。
+- **修复**（GraphicsLoaderIntf.cpp）：全局 `std::recursive_mutex gGraphicCacheLock`，包住所有缓存访问点——`TVPCheckGraphicCacheLimit`/`TVPClearGraphicCache`/`TVPPushGraphicCache`/`TVPCheckImageCache`/`TVPHasImageCache`/`TVPLoadGraphic` 查询与写入段/`TVPTouchImages` re-touch/`TVPSetGraphicCacheLimit`。递归锁避免 CheckLimit 在 Push/SetLimit 内重入死锁。
+- **模拟器验证**：缓存启用+加锁运行正常（`graphic cache enabled: 40MB`）。同时反复打开同一 UI 保持命中（P54 收益不丢）。
+- **待真机验证**：连续点开多个 UI（系统菜单→快存→读档→选项等轮换）不再卡死。
+
+### P56: 选项页「字体选择」卡死根因 — 缺失哑元资源 dummy_colorpicker (2026-09-09)
+- **确定性复现**：点击游戏内设置/选项页的「字体选择」项必卡死（画面冻结、仅心跳、无渲染）。**与图像缓存无关**（禁用缓存 A/B 仍卡死）。
+- **日志定案**：`kaglayer.tjs loadImages → Layer.loadImages("dummy_colorpicker", 0x1FFFFFFF)` ← `buttonlayer.tjs loadButtons` ← `messagelayer.tjs addSystemButton` ← `hsvcpick.tjs setupColorPicker` ← `option.ks:31`；引擎抛 `Cannot suggest graphics extension for .../dummy_colorpicker` → **致命错误**（弹错误框）→ KAG 状态机停住 → 卡死。
+- **根因**：`dummy_colorpicker` 是 hsvcpick（色相/饱和度取色器）的**哑元占位资源名**，该文件在游戏全部归档（play/bgimage/fgimage/main/uipsd/voice/…）与松散目录中**均不存在**；引擎在"无扩展名且 auto-path 无候选"时抛致命异常（PC 版数据含该文件或引擎行为不同）。
+- **修复**（数据侧，不动游戏与引擎语义）：在 compat 层补 8×8 全透明哑元图 `compat-patches/system/dummy_colorpicker.png`——`file://?/romfs:/compat/system/` 已在 auto-path（SDLApplication.cpp:4170），`Layer.loadImages` 的 auto-ext-fill 因此命中，不再抛错。构建日志确认 `Writing build-switch/romfs/compat/system/dummy_colorpicker.png to RomFS image`。
+- **附带诊断保留**：`Scripts.eval` 3 秒 >2500 次的"eval 风暴哨兵"（打印 `[eval] STORM trace` 脚本栈后中断，防冻结）+ `[imgload] begin/done/dispatch` 异步加载探针 + `no-imagecache.txt`/`no-eval-guard.txt` 标记。
+- **待验证**：选项页字体选择项应可正常打开（取色器哑元为透明图，若显示需美化再换图）。
+
+### P57: 游戏内「结束游戏」返回内置启动器（可连续换游戏）(2026-09-11)
+- **需求**：游戏内点「结束游戏」后回到软件初始化页面（启动器），可再选别的游戏，而不是退出整个 NRO。
+- **机制**：
+  1. **拦截退出**（`SysInitImpl.cpp`）：游戏会话中（`krkrsdl2_game_mode`）`TVPTerminateSync`/`TVPTerminateAsync` 不再终止进程，改为置"回启动器"标志；脚本致命异常路径（`ScriptMgnIntf.cpp` 的两处 `TVPTerminateSync(1)`）因此同样被接管。
+  2. **窗口关闭延迟判定**（`SysInitImpl.cpp::TVPMainWindowClosed` + `SDLApplication.cpp::krkrsdl2_service_window_close_pending`）：窗口关闭**不等于**游戏结束——launchXP3 的 launcher→game 交接会销毁 launcher 窗口，KAG 也可能重建窗口；因此只记 pending，主循环若在 30 帧内看到窗口重新出现就取消，持续无窗口才判定"游戏已结束"。**（首版直接判定，导致游戏刚进 first.ks 就被打回启动器=“游戏都进不去”）**
+  3. **会话清理**（`SDLApplication.cpp::krkrsdl2_return_to_launcher`）：移除本游戏加入的 AutoPath（compat/patch 保留）、恢复挂载前的 `TVPProjectDir/TVPNativeProjectDir/TVPDataPath/TVPNativeDataPath` 与 cwd、清图像缓存/归档缓存/PSB 资源、`TVPReleaseDirectSound`、**显式释放残留的原生窗口**（部分关闭路径只把窗口移出引擎列表，不释放 SDL 窗口 → 重建启动器时报 `Switch only supports one window`），最后重跑 `file://?/romfs:/startup.tjs` 重建启动器。
+  4. **TJS 全局清理**（`krkrsdl2/data/sessionglobals_{capture,drop}.tjs`）：脚本引擎跨会话存活，游戏（及 KAG 兼容层）新增的全局会引用上一会话已销毁的对象 → 第二个游戏启动时 `k2compat.tjs makeDummyProperty` / 游戏 `utils.tjs objectHookInjection` 抛 `The object is already invalidated`。首次会话前用 `Dictionary.keys(global)` 记录基准全局集，会话结束时删除新增项。
+  5. **KAG boot globals 幂等**（`StorageIntf.cpp`）：`global.inXP3archivePacked` 等在第二次会话被游戏声明为只读，重复赋值抛 "Invalid operation for Read-only or Write-only property" → 改为 `if (typeof(...)=="undefined")` 才赋值。
+  6. **E-mote GL 后端窗口重建**（`EmoteGLRenderBackend.cpp`）：后端缓存 window/context，游戏窗口销毁后 `begin()` 永久失败；现改为窗口变化时丢弃旧状态并在新窗口重建 context/program。
+- **教训（TJS2 语法）**：**TJS2 不支持 JavaScript 的 `for (key in object)`**（k2compat.tjs 早有注释说明），枚举对象必须用 `Dictionary.keys/values/contains`；C++ 内嵌多行 TJS 易踩语法坑且报错无行号 → 复杂脚本放 `.tjs` 文件执行。
+- **状态**：机制与各项修复均已构建部署，待完整流程验证（启动器→游戏A→结束游戏→启动器→游戏B）。
+
+### P57b: 跨会话隔离路线修正 — 放弃"删除全局"，改为引擎级容错 (2026-09-11)
+- **走弯路记录**：为消除"上一个游戏的残留对象引用"，先后尝试（a）删除会话新增的全部全局（drop 1070 个）、（b）保留大写类名、（c）按"属性访问抛异常"精准探测失效对象。**三条都不成立**：插件注册的类/常量（`Motion`、`ICC_USEREX_CLASSES`）既不在基准集里、也无法与失效对象区分被删掉；而引擎 `Plugins.link()` 只链接一次、后续会话不重新注册 → 第二个游戏报 `Member "..." does not exist` 或直接闪退。**记录：全局清理不可靠，已完全移除**（`sessionglobals_drop.tjs` 改为空操作，仅保留 capture 供诊断）。
+- **最终方案（引擎级容错，通用）**：
+  1. `TVPShowScriptException`（`eTJS&` 与 `eTJSScriptError&` 两个重载）在 Switch 上**不再弹致命错误框、不再终止**：记录日志 + **恢复 `TVPSetSystemEventDisabledState(false)`** 后继续执行。缺插件成员、可选资源缺失、跨会话失效引用都由它兜住，任何游戏都不会因此中断。
+  2. `Layer.loadImages` 捕获资源不可用异常并跳过该资源（不改引擎底层语义）。
+  3. 窗口关闭判定需"本会话出现过窗口"（避免启动交接期误判），窗口释放改为**先摘链再删**并只在 return_to_launcher 里做（launchXP3 中的强删已移除——那是崩溃源）。
+- **教训**：跨会话复用一个进程/TJS 环境时，**不要试图删除/猜测对方的全局状态**；正确做法是让引擎对"坏引用"容错。
+
+### P57c: 第二个游戏启动失败/闪退根因 — compat 脚本重复执行导致成员丢失 (2026-09-11)
+- **日志定案**：第二次启动时 `Member "Header" does not exist` / `allBitmaps` /（较早的 `Motion`、`ICC_USEREX_CLASSES`）——都是"类已存在但静态成员缺失"。原因：**游戏每次会话都会 `execStorage` 兼容脚本**（`k2compat.tjs`、`win32dialog.tjs`、`k2compat_console/padcommon/modeless.tjs`），它们启动时**重新定义 class**；TJS 对**重复 class 定义抛异常**，脚本**剩余部分（成员绑定/WIN32Dialog.Header 等）不再执行** → 成员缺失 → 后续脚本链崩坏；容错让流程继续跑，最终 native 崩溃（用户看到的"闪退"）。
+- **修复**：给 `compat-patches/system/` 下我们自己的脚本（`k2compat.tjs`/`k2compat_console.tjs`/`win32dialog.tjs`）加**每进程一次**守卫（首行 `if (typeof(global.__krkrns_compat_<file>)=="undefined") {` + 末行 `}`）：第一次安装，之后重复 execStorage 直接跳过。前提成立是因为**已移除跨会话删除全局**，首次安装的类/成员在后续会话仍然有效。游戏包内自带的脚本无法修改，但它们重复执行时异常已被容错记录、已有成员保留。
+- **附加保护**：`TVPShowScriptException` 内加"错误风暴"判定——3 秒内超过 8 次脚本错误即 `krkrsdl2_request_return_to_launcher()` 结束本会话（在损坏状态下继续执行必崩，回到启动器比闪退好）。
+
+### P57d: 回启动器改为"重启应用"（根治跨会话状态问题）(2026-09-11)
+- **结论**：在**同一进程内**复用 TJS 引擎跨游戏不可靠——游戏每次启动都会重新执行自己的初始化脚本（定义 class/全局），重复定义会抛异常并中断其后的成员绑定（`WIN32Dialog.Header`、`ICC_USEREX_CLASSES`、`Motion` 等先后缺失），补丁式容错只能延迟崩溃。
+- **实现**（SDLApplication.cpp + SDLEntrypoint.cpp）：`krkrsdl2_return_to_launcher()` 优先 `envSetNextLoad(argv[0])` + `Application->Terminate()` → libnx 链式重启本 NRO，**引擎状态全新且首屏即启动器**；`envHasNextLoad()` 为假时（如模拟器）回退到同进程清理+重跑启动器脚本。
+- **保留的通用容错**：脚本错误记录并继续（3 秒 >8 次则结束会话）；`Layer.loadImages` 容忍资源缺失；窗口关闭需"本会话出现过窗口"；compat 脚本每进程一次安装；KAG boot globals 幂等；E-mote GL 后端窗口重建。
+
+### P59: 回退「结束游戏→返回启动器」整个功能（按用户要求）(2026-09-11)
+- **决定**：用户明确要求回退到该需求提出之前的版本。P57/P58 的全部功能代码已从工作树中移除并重建部署（nro md5 39d35bbb），完整功能实现已备份在 `D:\KRKR-ns-toolsackup-p58-20260911-152242\working-tree.patch`，将来重启该工作时可从备份恢复。
+- **移除内容**：TVPTerminate* 拦截（SysInitImpl.cpp）、主循环回启动器服务与 autocycle 测试脚手架（Application.cpp/SDLApplication.cpp/startup.tjs）、会话全局清理（capture/drop，两份 .tjs 已删除，C++ 版枚举器也已移除）、`krkrsdl2_release_leftover_windows`/`return_to_launcher`、argv 记录与 next-load 重启（SDLEntrypoint.cpp）、插件卸载导出（PluginImpl.cpp）、归档缓存导出（StorageIntf.cpp）、PSB Clear 导出（PsbFilePlugin.cpp）、E-mote 窗口重建 resetForNewWindow、KAG boot globals 幂等化（恢复无条件赋值）、launchXP3 中关于窗口强删的注释、脚本错误"记录并继续"与错误风暴判定（恢复弹框+终止）、execStorage 解析结果日志。
+- **保留内容**（本会话该需求之外的修复，均与该功能无关）：P50 性能窗口统计修正+分层上传优化、P51 Auto Path 增量构建、P52 合成层计数器、P53 全帧上传默认+探针禁用、P54 图像缓存默认启用、P55 图像缓存并发锁、P56 dummy_colorpicker 缺资源垫图、Layer.loadImages 容错、eval 风暴守卫、心跳诊断、E-mote 脏区回读优化。
+- **行为回到**：游戏内「结束游戏」= 退出整个 NRO（回 hbmenu），与用户提出需求前一致。
+
+### P58 (已随 P59 整体回退，以下为当时记录): 第二个游戏启动失败的真正根因 + 修复（2026-09-11）
+以 `tkzm`（游戏A）→ 结束 → `【KRKR】星光咖啡馆与死神之蝶`（游戏B）的完整流程在模拟器复现并逐条定位。**P57b/P57c 的结论部分是误判**（当时被第 1 条根因掩盖），现更正如下。
+
+1. **【根因·通用】compat/patch 自动路径优先级被翻转**（`SDLApplication.cpp::krkrsdl2_prepare_xp3_game`）
+   - `TVPAutoPathTable` 是**按文件名建的哈希表，后加入者覆盖先加入者**（`tTJSHashTable::Add` 对同 key 直接改值）；而 `TVPAddAutoPath` **对已存在的路径直接跳过**（去重）。
+   - 首次会话顺序为 `[游戏归档…, romfs compat, sdmc patch]` → 我们的 `k2compat.tjs`/`win32dialog.tjs`（Switch 桩）胜出。
+   - 结束游戏返回启动器后，compat/patch 两个路径**仍在列表里**，第二次 `prepare_xp3_game` 时 `TVPAddAutoPath` 跳过它们 → 新的游戏归档被**追加到其后** → 游戏自带的**桌面版** `system/k2compat.tjs`、`system/win32dialog.tjs` 反而胜出（两款游戏包内都确实带了这两份 UTF-16 脚本），于是引擎加载了依赖 win32 插件的原版脚本 → `Member "Header" does not exist` / `makeDummyProperty` 等连锁失败。**这就是"第一个游戏正常、第二个游戏崩"的机制**（同一游戏作为第一个启动也正常）。
+   - **修复**：每次挂载游戏前先 `TVPRemoveAutoPath` 再 `TVPAddAutoPath` 这两个路径，保证它们始终位于列表末尾（最高优先级）。
+2. **【根因·通用】上一会话的 TJS 全局残留**（`krkrsdl2/data/sessionglobals_capture.tjs` + `sessionglobals_drop.tjs` 重新启用）
+   - 会话结束时按基准集删除本次新增的全局。**实测确认**：`Dictionary` 等引擎类**在基准集内**（日志 `Dictionary is Object, in base=1`），插件类也在基准集内（引擎启动时经 `TVPCauseAtInstallExtensionClass` 注册）→ **不会被删**。删除量约 900 个/次。
+   - 不删则第二会话在 KAG `utils.tjs objectHookInjection` 读 `__InjectionTable` 里上一会话留下的 `releaseCapture_` 包装（指向已失效对象）抛 `The object is already invalidated`。
+   - 配套：**不要**清空 `TVPRegisteredPlugins`。清了之后 `Plugins.link("emoteplayer.dll")` 会再次 `Regist()`，而类仍在（基准集内）→ 抛 `Already registerd class.`，第二个游戏再次失败。记录保持一致即可。
+3. **【通用健壮性】**`startup.tjs::launchSelectedGame` 的 catch 里补 `launching = false`：`launching` 是所有点击/按键的闸门，启动失败抛异常会把它永久卡在 `true` → **启动器看起来"卡死"**（用户实际遇到的现象）。
+4. **诊断增强**：`KRKRNS_LOG("[launcher] own path=%s next-load=%d")`（启动时一次，判定能否链式重启）、`[execStorage] 名字 <- 解析结果`（一眼看出 compat 脚本被谁覆盖）。
+5. **平台事实（实测）**：模拟器（Nextendo/Ryujinx）**`envHasNextLoad()==0` 且不传 argv**，因此**只能走同进程回退**；真机 hbmenu 提供 argv[0] 且支持 next-load → 走链式重启。`krkrsdl2_return_to_launcher()` 增加了 argv 缺失时对常见安装路径的探测。
+6. **测试脚手架**：`sdmc:/switch/krkrsdl2/autocycle.txt` 存在时，运行中的游戏约 20 秒自动结束、启动器自动轮流启动各游戏文件夹 → 无需 UI 输入即可回归"换游戏"全流程。**该文件平时不存在，行为与正式版一致**（验证完已删除）。
+- **实测结果（模拟器，带 autocycle）**：连续 5 轮「启动 → 结束 → 回到启动器 → 再启动」的**交接本身已稳定**——每轮都能结束会话、清掉 900 个残留全局、重建启动器并再次启动，无卡死、无 native 崩溃。
+- **当时仍存的问题（已修，待复验）**：第 2 轮起 `Plugins.link` 抛 `Already registerd class.`（原因见第 2 条后半：多加了清空插件注册表的动作）。已撤销该动作，第二次会话应能完整启动；再次带 autocycle 复验时确认。

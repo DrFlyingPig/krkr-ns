@@ -25,6 +25,11 @@ extern void krkrsdl2_prof_accum_frame();
 extern void krkrsdl2_prof_begin_compose();
 extern void krkrsdl2_prof_end_compose();
 extern void krkrsdl2_prof_accum_surface_copy(double ms);
+/* per-layer composition volume (called from NotifyBitmapCompleted): feeds the
+ * per-frame "layers/lpxM" fields that decompose the compose segment — helps
+ * decide whether a slow animated scene is dominated by the number of layers,
+ * the blended pixel volume, or the tree traversal. */
+extern void krkrsdl2_prof_accum_layer(unsigned w, unsigned h);
 extern void krkrsdl2_prof_accum_upload(double ms, unsigned bytes);
 extern void krkrsdl2_prof_accum_present(double ms);
 extern void krkrsdl2_prof_emit_and_reset(double interval_ms);
@@ -47,6 +52,7 @@ static inline void krkrsdl2_prof_accum_frame() {}
 static inline void krkrsdl2_prof_begin_compose() {}
 static inline void krkrsdl2_prof_end_compose() {}
 static inline void krkrsdl2_prof_accum_surface_copy(double ms) {}
+static inline void krkrsdl2_prof_accum_layer(unsigned w, unsigned h) {}
 static inline void krkrsdl2_prof_accum_upload(double ms, unsigned bytes) {}
 static inline void krkrsdl2_prof_accum_present(double ms) {}
 static inline void krkrsdl2_prof_emit_and_reset(double interval_ms) {}

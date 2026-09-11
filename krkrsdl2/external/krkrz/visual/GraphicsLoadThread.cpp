@@ -1,5 +1,6 @@
 
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 
 #include "BitmapIntf.h"
 #include "GraphicsLoadThread.h"
@@ -128,6 +129,8 @@ void tTVPAsyncImageLoader::HandleLoadedImage() {
 		}
 		if( cmd != NULL ) {
 			cmd->bmp_->SetLoading( false );
+			KRKRNS_LOG("[imgload] dispatch %s%s", cmd->path_.AsNarrowStdString().c_str(),
+				cmd->result_.length() ? " (error)" : "");
 			if( cmd->result_.length() > 0 ) {
 				// error
 				tTJSVariant param[4];
@@ -251,7 +254,10 @@ void tTVPAsyncImageLoader::LoadingThread() {
 			}
 			if( cmd ) {
 				loading = true;
+				KRKRNS_LOG("[imgload] begin %s", cmd->path_.AsNarrowStdString().c_str());
 				LoadImageFromCommand(cmd);
+				KRKRNS_LOG("[imgload] done %s%s", cmd->path_.AsNarrowStdString().c_str(),
+					cmd->result_.length() ? " (error)" : "");
 				{	// Lock
 					tTJSCriticalSectionHolder cs(ImageQueueCS);
 					LoadedQueue.push(cmd);

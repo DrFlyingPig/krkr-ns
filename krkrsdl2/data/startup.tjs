@@ -162,6 +162,10 @@ function launchSelectedGame() {
             redrawLauncher();
         }
     } catch (e) {
+        // A launch that throws must not leave the launcher latched: `launching`
+        // gates every click and key press, so without this the picker looks
+        // frozen until the app is restarted.
+        launching = false;
         Debug.message("[launcher] failed: " + e.message);
         throw e;
     }
@@ -211,3 +215,4 @@ keepSelectionVisible();
 redrawLauncher();
 launcherWindow.visible = true;
 Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gameFiles.count);
+

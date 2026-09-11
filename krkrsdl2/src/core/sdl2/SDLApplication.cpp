@@ -53,6 +53,10 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <algorithm>
+#include <set>
+#include <string>
+#include <atomic>
+#include <cstring>
 #include <vector>
 #endif
 
@@ -60,6 +64,7 @@
 #include "KrkrNSProf.h"
 #include "ThreadIntf.h"
 #include "GLCompositeBridge.h"
+#include "GraphicsLoaderIntf.h"
 
 #ifdef __SWITCH__
 #include <fcntl.h>
@@ -103,6 +108,8 @@ static struct {
 	double upload_ms;       // SDL_UpdateTexture
 	double present_ms;      // RenderClear + RenderCopy + RenderPresent
 	unsigned long long upload_bytes;
+	unsigned long long layer_count;   // NotifyBitmapCompleted calls
+	unsigned long long layer_px;      // sum of layer cliprect pixels
 	unsigned loop_frames;   // Application::Run iterations
 	unsigned update_frames; // frames with a graphic update (emit cadence)
 } g_krkrns_prof;
@@ -137,6 +144,12 @@ void krkrsdl2_prof_accum_surface_copy(double ms)
 	g_krkrns_prof.surf_copy_ms += ms;
 }
 
+void krkrsdl2_prof_accum_layer(unsigned w, unsigned h)
+{
+	g_krkrns_prof.layer_count++;
+	g_krkrns_prof.layer_px += (unsigned long long)w * h;
+}
+
 void krkrsdl2_prof_accum_upload(double ms, unsigned bytes)
 {
 	g_krkrns_prof.upload_ms += ms;
@@ -149,21 +162,29 @@ void krkrsdl2_prof_accum_present(double ms)
 	g_krkrns_prof.present_ms += ms;
 }
 
-void krkrsdl2_prof_emit_and_reset(double interval_ms)
+/* window_ms is the wall time covering the whole reporting window (all
+ * update-frames since the previous emit), not a single frame — the caller
+ * measures it from a timestamp it resets only when it emits. Dividing by the
+ * frame count here is what makes total/fps real averages; the earlier code
+ * fed a single-frame delta and printed it as "ms/f". */
+void krkrsdl2_prof_emit_and_reset(double window_ms)
 {
 	const unsigned n = g_krkrns_prof.update_frames ? g_krkrns_prof.update_frames : 1;
 	const unsigned loop = g_krkrns_prof.loop_frames ? g_krkrns_prof.loop_frames : 1;
 	static unsigned prevPoolB = 0, prevPoolBig = 0;
 	const unsigned poolB = krkrsdl2_pool_begins();
 	const unsigned poolBig = krkrsdl2_pool_bigbegins();
-	KRKRNS_LOG("[prof] updates=%u loops=%u total=%.1fms/f fps=%.1f | seg ev=%.2f disp=%.2f tick=%.2f wait=%.2f | compose=%.2f surfcopy=%.2f upload=%.2f present=%.2f | upMB/f=%.1f poolB=%.0f bigB=%.0f", 
-		g_krkrns_prof.update_frames, g_krkrns_prof.loop_frames, interval_ms,
-		interval_ms > 0.0 ? 1000.0 / interval_ms : 0.0,
+	const double per_frame_ms = window_ms / (double)n;
+	KRKRNS_LOG("[prof] updates=%u loops=%u total=%.1fms/f fps=%.1f | seg ev=%.2f disp=%.2f tick=%.2f wait=%.2f | compose=%.2f surfcopy=%.2f upload=%.2f present=%.2f | upMB/f=%.1f layers=%.1f lpxM=%.2f poolB=%.0f bigB=%.0f", 
+		g_krkrns_prof.update_frames, g_krkrns_prof.loop_frames, per_frame_ms,
+		per_frame_ms > 0.0 ? 1000.0 / per_frame_ms : 0.0,
 		g_krkrns_prof.seg[0] / loop, g_krkrns_prof.seg[1] / loop,
 		g_krkrns_prof.seg[2] / loop, g_krkrns_prof.seg[3] / loop,
 		g_krkrns_prof.compose_ms / n, g_krkrns_prof.surf_copy_ms / n,
 		g_krkrns_prof.upload_ms / n, g_krkrns_prof.present_ms / n,
 		(double)g_krkrns_prof.upload_bytes / (1024.0 * 1024.0 * (double)n),
+		(double)g_krkrns_prof.layer_count / (double)n,
+		(double)g_krkrns_prof.layer_px / (1024.0 * 1024.0 * (double)n),
 		(double)(poolB - prevPoolB) / n, (double)(poolBig - prevPoolBig) / n);
 	prevPoolB = poolB;
 	prevPoolBig = poolBig;
@@ -771,6 +792,12 @@ protected:
 #ifdef __SWITCH__
 	/* KRKR-ns patch: set by the trace marker, captured at the next present */
 	bool traceCapturePending = false;
+	/* Shadow of the last uploaded surface content. The engine's update_rect
+	   under-reports scene switches, so the upload damage is derived from
+	   actual pixel differences instead of that rect. */
+	std::vector<uint32_t> uploadShadow;
+	int uploadShadowW = 0;
+	int uploadShadowH = 0;
 #endif
 #ifdef KRKRZ_ENABLE_CANVAS
 	tTVPOpenGLScreen *openGlScreen;
@@ -2031,8 +2058,118 @@ void TVPWindowWindow::Show()
 {
 }
 #ifdef __SWITCH__
+/* Partial-texture-update self test.  The diff-rows upload relies on
+ * glTexSubImage2D updating a band that is NOT the whole texture (yoffset>0).
+ * Some compatibility GL implementations (the Nextendo emulator's software GL)
+ * mishandle that: the device showed stale rows on screen with band uploads
+ * while full-frame uploads were correct.  Probe once at startup by uploading
+ * two rows of distinct colours and reading them back through the real
+ * present path; if the band does not survive, fall back to full-frame uploads
+ * (correct everywhere, just slower). */
+static bool KRKRNS_UploadProbe(SDL_Renderer* renderer)
+{
+	if (!renderer) return false;
+	// Probe at the REAL working size (1920x1080) with THREE one-row-ish bands
+	// at different heights plus untouched rows between them.  This reproduces
+	// the actual diff-rows workload; a small-texture probe cannot see the
+	// "stale horizontal streaks" symptom reported on the emulator (some GL
+	// implementations only mishandle partial updates on large textures).
+	const int probeW = 1920;
+	const int probeH = 1080;
+	SDL_Texture* t = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGB888,
+		SDL_TEXTUREACCESS_TARGET, probeW, probeH);
+	if (!t) return false;
+	std::vector<Uint8> gray((size_t)probeW * probeH * 4);
+	std::vector<Uint8> red((size_t)probeW * 4, 0);
+	std::vector<Uint8> green((size_t)probeW * 4, 0);
+	std::vector<Uint8> blue((size_t)probeW * 4, 0);
+	for (int x = 0; x < probeW; ++x)
+	{
+		// RGB888 memory order is B,G,R,X.
+		size_t o = size_t(x) * 4;
+		gray[o+0] = 128; gray[o+1] = 128; gray[o+2] = 128; gray[o+3] = 255;
+		red[o+2] = 255; red[o+3] = 255;
+		green[o+1] = 255; green[o+3] = 255;
+		blue[o+0] = 255; blue[o+3] = 255;
+	}
+	const int rowPitch = probeW * 4;
+	for (int y = 0; y < probeH; ++y)
+		std::memcpy(gray.data() + size_t(y) * rowPitch, gray.data(), (size_t)probeW * 4);
+	bool ok = false;
+	if (SDL_UpdateTexture(t, nullptr, gray.data(), rowPitch) == 0)
+	{
+		SDL_Rect bands[3] = {{0, 100, probeW, 50},
+		                     {0, 500, probeW, 60},
+		                     {0, 1000, probeW, 20}};
+		const std::vector<Uint8>* cols[3] = {&red, &green, &blue};
+		bool all = true;
+		for (int b = 0; b < 3 && all; ++b)
+		{
+			if (SDL_UpdateTexture(t, &bands[b], cols[b]->data(), rowPitch) != 0)
+				all = false;
+		}
+		if (all)
+		{
+			SDL_RenderClear(renderer);
+			SDL_RenderCopy(renderer, t, nullptr, nullptr);
+			int ow = 0, oh = 0;
+			if (SDL_GetRendererOutputSize(renderer, &ow, &oh) == 0 && ow > 0 && oh > 0)
+			{
+				// Expected: red band ~y=125, green ~y=530, blue ~y=1010,
+				// untouched rows (300, 700, 900) stay gray.  x stays small:
+				// the emulator truncates wide ReadPixels.
+				struct { int texY; bool expectGray; const char* name; } probes[6] = {
+					{125, false, "red-band"},
+					{530, false, "green-band"},
+					{1010, false, "blue-band"},
+					{300, true, "gap-1"},
+					{700, true, "gap-2"},
+					{900, true, "gap-3"},
+				};
+				bool allGood = true;
+				for (auto& p : probes)
+				{
+					const int px = std::min(96, ow - 8);
+					const int py = std::min(oh - 8, int(double(p.texY) * oh / probeH));
+					SDL_Rect r = {px, py, 8, 8};
+					Uint8 pxb[8 * 8 * 3];
+					if (SDL_RenderReadPixels(renderer, &r, SDL_PIXELFORMAT_RGB888,
+							pxb, 8 * 3) != 0)
+					{
+						allGood = false;
+						KRKRNS_LOG("[win] upload probe: %s read-fail", p.name);
+						continue;
+					}
+					const Uint8 B = pxb[0], G = pxb[1], R = pxb[2];
+					const bool isGray = std::abs(int(R) - 128) < 60 &&
+						std::abs(int(G) - 128) < 60 && std::abs(int(B) - 128) < 60;
+					const bool isRed = R > 200 && B < 60 && G < 60;
+					const bool isGreen = G > 200 && B < 60 && R < 60;
+					const bool isBlue = B > 200 && R < 60 && G < 60;
+					const bool match = p.expectGray ? isGray : (isRed || isGreen || isBlue);
+					if (!match) allGood = false;
+					KRKRNS_LOG("[win] upload probe %s texY=%d -> rgb=%d,%d,%d %s",
+						p.name, p.texY, R, G, B, match ? "ok" : "MISMATCH");
+				}
+				ok = allGood;
+				KRKRNS_LOG("[win] upload probe: partial-update=%s", ok ? "OK" : "BROKEN");
+			}
+		}
+	}
+	SDL_DestroyTexture(t);
+	return ok;
+}
+#endif
+
+#ifdef __SWITCH__
 void TVPWindowWindow::InvalidateFullSurface()
 {
+	// A (re)created texture holds undefined content, so the upload shadow is
+	// no longer a valid picture of what the GPU has — force the next upload to
+	// cover everything.
+	this->uploadShadowW = 0;
+	this->uploadShadowH = 0;
+	this->uploadShadow.clear();
 	if (this->bitmapCompletion && this->surface)
 	{
 		tTVPRect r;
@@ -2201,38 +2338,86 @@ void TVPWindowWindow::TickBeat()
 						}
 #endif
 #ifdef __SWITCH__
-						// Full-surface upload every frame. At CPU-backend
-						// frame rates the cost is negligible, and it removes
-						// any chance of stale dirty-rect regions (previous
-						// scene fragments lingering after a switch).
-						// Phase 1: marker sdmc:/switch/krkrsdl2/dirtyrect-update.txt
-						// switches to dirty-rect upload (the streaming texture
-						// retains its content across UpdateTexture calls and
-						// RenderCopy below still redraws the whole backbuffer,
-						// so only the CPU->GPU transfer shrinks). A periodic
-						// full upload stays as a safety net against any stale
-						// dirty-rect bookkeeping.
+						// Upload only the rows that actually changed since the
+						// last upload. Diffing against a shadow of the last
+						// uploaded frame is exact and much cheaper than the old
+						// full 1920x1080 (8.5ms/frame) transfer. Band uploads
+						// need a driver that handles partial glTexSubImage2D
+						// correctly.
+						//
+						// DEFAULT is full-frame: the previous automatic driver
+						// probe (creating a 1920x1080 TARGET texture and calling
+						// SDL_RenderReadPixels on first TickBeat) crashed the
+						// launcher on a real Switch before the first frame was
+						// shown.  diff-rows needs a marker to opt in after the
+						// driver is verified on the target.
+						// Markers (sdmc:/switch/krkrsdl2/):
+						//   diffrows-upload.txt   band uploads (opt-in)
+						//   fullframe-upload.txt  default, kept for clarity
 						{
-							static bool fDirtyRectSet = false;
-							static bool fDirtyRectMode = false;
-							static Uint32 fFullNetCounter = 0;
-							if (!fDirtyRectSet)
+							static bool fUploadModeSet = false;
+							static bool fFullFrameMode = true;
+							if (!fUploadModeSet)
 							{
-								fDirtyRectSet = true;
-								FILE* m = fopen("sdmc:/switch/krkrsdl2/dirtyrect-update.txt", "rb");
-								if (m) { fclose(m); fDirtyRectMode = true; }
-								KRKRNS_LOG("[win] dirty-rect upload mode=%s",
-									fDirtyRectMode ? "on" : "off");
+								fUploadModeSet = true;
+								FILE* full = fopen("sdmc:/switch/krkrsdl2/fullframe-upload.txt", "rb");
+								if (full) { fclose(full); fFullFrameMode = true; }
+								FILE* diff = fopen("sdmc:/switch/krkrsdl2/diffrows-upload.txt", "rb");
+								if (diff) { fclose(diff); fFullFrameMode = false; }
+								KRKRNS_LOG("[win] upload mode=%s",
+									fFullFrameMode ? "full-frame" : "diff-rows");
+								if (fFullFrameMode)
+									this->InvalidateFullSurface();
 							}
-							if (!fDirtyRectMode || (++fFullNetCounter % 120) == 1)
+const int sw = this->surface->w;
+								const int sh = this->surface->h;
+								// Periodic full refresh: guarantees any
+								// band-upload edge case self-heals within a
+								// second (60 frames) instead of lingering as
+								// stale streaks.
+								static Uint32 fFullNetCounter = 0;
+								const bool fullRefresh =
+									(++fFullNetCounter % 60) == 1;
+								const bool shadowValid =
+									!fFullFrameMode && !fullRefresh &&
+									this->uploadShadowW == sw &&
+									this->uploadShadowH == sh &&
+									this->uploadShadow.size() == size_t(sw) * size_t(sh);
+							if (shadowValid)
 							{
-								tTVPRect full;
-								full.left = 0;
-								full.top = 0;
-								full.right = this->surface->w;
-								full.bottom = this->surface->h;
-								rect = SDL_Rect{full.left, full.top,
-												full.get_width(), full.get_height()};
+								const auto* cur = static_cast<const uint32_t*>(this->surface->pixels);
+								const size_t rowWords = size_t(sw);
+								int top = -1, bottom = -1;
+								for (int y = 0; y < sh; ++y)
+								{
+									if (std::memcmp(cur + size_t(y) * rowWords,
+											this->uploadShadow.data() + size_t(y) * rowWords,
+											rowWords * 4) != 0)
+									{
+										if (top < 0) top = y;
+										bottom = y + 1;
+									}
+								}
+								// Nothing changed: keep the texture as-is and
+								// skip the upload entirely.
+								rect = (top < 0) ? SDL_Rect{0, 0, 0, 0}
+								                 : SDL_Rect{0, top, sw, bottom - top};
+							}
+							else
+							{
+								// First frame / size change / forced mode:
+								// upload everything and (re)build the shadow.
+								rect = SDL_Rect{0, 0, sw, sh};
+								if (!fFullFrameMode)
+								{
+									this->uploadShadow.resize(size_t(sw) * size_t(sh));
+									this->uploadShadowW = sw;
+									this->uploadShadowH = sh;
+									// Content is copied after the upload
+									// succeeds (below), so a failed upload
+									// cannot leave the shadow claiming rows
+									// that never reached the GPU.
+								}
 							}
 						}
 #endif
@@ -2253,6 +2438,20 @@ void TVPWindowWindow::TickBeat()
 							return; // Keep pending damage for the next frame.
 						}
 #ifdef __SWITCH__
+						// Record what the GPU now holds. Rows outside `rect`
+						// are unchanged by definition, so only the uploaded
+						// band needs copying.
+						if (!gpuPresented &&
+							this->uploadShadow.size() == size_t(this->surface->w) * size_t(this->surface->h) &&
+							rect.w > 0 && rect.h > 0)
+						{
+							const size_t rowBytes = size_t(this->surface->w) * 4;
+							std::memcpy(this->uploadShadow.data() + size_t(rect.y) * size_t(this->surface->w),
+								static_cast<const uint8_t*>(this->surface->pixels) + size_t(rect.y) * rowBytes,
+								size_t(rect.h) * rowBytes);
+						}
+#endif
+#ifdef __SWITCH__
 						{
 							const Uint64 now = SDL_GetPerformanceCounter();
 							const double freq = (double)SDL_GetPerformanceFrequency();
@@ -2260,17 +2459,23 @@ void TVPWindowWindow::TickBeat()
 								(now - uploadStart) * 1000.0 / freq,
 								(unsigned)(rect.w * rect.h * 4));
 							static Uint32 uploadProf = 0;
-							static Uint64 lastTick = 0;
+							// Window start, advanced ONLY when the line is
+							// emitted. It used to be stamped every frame, so
+							// the "interval" was a single-frame delta and
+							// total/fps were instantaneous, not per-frame
+							// averages.
+							static Uint64 windowStart = 0;
+							if (!windowStart) windowStart = now;
 							if (++uploadProf >= 60)
 							{
 								uploadProf = 0;
-								const double interval =
-									lastTick ? (now - lastTick) * 1000.0 / freq : 0.0;
-								KRKRNS_LOG("[win] frame profile: upload=%.2fms interval=%.1fms",
-									(now - uploadStart) * 1000.0 / freq, interval);
-								krkrsdl2_prof_emit_and_reset(interval);
+								const double window =
+									(now - windowStart) * 1000.0 / freq;
+								windowStart = now;
+								KRKRNS_LOG("[win] frame profile: upload=%.2fms window=%.1fms",
+									(now - uploadStart) * 1000.0 / freq, window);
+								krkrsdl2_prof_emit_and_reset(window);
 							}
-							lastTick = now;
 						}
 #endif
 					}
@@ -2312,15 +2517,19 @@ void TVPWindowWindow::TickBeat()
 					int ow = 0, oh = 0;
 					if (SDL_GetRendererOutputSize(this->renderer, &ow, &oh) == 0 && ow > 0 && oh > 0)
 					{
-						SDL_Surface* shot = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ABGR8888);
-						if (shot)
-						{
-							if (SDL_RenderReadPixels(this->renderer, nullptr, shot->pitch, shot->pixels, shot->pitch) == 0)
-								SDL_SaveBMP(shot, "sdmc:/switch/krkrsdl2/render-present.bmp");
-							else
-								KRKRNS_LOG("[render-trace] readpixels failed: %s", SDL_GetError());
-							SDL_FreeSurface(shot);
-						}
+							SDL_Surface* shot = SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ABGR8888);
+							if (shot)
+							{
+								// NB: the 3rd argument is the destination pixel
+								// FORMAT, not a pitch — passing shot->pitch made
+								// SDL reject the readback as "YUV destination".
+								if (SDL_RenderReadPixels(this->renderer, nullptr,
+										shot->format->format, shot->pixels, shot->pitch) == 0)
+									SDL_SaveBMP(shot, "sdmc:/switch/krkrsdl2/render-present.bmp");
+								else
+									KRKRNS_LOG("[render-trace] readpixels failed: %s", SDL_GetError());
+								SDL_FreeSurface(shot);
+							}
 					}
 				}
 #endif
@@ -3770,7 +3979,6 @@ void krkrsdl2_convert_set_args(int argc, char **argv)
 bool krkrsdl2_game_mode = false;
 ttstr krkrsdl2_game_dir(TJS_W("sdmc:/krkr/")); // non-const: extern-linked
 static const char *krkrsdl2_game_root = "sdmc:/krkr";
-
 static void krkrsdl2_get_process_memory(u64 &total, u64 &used)
 {
 	total = 0;

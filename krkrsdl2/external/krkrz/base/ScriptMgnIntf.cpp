@@ -27,6 +27,7 @@
 #include "TimerIntf.h"
 #include "EventIntf.h"
 #include "SystemIntf.h"
+#include "TickCount.h"
 #include "PluginIntf.h"
 #include "ClipboardIntf.h"
 #include "MsgIntf.h"
@@ -1534,6 +1535,61 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 			}
 		}
 		KRKRNS_LOG("[eval] %s", utf8.c_str());
+
+		// KRKR-ns: runaway-script guard.  A menu page can spin thousands of
+		// Scripts.eval calls with no I/O and no frame output (device logs:
+		// thousands of "@'text/jp/…'"/"@'f_…'" evals, no [prof], heartbeats
+		// alone) — the game looks frozen.  Interrupt the script so KAG's
+		// error handler can drop back to its menu instead of freezing forever.
+		// Marker sdmc:/switch/krkrsdl2/no-eval-guard.txt disables this.
+		{
+			static bool guardChecked = false;
+			static bool guardEnabled = true;
+			if (!guardChecked)
+			{
+				guardChecked = true;
+				FILE* g = fopen("sdmc:/switch/krkrsdl2/no-eval-guard.txt", "rb");
+				if (g) { fclose(g); guardEnabled = false; }
+			}
+			if (guardEnabled)
+			{
+				static unsigned stormCount = 0;
+				static tjs_uint64 stormStart = 0;
+				const tjs_uint64 now = TVPGetTickCount();
+				if (!stormStart || now - stormStart > 3000) { stormStart = now; stormCount = 0; }
+				if (++stormCount > 2500)
+				{
+					stormCount = 0;
+					// Dump the script call stack: this is what pinpoints the
+					// runaway loop's script file and line (the eval frames sit
+					// on top of the looping caller).
+					{
+						ttstr trace = TJSGetStackTraceString(16);
+						std::string u8;
+						for (tjs_uint i = 0; i < trace.GetLen() && i < 900; ++i)
+						{
+							tjs_uint32 ch = static_cast<tjs_uint32>(trace[i]);
+							if (ch < 0x80) u8 += static_cast<char>(ch);
+							else if (ch < 0x800)
+							{
+								u8 += static_cast<char>(0xC0 | (ch >> 6));
+								u8 += static_cast<char>(0x80 | (ch & 0x3F));
+							}
+							else
+							{
+								u8 += static_cast<char>(0xE0 | (ch >> 12));
+								u8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+								u8 += static_cast<char>(0x80 | (ch & 0x3F));
+							}
+						}
+						KRKRNS_LOG("[eval] STORM trace: %s", u8.c_str());
+					}
+					KRKRNS_LOG("[eval] STORM: script aborting runaway loop");
+					TVPThrowExceptionMessage(
+						TJS_W("KRKRNS eval storm guard interrupted the script"));
+				}
+			}
+		}
 	}
 #endif
 

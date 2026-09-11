@@ -1547,6 +1547,24 @@ void TVPAfterSystemInit()
 
 //	TVPGraphicCacheSystemLimit = 1*1024*1024; // DEBUG
 
+#ifdef __SWITCH__
+		// KRKR-ns: enable the decoded-image cache by default.  KAG games do not
+		// touch System.graphicCacheLimit, so TVPGraphicCacheEnabled stayed false and
+		// every menu/dialog open re-decoded all its psb:// TLG icons on the main
+		// thread — the "click any button -> one core pegged at 100% -> lag" symptom
+		// in the device logs (quickmenu 32 / file.pimg 99 resources).  With the
+		// cache on, a previously opened UI opens instantly.
+		// Marker sdmc:/switch/krkrsdl2/no-imagecache.txt disables it (A/B test).
+		FILE* noImageCache = fopen("sdmc:/switch/krkrsdl2/no-imagecache.txt", "rb");
+		if (noImageCache) { fclose(noImageCache); }
+		else if (TVPGetGraphicCacheLimit() == 0 && TVPGraphicCacheSystemLimit > 0)
+		{
+			TVPSetGraphicCacheLimit(TVPGraphicCacheSystemLimit);
+			KRKRNS_LOG("[ns] graphic cache enabled: %lluMB",
+				(unsigned long long)(TVPGraphicCacheSystemLimit / (1024 * 1024)));
+		}
+#endif
+
 
 	// check TVPGraphicSplitOperation option
 	if(TVPGetCommandLine(TJS_W("-gsplit"), &opt))

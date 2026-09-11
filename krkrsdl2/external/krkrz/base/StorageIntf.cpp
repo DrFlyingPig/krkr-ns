@@ -1055,12 +1055,20 @@ tTJSHashCache<ttstr, ttstr> TVPAutoPathCache(TVP_DEFAULT_AUTOPATH_CACHE_NUM);
 tTJSHashTable<ttstr, tTVPFileInfo, tTJSHashFunc<ttstr>, TVP_AUTO_PATH_HASH_SIZE>
 	TVPAutoPathTable;
 bool AutoPathTableInit = false;
+// KRKR-ns: how many entries of TVPAutoPathList are already indexed in
+// TVPAutoPathTable.  Adding an auto path invalidates only the lookup cache;
+// the table is kept and the new entries are appended incrementally on the next
+// rebuild.  KAG mounts one archive at a time during startup, and the previous
+// full-table rebuild (sec: device log "Rebuilding Auto Path Table ... 220-550ms"
+// repeated dozens of times) made the startup pause for many seconds.
+static size_t AutoPathBuiltCount = 0;
 //---------------------------------------------------------------------------
 static void TVPClearAutoPathCache()
 {
 	TVPAutoPathCache.Clear();
 	TVPAutoPathTable.Clear();
 	AutoPathTableInit = false;
+	AutoPathBuiltCount = 0;
 }
 //---------------------------------------------------------------------------
 struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
@@ -1092,7 +1100,11 @@ void TVPAddAutoPath(const ttstr & name)
 	if(i == TVPAutoPathList.end())
 		TVPAutoPathList.push_back(normalized);
 
-	TVPClearAutoPathCache();
+	// KRKR-ns: the table is kept and extended incrementally — only the
+	// filename lookup cache must go (the new path may shadow an existing
+	// file).  The old TVPClearAutoPathCache() here forced a full rebuild on
+	// the next lookup, which KAG startup hit once per mounted archive.
+	TVPAutoPathCache.Clear();
 }
 //---------------------------------------------------------------------------
 void TVPRemoveAutoPath(const ttstr &name)
@@ -1113,147 +1125,164 @@ void TVPRemoveAutoPath(const ttstr &name)
 	TVPClearAutoPathCache();
 }
 //---------------------------------------------------------------------------
+/* Enumerate one auto-path entry (an archive>subdir or a real folder) and add
+ * its files to TVPAutoPathTable.  Used by both the full rebuild and the
+ * incremental append. */
+static tjs_uint TVPEnumerateAutoPathEntry(const ttstr & path)
+{
+	tjs_uint count = 0;
+
+	const tjs_char * sharp_pos = TJS_strchr(path.c_str(), TVPArchiveDelimiter);
+	if(sharp_pos)
+	{
+		// this storagename indicates a file in an archive
+
+		ttstr arcname(path, (int)(sharp_pos - path.c_str()));
+		// Keep only "archive>" as the base.  An auto path may itself
+		// target an in-archive directory (for example "uipsd.xp3>ini/");
+		// appending the entry's full directory to that path would resolve
+		// quickmenu.ini as ini/ini/quickmenu.ini.
+		ttstr archive_root(path,
+			(int)(sharp_pos - path.c_str()) + 1);
+		ttstr in_arc_name(sharp_pos + 1);
+		tTVPArchive::NormalizeInArchiveStorageName(in_arc_name);
+		tjs_int in_arc_name_len = in_arc_name.GetLen();
+
+		tTVPArchive *arc;
+		arc = TVPArchiveCache.Get(arcname);
+
+		try
+		{
+			tjs_uint storagecount = arc->GetCount();
+
+			// get first index which the item has 'in_arc_name' as its start
+			// of the string.
+			tjs_int i = arc->GetFirstIndexStartsWith(in_arc_name);
+			if(i != -1)
+			{
+				for(; i < (tjs_int)storagecount; i++)
+				{
+					ttstr name = arc->GetName(i);
+
+					if(name.StartsWith(in_arc_name))
+					{
+						// KRKR-ns patch: index files in subdirectories too
+						// (KAG games keep system/..., scenario/..., etc.)
+						// — upstream only indexed root files, which broke
+						// "Cannot find storage system/Initialize.tjs".
+						// The file path records the entry's absolute
+						// in-archive directory, relative to archive_root.
+						ttstr sname = TVPExtractStorageName(name);
+						sname.ToLowerCase();
+						// TODO アーカイブの時もプロパティ情報追加
+						TVPAutoPathTable.Add(sname,
+							tTVPFileInfo(archive_root + TVPExtractStoragePath(name)));
+						count ++;
+					}
+					else
+					{
+						// no need to check more;
+						// because the list is sorted by the name.
+						break;
+					}
+				}
+			}
+		}
+		catch(...)
+		{
+			arc->Release();
+			throw;
+		}
+		arc->Release();
+	}
+	else
+	{
+		// normal folder
+		class tLister : public iTVPStorageLister
+		{
+			const ttstr EXT;
+		public:
+			tLister() : EXT(TJS_W(".prop")) {}
+			std::set<ttstr>		list;
+			std::vector<ttstr>	prop;
+			void TJS_INTF_METHOD Add(const ttstr &file)
+			{
+				ttstr ext = TVPExtractStorageExt( file );
+				if( ext == EXT )
+				{
+					prop.push_back( file );
+				}
+				list.insert( file );
+			}
+		} lister;
+		TVPStorageMediaManager.GetListAt(path, &lister);
+
+		if( !TVPIgnoreFileProperty )
+		{
+			// プロパティがあるファイルを追加する
+			for( auto i = lister.prop.begin(); i != lister.prop.end(); i++ ) {
+				// プロパティがある場合はとりあえず登録だけしておき、プロパティ取得時に実際に読み込みを行う
+				ttstr fname = TVPChopStorageExt( *i );
+				auto file = lister.list.find( fname );
+				if( file != lister.list.end() ) {
+					ttstr sname = *file;
+					sname.ToLowerCase();
+					// ファイルがある場合
+					lister.list.erase( sname );
+					TVPAutoPathTable.Add( sname, tTVPFileInfo( path, tTVPFileInfo::EXIST_PROP ) );
+				} else {
+					ttstr sname = fname;
+					sname.ToLowerCase();
+					TVPAutoPathTable.Add( sname, tTVPFileInfo( path, tTVPFileInfo::EXIST_PROP | tTVPFileInfo::EMPTY_FILE ) );
+				}
+			}
+		}
+		// プロパティのないファイルを追加する
+		for( auto i = lister.list.begin(); i != lister.list.end(); i++)
+		{
+			ttstr sname = *i;
+			sname.ToLowerCase();
+			TVPAutoPathTable.Add(sname, tTVPFileInfo(path) );
+			count ++;
+		}
+	}
+
+	return count;
+}
+//---------------------------------------------------------------------------
 static tjs_uint TVPRebuildAutoPathTable()
 {
-	// rebuild auto path table
-	if(AutoPathTableInit) return 0;
+	// KRKR-ns: incremental — when the table is already built, only the auto
+	// paths added since the last build are enumerated and appended.  KAG
+	// mounts archives one at a time, and the old version wiped the table on
+	// every TVPAddAutoPath, so each mounted archive forced a full re-enumeration
+	// of every archive on the next lookup ("Rebuilding Auto Path Table ..."
+	// repeated dozens of times, 220-550ms each, on the device).
+	if(AutoPathTableInit && AutoPathBuiltCount >= TVPAutoPathList.size())
+		return 0; // nothing new since the last build
 
 	TVPInitStorageOptions();
 
 	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
 
-	TVPAutoPathTable.Clear();
-
 	tjs_uint64 tick = TVPGetTickCount();
- 	TVPAddLog( (const tjs_char*)TVPInfoRebuildingAutoPath );
+	TVPAddLog( (const tjs_char*)TVPInfoRebuildingAutoPath );
 
 	tjs_uint totalcount = 0;
-
-	std::vector<ttstr>::iterator it;
-	for(it = TVPAutoPathList.begin(); it != TVPAutoPathList.end(); it++)
+	if(AutoPathTableInit)
 	{
-		const ttstr & path = *it;
-		tjs_uint count = 0;
-
-		const tjs_char * sharp_pos = TJS_strchr(path.c_str(), TVPArchiveDelimiter);
-		if(sharp_pos)
-		{
-			// this storagename indicates a file in an archive
-
-			ttstr arcname(path, (int)(sharp_pos - path.c_str()));
-			// Keep only "archive>" as the base.  An auto path may itself
-			// target an in-archive directory (for example "uipsd.xp3>ini/");
-			// appending the entry's full directory to that path would resolve
-			// quickmenu.ini as ini/ini/quickmenu.ini.
-			ttstr archive_root(path,
-				(int)(sharp_pos - path.c_str()) + 1);
-			ttstr in_arc_name(sharp_pos + 1);
-			tTVPArchive::NormalizeInArchiveStorageName(in_arc_name);
-			tjs_int in_arc_name_len = in_arc_name.GetLen();
-
-			tTVPArchive *arc;
-			arc = TVPArchiveCache.Get(arcname);
-
-			try
-			{
-				tjs_uint storagecount = arc->GetCount();
-
-				// get first index which the item has 'in_arc_name' as its start
-				// of the string.
-				tjs_int i = arc->GetFirstIndexStartsWith(in_arc_name);
-				if(i != -1)
-				{
-					for(; i < (tjs_int)storagecount; i++)
-					{
-						ttstr name = arc->GetName(i);
-
-						if(name.StartsWith(in_arc_name))
-						{
-							// KRKR-ns patch: index files in subdirectories too
-							// (KAG games keep system/..., scenario/..., etc.)
-							// — upstream only indexed root files, which broke
-							// "Cannot find storage system/Initialize.tjs".
-							// The file path records the entry's absolute
-							// in-archive directory, relative to archive_root.
-							ttstr sname = TVPExtractStorageName(name);
-							sname.ToLowerCase();
-							// TODO アーカイブの時もプロパティ情報追加
-							TVPAutoPathTable.Add(sname,
-								tTVPFileInfo(archive_root + TVPExtractStoragePath(name)));
-							count ++;
-						}
-						else
-						{
-							// no need to check more;
-							// because the list is sorted by the name.
-							break;
-						}
-					}
-				}
-			}
-			catch(...)
-			{
-				arc->Release();
-				throw;
-			}
-			arc->Release();
-		}
-		else
-		{
-			// normal folder
-			class tLister : public iTVPStorageLister
-			{
-				const ttstr EXT;
-			public:
-				tLister() : EXT(TJS_W(".prop")) {}
-				std::set<ttstr>		list;
-				std::vector<ttstr>	prop;
-				void TJS_INTF_METHOD Add(const ttstr &file)
-				{
-					ttstr ext = TVPExtractStorageExt( file );
-					if( ext == EXT )
-					{
-						prop.push_back( file );
-					}
-					list.insert( file );
-				}
-			} lister;
-			TVPStorageMediaManager.GetListAt(path, &lister);
-
-			if( !TVPIgnoreFileProperty )
-			{
-				// プロパティがあるファイルを追加する
-				for( auto i = lister.prop.begin(); i != lister.prop.end(); i++ ) {
-					// プロパティがある場合はとりあえず登録だけしておき、プロパティ取得時に実際に読み込みを行う
-					ttstr fname = TVPChopStorageExt( *i );
-					auto file = lister.list.find( fname );
-					if( file != lister.list.end() ) {
-						ttstr sname = *file;
-						sname.ToLowerCase();
-						// ファイルがある場合
-						lister.list.erase( sname );
-						TVPAutoPathTable.Add( sname, tTVPFileInfo( path, tTVPFileInfo::EXIST_PROP ) );
-					} else {
-						ttstr sname = fname;
-						sname.ToLowerCase();
-						TVPAutoPathTable.Add( sname, tTVPFileInfo( path, tTVPFileInfo::EXIST_PROP | tTVPFileInfo::EMPTY_FILE ) );
-					}
-				}
-			}
-			// プロパティのないファイルを追加する
-			for( auto i = lister.list.begin(); i != lister.list.end(); i++)
-			{
-				ttstr sname = *i;
-				sname.ToLowerCase();
-				TVPAutoPathTable.Add(sname, tTVPFileInfo(path) );
-				count ++;
-			}
-		}
-
-//		TVPAddLog(ttstr(TJS_W("(info) Path ")) + path + TJS_W(" contains ") +
-//			ttstr((tjs_int)count) + TJS_W(" file(s)."));
-
-		totalcount += count;
+		const size_t total = TVPAutoPathList.size();
+		for(size_t i = AutoPathBuiltCount; i < total; i++)
+			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]);
+		AutoPathBuiltCount = total;
+	}
+	else
+	{
+		TVPAutoPathTable.Clear();
+		for(size_t i = 0; i < TVPAutoPathList.size(); i++)
+			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]);
+		AutoPathBuiltCount = TVPAutoPathList.size();
+		AutoPathTableInit = true;
 	}
 
 	tjs_uint64 endtick = TVPGetTickCount();
@@ -1262,8 +1291,6 @@ static tjs_uint TVPRebuildAutoPathTable()
 			ttstr((tjs_int)totalcount) + TJS_W(" file(s) found, ") +
 			ttstr((tjs_int)TVPAutoPathTable.GetCount()) + TJS_W(" file(s) activated.") + 
 			TJS_W(" (") + ttstr((tjs_int)(endtick - tick)) + TJS_W("ms)"));
-
-	AutoPathTableInit = true;
 
 	return totalcount;
 }

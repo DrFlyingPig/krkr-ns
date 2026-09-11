@@ -16,6 +16,7 @@
 #include <cmath>
 
 #include "tjsArray.h"
+#include "KrkrNSLog.h"
 #include "LayerIntf.h"
 #include "MsgIntf.h"
 #include "LayerBitmapIntf.h"
@@ -2527,7 +2528,21 @@ iTJSDispatch2 * tTJSNI_BaseLayer::LoadImages(const ttstr &name, tjs_uint32 color
 	ttstr provincename;
 	iTJSDispatch2 * metainfo = NULL;
 
-	TVPLoadGraphic(MainImage, name, colorkey, 0, 0, glmNormal, &provincename, &metainfo);
+	// KRKR-ns: a game may reference a resource that does not resolve in this
+	// distribution (a missing optional asset, or a bare name the engine cannot
+	// map to a graphics extension).  Upstream lets the exception escape, which
+	// KAG turns into a fatal error dialog and a stalled game.  Report it and
+	// leave the layer without an image instead: the rest of the game stays
+	// playable, and the same behaviour covers every title.
+	try
+	{
+		TVPLoadGraphic(MainImage, name, colorkey, 0, 0, glmNormal, &provincename, &metainfo);
+	}
+	catch(eTJSScriptException & e)
+	{
+		KRKRNS_LOG("[layer] loadImages: resource unavailable, layer left empty");
+		return NULL;
+	}
 	try
 	{
 
