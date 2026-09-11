@@ -1743,9 +1743,25 @@ bool TVPTerminateOnWindowClose = true;
 bool TVPTerminateOnNoWindowStartup = true;
 #endif
 int TVPTerminateCode = 0;
+#ifdef __SWITCH__
+// KRKR-ns: while a game session is running, every quit request (System.exit,
+// System.terminate, closing the game window, an unhandled script error) is
+// turned into "end this session and go back to the launcher" instead of
+// terminating the process — the NRO hosts the launcher and many games.
+extern bool krkrsdl2_game_mode;                    // SDLApplication.cpp
+extern void krkrsdl2_request_return_to_launcher(); // SDLApplication.cpp
+extern void krkrsdl2_note_main_window_closed();    // SDLApplication.cpp
+#endif
 //---------------------------------------------------------------------------
 void TVPTerminateAsync(int code)
 {
+#ifdef __SWITCH__
+	if (krkrsdl2_game_mode)
+	{
+		krkrsdl2_request_return_to_launcher();
+		return;
+	}
+#endif
 	// do "A"synchronous temination of application
 	TVPTerminated = true;
 	TVPTerminateCode = code;
@@ -1760,6 +1776,15 @@ void TVPTerminateAsync(int code)
 //---------------------------------------------------------------------------
 void TVPTerminateSync(int code)
 {
+#ifdef __SWITCH__
+	if (krkrsdl2_game_mode)
+	{
+		// Not a real exit: unwind to the main loop, which tears the game
+		// session down and rebuilds the launcher.
+		krkrsdl2_request_return_to_launcher();
+		return;
+	}
+#endif
 	// do synchronous temination of application (never return)
 	TVPSystemUninit();
 	exit(code);
@@ -1768,6 +1793,16 @@ void TVPTerminateSync(int code)
 void TVPMainWindowClosed()
 {
 	// called from WindowIntf.cpp, caused by closing all window.
+#ifdef __SWITCH__
+	if (krkrsdl2_game_mode)
+	{
+		// Might be the launcher->game hand-off or a KAG window rebuild rather
+		// than a real quit; decide after a few frames (see
+		// krkrsdl2_service_window_close_pending).
+		krkrsdl2_note_main_window_closed();
+		return;
+	}
+#endif
 	if( TVPTerminateOnWindowClose) TVPTerminateAsync();
 }
 //---------------------------------------------------------------------------

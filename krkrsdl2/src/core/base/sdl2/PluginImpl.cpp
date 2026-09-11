@@ -534,6 +534,20 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 #endif
 	return false;
 }
+
+// Ending a game session drops every global that session added (see
+// sessionglobals_drop.tjs), which takes the plugin-provided classes with it.
+// ncbind keeps its own per-class record and refuses to register a name twice
+// ("Already registerd class."), so unload them here: Unregist removes the class
+// from the script global and clears that record, and forgetting the name lets
+// the next game's Plugins.link register them again into the fresh global set.
+void TVPUnloadBuiltinPlugins()
+{
+	ncbAutoRegister::AllUnregist();
+	TVPRegisteredPlugins.clear();
+	ns_builtin_plugins.clear();
+	ns_unavailable_plugins.clear();
+}
 #endif
 void TVPLoadPlugin(const ttstr & name)
 {

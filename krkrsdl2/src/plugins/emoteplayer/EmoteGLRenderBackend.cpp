@@ -140,6 +140,21 @@ struct EmoteGLRenderBackend::Impl
         if (result != 0)
             KRKRNS_LOG("[emote] failed to restore SDL GL context: %s", SDL_GetError());
     }
+    /* The SDL window was destroyed (game session ended, launcher rebuilt its
+     * own window).  Everything here is bound to the old window's GL context,
+     * which is already invalid, so drop it WITHOUT issuing GL calls; the next
+     * begin() recreates context/program against the new window. */
+    void resetForNewWindow()
+    {
+        KRKRNS_LOG("[emote] GL backend reset for a new SDL window");
+        program = 0; vbo = 0; ibo = 0;
+        images.clear();
+        target = nullptr; mask = nullptr;
+        window = nullptr; context = nullptr;
+        savedWindow = nullptr; savedContext = nullptr;
+        readTileWidth = 0; readScratch.clear();
+        active = false; failed = false; blend = 0;
+    }
     struct Scope
     {
         Impl& self;
@@ -170,7 +185,15 @@ struct EmoteGLRenderBackend::Impl
         SDL_Renderer* renderer = TVPGetPrimarySDLRenderer();
         if (!renderer) return false;
         SDL_Window* currentWindow = SDL_RenderGetWindow(renderer);
-        if (!currentWindow || (window && currentWindow != window)) return false;
+        if (!currentWindow) return false;
+        if (window && currentWindow != window)
+        {
+            // Game ended and the launcher (or the next game) built a new SDL
+            // window.  Without this the cached window/context made begin()
+            // fail forever, so E-mote stayed dead after returning to the
+            // launcher.
+            resetForNewWindow();
+        }
         SDL_RenderFlush(renderer);
         savedContext = SDL_GL_GetCurrentContext();
         savedWindow = SDL_GL_GetCurrentWindow();

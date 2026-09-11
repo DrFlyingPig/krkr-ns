@@ -819,6 +819,9 @@ private:
 static void TVPClearArchiveCache() { TVPArchiveCache.Clear(); }
 static tTVPAtExit TVPClearArchiveCacheAtExit
 	(TVP_ATEXIT_PRI_SHUTDOWN, TVPClearArchiveCache);
+// KRKR-ns: exported for the "end game session -> back to launcher" path
+// (SDLApplication.cpp), which must not keep the finished game's archives open.
+void krkrsdl2_clear_archive_cache() { TVPClearArchiveCache(); }
 //---------------------------------------------------------------------------
 
 
@@ -1802,13 +1805,18 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 	// game startup scripts evaluate expressions like "kirikiriz -debugwin"
 	// which throw and abort the game's boot when the identifiers are
 	// missing (observed on first run without a saved Config).
+	//
+	// Only set what is missing: the script engine survives across game
+	// sessions here, and a game may declare these as read-only properties
+	// (a plain re-assignment then throws "Invalid operation for Read-only or
+	// Write-only property" and the second launch fails).
 	{
 		TVPExecuteScript(TJS_W(
-			"global.kirikiriz = 1;\n"
-			"global.debugwin = 0;\n"
-			"global.inXP3archivePacked = 1;\n"
-			"global.convertMode = 0;\n"
-			"global.debugWindowEnabled = 0;\n"
+			"if (typeof(global.kirikiriz) == \"undefined\") global.kirikiriz = 1;\n"
+			"if (typeof(global.debugwin) == \"undefined\") global.debugwin = 0;\n"
+			"if (typeof(global.inXP3archivePacked) == \"undefined\") global.inXP3archivePacked = 1;\n"
+			"if (typeof(global.convertMode) == \"undefined\") global.convertMode = 0;\n"
+			"if (typeof(global.debugWindowEnabled) == \"undefined\") global.debugWindowEnabled = 0;\n"
 		));
 		KRKRNS_LOG("[launcher] KAG boot globals ensured");
 	}
@@ -1825,6 +1833,10 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 			tTJSVariantClosure launcher = param[2]->AsObjectClosureNoAddRef();
 			if(launcher.Object)
 				launcher.Invalidate(0, nullptr, nullptr, launcher.ObjThis);
+			// NOTE: deliberately do not force-free leftover window forms here.
+			// The game creates its own window right after this, and reaching
+			// into the window list at this point risks freeing the very form the
+			// engine is still tearing down.
 		}
 		KRKRNS_STAGE("game startup begin");
 		{

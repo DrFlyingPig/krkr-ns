@@ -831,6 +831,26 @@ void tTVPApplication::Run() {
 	tarminate_ = true;
 #endif
 	const Uint64 prof_t0 = SDL_GetPerformanceCounter();
+#ifdef __SWITCH__
+	// A quit request from inside a game is not a process exit: tear the game
+	// session down and rebuild the built-in launcher, then keep running.
+	// A closed main window is only a *candidate* quit (the launcher hand-off
+	// and KAG window rebuilds close windows too), so it is serviced here over
+	// a few frames before it can raise the flag.
+	{
+		extern void krkrsdl2_service_window_close_pending();
+		extern bool krkrsdl2_take_return_to_launcher();
+		extern void krkrsdl2_return_to_launcher();
+		extern void krkrsdl2_service_autocycle();
+		krkrsdl2_service_window_close_pending();
+		krkrsdl2_service_autocycle();
+		if (krkrsdl2_take_return_to_launcher())
+		{
+			krkrsdl2_return_to_launcher();
+			return;
+		}
+	}
+#endif
 	sdl_process_events();
 	if (tarminate_)
 	{

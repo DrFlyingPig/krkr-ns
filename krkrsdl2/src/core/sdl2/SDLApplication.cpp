@@ -3979,6 +3979,250 @@ void krkrsdl2_convert_set_args(int argc, char **argv)
 bool krkrsdl2_game_mode = false;
 ttstr krkrsdl2_game_dir(TJS_W("sdmc:/krkr/")); // non-const: extern-linked
 static const char *krkrsdl2_game_root = "sdmc:/krkr";
+
+/* ---- return-to-launcher support -------------------------------------------
+ * The NRO hosts the game picker (romfs:/startup.tjs) plus the games mounted
+ * from sdmc:/krkr/<dir>.  A quit request inside a game (System.exit /
+ * System.terminate / closing the game window / a fatal script error) must end
+ * the *session*, not the process, so the player lands back on the picker.
+ * TVPTerminate* (SysInitImpl.cpp) calls krkrsdl2_request_return_to_launcher();
+ * the main loop (Application::Run) takes the flag and runs
+ * krkrsdl2_return_to_launcher() below. */
+static std::atomic<bool> krkrsdl2_return_to_launcher_flag{false};
+void krkrsdl2_request_return_to_launcher()
+{
+	krkrsdl2_return_to_launcher_flag.store(true);
+}
+bool krkrsdl2_take_return_to_launcher()
+{
+	return krkrsdl2_return_to_launcher_flag.exchange(false);
+}
+
+/* Closing the main window is NOT proof that the game ended: the launcher
+ * hand-off destroys the launcher window before the game creates its own, KAG
+ * may rebuild its window when it applies a display mode, and some titles only
+ * create their window a while after their startup script returns.  So a close
+ * counts only once this session has actually shown a window, and then only if
+ * no window comes back within a short grace period. */
+static bool krkrsdl2_window_close_pending = false;
+static unsigned krkrsdl2_window_close_frames = 0;
+static bool krkrsdl2_game_had_window = false;
+void krkrsdl2_note_main_window_closed()
+{
+	if (!krkrsdl2_game_mode) return;
+	if (!krkrsdl2_game_had_window)
+	{
+		// Launcher hand-off / before the game's own window: not a quit.
+		return;
+	}
+	krkrsdl2_window_close_pending = true;
+	krkrsdl2_window_close_frames = 0;
+}
+void krkrsdl2_service_window_close_pending()
+{
+	if (TVPGetWindowCount() > 0)
+	{
+		// A window exists: the session is alive.  Remember that a window was
+		// seen, so a later close can be interpreted as a real quit, and cancel
+		// any pending close (hand-off or rebuild).
+		krkrsdl2_game_had_window = true;
+		krkrsdl2_window_close_pending = false;
+		return;
+	}
+	if (!krkrsdl2_window_close_pending) return;
+	if (++krkrsdl2_window_close_frames > 30)
+	{
+		krkrsdl2_window_close_pending = false;
+		KRKRNS_LOG("[launcher] game closed its window, ending session");
+		krkrsdl2_request_return_to_launcher();
+	}
+}
+
+// Auto-path entries added for the current game (removed when it ends);
+// the compat/patch entries are permanent and stay.
+static std::vector<ttstr> krkrsdl2_game_autopaths;
+
+// Session-global bookkeeping.  A game (and the KAG layer it loads) adds globals
+// on top of the launcher's set, and those reference objects that die with the
+// game window -- KAG's hook table (__InjectionTable) keeps per-method wrappers
+// around them, so the next game fails with "The object is already invalidated"
+// while installing its own hooks.  The base set is captured before the first
+// game mounts and everything added since is removed when a session ends.
+//
+// Removal uses the engine's DeleteMember rather than a script assignment: a
+// game can leave a name behind as a read-only property (KAG's boot flags such
+// as inXP3archivePacked), and a script cannot assign over that -- but the next
+// game's startup script assigns these unconditionally, so the member has to go.
+class tKRKRNSGlobalNameCollector : public tTJSDispatch
+{
+public:
+	std::vector<ttstr> Names;
+	tjs_error TJS_INTF_METHOD FuncCall(tjs_uint32 flag, const tjs_char *membername,
+		tjs_uint32 *hint, tTJSVariant *result, tjs_int numparams,
+		tTJSVariant **param, iTJSDispatch2 *objthis)
+	{
+		if (membername) Names.push_back(ttstr(membername));
+		else if (numparams >= 3 && param[2]->Type() == tvtString) Names.push_back(ttstr(*param[2]));
+		if (result) *result = (tjs_int)1;
+		return TJS_S_OK;
+	}
+};
+
+static void krkrsdl2_collect_global_names(std::vector<ttstr> &out)
+{
+	out.clear();
+	iTJSDispatch2 *global = TVPGetScriptDispatch();
+	if (!global) return;
+	tKRKRNSGlobalNameCollector *collector = new tKRKRNSGlobalNameCollector();
+	{
+		tTJSVariantClosure closure(collector);
+		global->EnumMembers(TJS_IGNOREPROP | TJS_ENUM_NO_VALUE, &closure, nullptr);
+		out = collector->Names;
+		collector->Release();
+	}
+	global->Release();
+}
+
+static std::set<ttstr> krkrsdl2_base_globals;
+static bool krkrsdl2_base_globals_captured = false;
+
+// UTF-8 view of a ttstr for the log (ttstr is UTF-16; only the ASCII globals we
+// care about are printed, the rest are truncated by maxlen).
+static std::string krkrns_utf8_of(const ttstr &s, tjs_uint maxlen)
+{
+	std::string out;
+	for (tjs_uint i = 0; i < s.GetLen() && i < maxlen; ++i)
+	{
+		tjs_uint32 ch = (tjs_uint32)s[i];
+		if (ch < 0x80) out += (char)ch;
+		else if (ch < 0x800) { out += (char)(0xC0 | (ch >> 6)); out += (char)(0x80 | (ch & 0x3F)); }
+		else { out += (char)(0xE0 | (ch >> 12)); out += (char)(0x80 | ((ch >> 6) & 0x3F)); out += (char)(0x80 | (ch & 0x3F)); }
+	}
+	return out;
+}
+
+void krkrsdl2_capture_base_globals()
+{
+	if (krkrsdl2_base_globals_captured) return;
+	krkrsdl2_base_globals_captured = true;
+	std::vector<ttstr> names;
+	krkrsdl2_collect_global_names(names);
+	for (size_t i = 0; i < names.size(); ++i) krkrsdl2_base_globals.insert(names[i]);
+	KRKRNS_LOG("[launcher] base globals captured: %d", (int)krkrsdl2_base_globals.size());
+}
+
+void krkrsdl2_drop_session_globals()
+{
+	std::vector<ttstr> names;
+	krkrsdl2_collect_global_names(names);
+	iTJSDispatch2 *global = TVPGetScriptDispatch();
+	if (!global) return;
+	int dropped = 0, kept = 0;
+	std::string sample;
+	for (size_t i = 0; i < names.size(); ++i)
+	{
+		const ttstr &name = names[i];
+		if (name.StartsWith(TJS_W("__krkrns_"))) continue; // our own bookkeeping
+		if (krkrsdl2_base_globals.find(name) != krkrsdl2_base_globals.end()) continue;
+		if (TJS_SUCCEEDED(global->DeleteMember(0, name.c_str(), nullptr, global)))
+		{
+			++dropped;
+			if (sample.size() < 220) sample += krkrns_utf8_of(name, 40) + " ";
+		}
+		else
+		{
+			++kept;
+		}
+	}
+	global->Release();
+	KRKRNS_LOG("[launcher] dropped %d session globals (%d undeletable): %s",
+		dropped, kept, sample.c_str());
+}
+
+// Test harness, inert unless sdmc:/switch/krkrsdl2/autocycle.txt exists: a
+// running game asks to end itself after a while so the session hand-over
+// (end game -> launcher -> next game) can be exercised without touching the UI.
+// The launcher script picks the next game in turn under the same marker.
+extern void TVPTerminateSync(int code);
+static bool krkrsdl2_autocycle_checked = false;
+static bool krkrsdl2_autocycle_on = false;
+static unsigned krkrsdl2_autocycle_frames = 0;
+void krkrsdl2_service_autocycle()
+{
+	if (!krkrsdl2_autocycle_checked)
+	{
+		krkrsdl2_autocycle_checked = true;
+		FILE *f = fopen("sdmc:/switch/krkrsdl2/autocycle.txt", "rb");
+		if (f)
+		{
+			fclose(f);
+			krkrsdl2_autocycle_on = true;
+			KRKRNS_LOG("[autocycle] enabled");
+		}
+	}
+	if (!krkrsdl2_autocycle_on || !krkrsdl2_game_mode)
+	{
+		krkrsdl2_autocycle_frames = 0;
+		return;
+	}
+	if (++krkrsdl2_autocycle_frames > 20 * 60)
+	{
+		krkrsdl2_autocycle_frames = 0;
+		KRKRNS_LOG("[autocycle] ending game session");
+		TVPTerminateSync(0); // the real end-game entry; intercepted while in a game
+	}
+}
+
+// Where this NRO was launched from (argv[0]); used to restart the application
+// when a game session ends (see krkrsdl2_return_to_launcher).
+static std::string krkrsdl2_own_path;
+void krkrsdl2_set_own_path(const char* path)
+{
+	if (path && *path) krkrsdl2_own_path = path;
+	// Ending a game restarts the NRO only when the loader supports it; log
+	// the verdict once so a log alone tells which teardown path a run uses.
+	KRKRNS_LOG("[launcher] own path=%s next-load=%d",
+		krkrsdl2_own_path.empty() ? "(none)" : krkrsdl2_own_path.c_str(),
+		(int)envHasNextLoad());
+}
+
+// Some hosts (the emulator) hand the application no argv, so fall back to the
+// NRO's usual install locations.  Only an existing file is accepted: passing a
+// stale path to envSetNextLoad would chain-load a different copy.
+static const char * const krkrsdl2_own_path_candidates[] = {
+	"sdmc:/switch/krkrsdl2/krkrsdl2.nro",
+	"sdmc:/switch/krkrsdl2.nro",
+	"sdmc:/switch/KRKR-ns/krkrsdl2.nro",
+};
+static bool krkrsdl2_resolve_own_path()
+{
+	if (!krkrsdl2_own_path.empty()) return true;
+	for (size_t i = 0; i < sizeof(krkrsdl2_own_path_candidates) / sizeof(krkrsdl2_own_path_candidates[0]); ++i)
+	{
+		FILE *f = fopen(krkrsdl2_own_path_candidates[i], "rb");
+		if (f)
+		{
+			fclose(f);
+			krkrsdl2_own_path = krkrsdl2_own_path_candidates[i];
+			KRKRNS_LOG("[launcher] using fallback NRO path: %s", krkrsdl2_own_path.c_str());
+			return true;
+		}
+	}
+	return false;
+}
+// Project/data paths saved when the game was mounted, restored on return.
+static bool krkrsdl2_session_saved = false;
+static ttstr krkrsdl2_saved_project_dir;
+static tjs_string krkrsdl2_saved_native_project_dir;
+static ttstr krkrsdl2_saved_data_path;
+static tjs_string krkrsdl2_saved_native_data_path;
+static ttstr krkrsdl2_saved_game_dir;
+
+// Implemented in StorageIntf.cpp (file-local static helper there).
+extern void krkrsdl2_clear_archive_cache();
+// Implemented in psbfile/PsbFilePlugin.cpp (process-wide PSB resource map).
+extern void krkrsdl2_psb_clear_resources();
+
 static void krkrsdl2_get_process_memory(u64 &total, u64 &used)
 {
 	total = 0;
@@ -4116,6 +4360,13 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	if (krkrsdl2_game_mode)
 		throw eTJSError(TJS_W("A KRKR game is already running"));
 
+	// Remember the process' base global set once (before the first game runs).
+	// Ending a session later drops everything the game and the KAG
+	// compatibility layer added on top; without that the next game sees stale
+	// globals pointing at objects destroyed with the previous window
+	// ("The object is already invalidated" from k2compat/utils).
+	krkrsdl2_capture_base_globals();
+
 	std::string directory8;
 	std::string selected8;
 	if (!TVPUtf16ToUtf8(directory8, game_directory.AsStdString()) ||
@@ -4163,17 +4414,43 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 
 	// Non-selected resource packs first; the chosen entry archive has the
 	// highest game-resource priority.  The engine patch folder stays last.
+	// The game-specific entries are remembered so ending the session can
+	// remove exactly them (compat/patch stay for the whole process).
+	krkrsdl2_game_autopaths.clear();
 	for (const auto &file : archives)
-		if (file != selected) TVPAddAutoPath(krkrsdl2_archive_path(file));
-	TVPAddAutoPath(krkrsdl2_archive_path(selected));
+		if (file != selected)
+		{
+			const ttstr ap = krkrsdl2_archive_path(file);
+			TVPAddAutoPath(ap);
+			krkrsdl2_game_autopaths.push_back(ap);
+		}
+	{
+		const ttstr ap = krkrsdl2_archive_path(selected);
+		TVPAddAutoPath(ap);
+		krkrsdl2_game_autopaths.push_back(ap);
+	}
 	// The portable NRO contains the compatibility layer used by the verified
 	// emulator build, so a real console only needs this NRO and untouched game
 	// archives.  Keep the SD patch directory last so users can override a
 	// bundled shim without rebuilding the application.
-	TVPAddAutoPath(ttstr(TJS_W("file://?/romfs:/compat/system/")));
-	mkdir("sdmc:/switch/krkrsdl2/patch", 0777);
-	mkdir("sdmc:/switch/krkrsdl2/patch/system", 0777);
-	TVPAddAutoPath(ttstr(TJS_W("sdmc:/switch/krkrsdl2/patch/system/")));
+	//
+	// The auto-path table is a hash table keyed by file name and the *last*
+	// path wins, and TVPAddAutoPath ignores a path that is already listed.
+	// Both of ours survive from the previous game session, so without the
+	// explicit remove the second game's own system/k2compat.tjs and
+	// system/win32dialog.tjs (KAG ships desktop copies of both) would be
+	// appended after them and shadow our Switch stubs — the engine then loads
+	// the desktop versions and KAG boot dies on the unavailable plugins.
+	{
+		const ttstr compat_path(TJS_W("file://?/romfs:/compat/system/"));
+		const ttstr patch_path(TJS_W("sdmc:/switch/krkrsdl2/patch/system/"));
+		TVPRemoveAutoPath(compat_path);
+		TVPRemoveAutoPath(patch_path);
+		mkdir("sdmc:/switch/krkrsdl2/patch", 0777);
+		mkdir("sdmc:/switch/krkrsdl2/patch/system", 0777);
+		TVPAddAutoPath(compat_path);
+		TVPAddAutoPath(patch_path);
+	}
 
 	mkdir("sdmc:/switch/krkrsdl2/saves", 0777);
 	const std::string native_save = "sdmc:/switch/krkrsdl2/saves/" + directory8;
@@ -4183,6 +4460,16 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));
 
 	krkrsdl2_game_mode = true;
+	krkrsdl2_game_had_window = false; // a window close before the game's own
+	                                  // window exists is not a quit
+	// Remember the pre-game paths so krkrsdl2_return_to_launcher() can restore
+	// them without guessing the launcher's defaults.
+	krkrsdl2_saved_project_dir = TVPProjectDir;
+	krkrsdl2_saved_native_project_dir = TVPNativeProjectDir;
+	krkrsdl2_saved_data_path = TVPDataPath;
+	krkrsdl2_saved_native_data_path = TVPNativeDataPath;
+	krkrsdl2_saved_game_dir = krkrsdl2_game_dir;
+	krkrsdl2_session_saved = true;
 	TVPProjectDir = TVPNormalizeStorageName(krkrsdl2_game_dir);
 	TVPNativeProjectDir = krkrsdl2_game_dir.AsStdString();
 	TVPDataPath = TVPNormalizeStorageName(ttstr(save16));
@@ -4193,6 +4480,114 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	KRKRNS_LOG("[launcher] launching directory/file: %s/%s", directory8.c_str(), selected8.c_str());
 	KRKRNS_LOG("[launcher] save path: %s/", native_save.c_str());
 	return krkrsdl2_archive_path(selected) + TJS_W("startup.tjs");
+}
+
+// Free any window form that still owns the single native window, even one that
+// was already removed from the engine's window list: some close paths only mark
+// the form for deletion without running the frame that frees it.  libnx allows
+// one window, so without this the launcher (or the next game) cannot create its
+// own and fails with "Switch only supports one window".
+//
+// The intrusive list pointers are cleared BEFORE deleting so the destructor
+// cannot hand a half-freed neighbour back, and each form is deleted at most
+// once (deleting a stale pointer here would be a use-after-free crash).
+void krkrsdl2_release_leftover_windows()
+{
+	for (tjs_int guard = 0; guard < 8 && TVPGetWindowCount() > 0; ++guard)
+	{
+		tTJSNI_Window *w = TVPGetWindowListAt(0);
+		if (!w) break;
+		iTJSDispatch2 *owner = w->GetOwnerNoAddRef();
+		if (!owner) break;
+		tTJSVariantClosure clo(owner);
+		clo.Invalidate(0, nullptr, nullptr, clo.ObjThis);
+	}
+	for (int pass = 0; pass < 2; ++pass)
+	{
+		TVPWindowWindow *w = _currentWindowWindow;
+		_currentWindowWindow = nullptr;
+		if (w) w->InvalidateClose();
+		w = _lastWindowWindow;
+		_lastWindowWindow = nullptr;
+		if (w) w->InvalidateClose();
+	}
+}
+
+// Undo everything krkrsdl2_prepare_xp3_game() did and rebuild the picker.
+// Runs on the main loop (see Application::Run) after a quit request.
+void krkrsdl2_return_to_launcher()
+{
+	KRKRNS_STAGE("return to launcher");
+	KRKRNS_LOG("[launcher] ending game session, returning to launcher");
+
+	// Preferred: restart the application.  Re-using one process/TJS engine
+	// across games is fragile — game boot scripts define classes and globals
+	// every time and expect a pristine engine.  On a real console libnx can
+	// chain-load this same NRO, which both resets the engine completely and
+	// lands on the launcher (the first screen).  Everything below is the
+	// in-process fallback for hosts without next-load support.
+	if (envHasNextLoad() && krkrsdl2_resolve_own_path())
+	{
+		if (R_SUCCEEDED(envSetNextLoad(krkrsdl2_own_path.c_str(), krkrsdl2_own_path.c_str())))
+		{
+			KRKRNS_LOG("[launcher] restarting application: %s", krkrsdl2_own_path.c_str());
+			Application->Terminate();
+			return;
+		}
+		KRKRNS_LOG("[launcher] envSetNextLoad failed, using in-process launcher");
+	}
+
+	// Tearing the game windows down must not terminate the process.
+	TVPTerminateOnWindowClose = false;
+	krkrsdl2_game_mode = false;
+
+	// Destroy whatever windows the game left (libnx allows one native window
+	// and the launcher is about to create its own).
+	krkrsdl2_release_leftover_windows();
+
+	// Drop exactly the auto-path entries this game added (compat/patch stay).
+	for (size_t i = 0; i < krkrsdl2_game_autopaths.size(); ++i)
+		TVPRemoveAutoPath(krkrsdl2_game_autopaths[i]);
+	krkrsdl2_game_autopaths.clear();
+
+	// Restore the pre-game project/data paths.
+	if (krkrsdl2_session_saved)
+	{
+		TVPProjectDir = krkrsdl2_saved_project_dir;
+		TVPNativeProjectDir = krkrsdl2_saved_native_project_dir;
+		TVPDataPath = krkrsdl2_saved_data_path;
+		TVPNativeDataPath = krkrsdl2_saved_native_data_path;
+		krkrsdl2_game_dir = krkrsdl2_saved_game_dir;
+		krkrsdl2_session_saved = false;
+	}
+	TVPSetCurrentDirectory(ttstr(TJS_W("file://?/romfs:/")));
+	chdir("romfs:/");
+
+	// Release resources that must not leak across games.
+	TVPClearGraphicCache();
+	krkrsdl2_clear_archive_cache();
+	krkrsdl2_psb_clear_resources();
+	TVPReleaseDirectSound();
+
+	// Launcher semantics: closing its window really exits the application.
+	TVPTerminateOnWindowClose = true;
+
+	// Drop globals the finished game (and the KAG layer it loaded) added.
+	// They reference objects destroyed together with the game window: KAG's
+	// own hook table (__InjectionTable) keeps wrappers around them, so the next
+	// game dies with "The object is already invalidated" while installing its
+	// hooks.  Plugin classes go with them, so unload the plugins first -- that
+	// removes their classes and clears the records that would otherwise make
+	// the next Plugins.link fail with "Already registerd class."
+	{
+		extern void TVPUnloadBuiltinPlugins();
+		TVPUnloadBuiltinPlugins();
+	}
+	krkrsdl2_drop_session_globals();
+
+	// Rebuild the picker (the script recreates Window/Layer and its list).
+	TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/startup.tjs")));
+	KRKRNS_LOG("[launcher] launcher restored");
 }
 
 // Called once before the normal startup-script resolver.  Always start the

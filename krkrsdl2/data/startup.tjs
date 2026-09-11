@@ -216,3 +216,34 @@ redrawLauncher();
 launcherWindow.visible = true;
 Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gameFiles.count);
 
+// Test harness, inert unless the marker exists: rotate through the game
+// folders, booting one archive each pass, so the session hand-over (end game ->
+// launcher -> next game) can be exercised without UI input.  SDLApplication.cpp
+// ends each game under the same marker.  The counter lives on its own global,
+// which sessionglobals_drop.tjs leaves alone.
+if (Storages.isExistentStorage("sdmc:/switch/krkrsdl2/autocycle.txt")) {
+    var cycleIndex = (typeof(global.__krkrns_cycle_index) == "undefined") ? 0 : global.__krkrns_cycle_index;
+    global.__krkrns_cycle_index = cycleIndex + 1;
+    if (gameFolders.count > 0) {
+        selectedFolder = cycleIndex % gameFolders.count;
+        loadSelectedFolder();
+        var preferred = new Array();
+        preferred.add("启动游戏.xp3");
+        preferred.add("data.xp3");
+        preferred.add("play.xp3");
+        preferred.add("main.xp3");
+        preferred.add("startup.xp3");
+        var found = -1;
+        for (var p = 0; p < preferred.count; p++) {
+            for (var f = 0; f < gameFiles.count; f++) {
+                if (gameFiles[f].toLowerCase() == preferred[p]) found = f;
+            }
+        }
+        if (found >= 0) selectedFile = found;
+        if (selectedFile >= 0) {
+            Debug.message("[autocycle] launching " + currentFolderName() + "/" + gameFiles[selectedFile]);
+            launchSelectedGame();
+        }
+    }
+}
+

@@ -140,6 +140,16 @@ public:
 			container.AsNarrowStdString().c_str(),
 			static_cast<unsigned>(resources.size()));
 	}
+
+	/* Drop every parsed container/resource.  Called when a game session ends
+	 * so the next game does not inherit (or keep resident) its PSB data. */
+	void Clear()
+	{
+		std::lock_guard<std::mutex> lock(Mutex);
+		Resources.clear();
+		Containers.clear();
+		KRKRNS_LOG("[psb] resources cleared");
+	}
 };
 
 static tTVPPsbMedia *PsbMedia = nullptr;
@@ -682,4 +692,10 @@ tTJSNativeInstance *tTJSNC_PSBFile::CreateNativeInstance()
 tTJSNativeClass *TVPCreateNativeClass_PSBFile()
 {
 	return new tTJSNC_PSBFile();
+}
+
+// KRKR-ns: exported to SDLApplication.cpp's end-of-session cleanup.
+void krkrsdl2_psb_clear_resources()
+{
+	if (PsbMedia) PsbMedia->Clear();
 }

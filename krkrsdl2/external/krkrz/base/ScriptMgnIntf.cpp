@@ -880,8 +880,56 @@ void TVPShowScriptException(eTJS &e)
 	{
 		ttstr errstr = (ttstr(TVPScriptExceptionRaised) + TJS_W("\n") + e.GetMessage());
 		TVPAddLog(ttstr(TVPScriptExceptionRaised) + TJS_W("\n") + e.GetMessage());
+#ifdef __SWITCH__
+		// KRKR-ns: never let a script error stop the game.  Missing plugin
+		// members, optional resources and stale references from a previous
+		// session all surface here; reporting and continuing keeps every title
+		// playable (the alternative is a fatal dialog, a stalled frame loop or
+		// an exit).  Re-enable event delivery, which was disabled above.
+		{
+			std::string utf8;
+			ttstr msg(e.GetMessage());
+			for (tjs_uint i = 0; i < msg.GetLen() && i < 300; ++i)
+			{
+				tjs_uint32 ch = static_cast<tjs_uint32>(msg[i]);
+				if (ch < 0x80) utf8 += static_cast<char>(ch);
+				else if (ch < 0x800)
+				{
+					utf8 += static_cast<char>(0xC0 | (ch >> 6));
+					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+				else
+				{
+					utf8 += static_cast<char>(0xE0 | (ch >> 12));
+					utf8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+			}
+			KRKRNS_LOG("[script] exception ignored (continuing): %s", utf8.c_str());
+		}
+		// A single recoverable error is fine, but a burst of them means the
+		// environment is broken (duplicate definitions, missing plugin members).
+		// Continuing in that state ends in a native crash, so end the session
+		// and return to the picker instead.
+		{
+			extern bool krkrsdl2_game_mode;
+			extern void krkrsdl2_request_return_to_launcher();
+			static unsigned errorBurst = 0;
+			static tjs_uint64 burstWindow = 0;
+			const tjs_uint64 now = TVPGetTickCount();
+			if (!burstWindow || now - burstWindow > 3000) { burstWindow = now; errorBurst = 0; }
+			if (++errorBurst > 8 && krkrsdl2_game_mode)
+			{
+				errorBurst = 0;
+				KRKRNS_LOG("[script] error burst: ending this game session");
+				krkrsdl2_request_return_to_launcher();
+			}
+		}
+		TVPSetSystemEventDisabledState(false);
+#else
 		Application->MessageDlg( errstr.AsStdString(), tjs_string(), mtError, mbOK );
 		TVPTerminateSync(1);
+#endif
 	}
 }
 //---------------------------------------------------------------------------
@@ -949,7 +997,13 @@ void TVPShowScriptException(eTJSScriptError &e)
 			}
 		}
 #endif
+#ifdef __SWITCH__
+		// KRKR-ns: report and continue (see TVPShowScriptException(eTJS&)).
+		KRKRNS_LOG("[script] script error ignored (continuing)");
+		TVPSetSystemEventDisabledState(false);
+#else
 		TVPTerminateSync(1);
+#endif
 	}
 }
 //---------------------------------------------------------------------------
@@ -1234,6 +1288,10 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/execStorage)
 	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
 #ifdef __SWITCH__
 	{
+		// Log both the requested name and the auto-path resolution result:
+		// several KAG scripts exist both in the game archive and in the
+		// engine's compat folder, and which copy wins decides whether boot
+		// survives, so the resolved path is the important half of this line.
 		ttstr nm = *param[0];
 		std::string u8;
 		for (tjs_uint i = 0; i < nm.GetLen() && i < 150; ++i)
@@ -1243,7 +1301,21 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/execStorage)
 			else if (ch < 0x800) { u8 += (char)(0xC0|(ch>>6)); u8 += (char)(0x80|(ch&0x3F)); }
 			else { u8 += (char)(0xE0|(ch>>12)); u8 += (char)(0x80|((ch>>6)&0x3F)); u8 += (char)(0x80|(ch&0x3F)); }
 		}
-		KRKRNS_LOG("[execStorage] %s", u8.c_str());
+		std::string local8;
+		try
+		{
+			ttstr ln = nm;
+			TVPGetLocalName(ln);
+			for (tjs_uint i = 0; i < ln.GetLen() && i < 220; ++i)
+			{
+				tjs_uint32 ch = (tjs_uint32)ln[i];
+				if (ch < 0x80) local8 += (char)ch;
+				else if (ch < 0x800) { local8 += (char)(0xC0|(ch>>6)); local8 += (char)(0x80|(ch&0x3F)); }
+				else { local8 += (char)(0xE0|(ch>>12)); local8 += (char)(0x80|((ch>>6)&0x3F)); local8 += (char)(0x80|(ch&0x3F)); }
+			}
+		}
+		catch (...) { local8 = "<unresolved>"; }
+		KRKRNS_LOG("[execStorage] %s <- %s", u8.c_str(), local8.c_str());
 	}
 #endif
 
