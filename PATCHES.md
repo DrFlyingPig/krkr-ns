@@ -519,6 +519,36 @@ KRKR-ns/
 - **注意**：旧位置不做自动迁移（游戏可达数 GB）。升级步骤：把旧 `sdmc:/krkr/` 的各游戏目录移到 `KRKR-ns/Game/`、旧 `switch/krkrsdl2/saves/*` 移到 `KRKR-ns/saves/`（保留存档进度）、需要的标记文件移到 `KRKR-ns/`，最后把 nro 放入 `KRKR-ns/` 并删除旧 `switch/krkrsdl2/` 目录。
 - **真机验证**：模拟器新布局全流程验证通过（启动器列出新 Game/ 下 2 个游戏、日志/存档/补丁就位）；真机待复验。
 
+### P62: 游戏归档挂载时机调整 — 先执行 patch.tjs 后挂归档 (2026-09-12)
+- **背景**：Kirikiroid 生态的启动补丁（游戏目录散置的 `patch.tjs`）会先探测松散文件再决定行为；原顺序在 patch.tjs 执行**前**就把全部游戏归档挂进 auto-path，补丁的探测命中归档内部脚本，导致延迟模块在游戏全局初始化之前执行（LimeLight 启动异常）。
+- **实现**：`krkrsdl2_prepare_xp3_game` 只排队归档路径不再立即挂载；新增 `krkrsdl2_mount_xp3_resources()`（SDLApplication.cpp），由 `launchXP3`（StorageIntf.cpp）在执行完 sibling patch.tjs 之后统一挂载（兄弟包→选中包→compat/patch 垫底，P58 的 remove+add 优先级语义原样保留）。日志顺序佐证：`[autopath] at game mount` 现在出现在 patch.tjs 执行之后。
+
+### P63: KAGEX 全屏语义 — Window.fullScreen 控制台恒 true (2026-09-12)
+- **现象**：LimeLight 开机白屏——boot 正常推进（UI 树建完、SysCoverLayer 盖屏），first.ks 在游戏自注释 `; wait for full-screen changed` + `@waitstable` 处永等，主循环心跳正常。
+- **根因链**：游戏自带 KAGEX `mainwindow.tjs` 的 fullScreen setter 首行 `if (fullScreen == v) return`；我们的原生 getter 返 false → setter 全速执行，在 VM ip=0x464 硬调 `this.getNormalRect()`——该成员仅由 win32 插件 windowEx.dll 注册（全游戏 294 个 tjs 仅此一处调用且**无** typeof 兜底）→ 中途抛异常被游戏 catch，但 `_fullScreenChanging=1` + screenModeChangedTrigger 留在半途 → 开机等待永不完成。Kirikiroid2 能跑=krkrz Android 后端 `GetFullScreenMode() { return true; }`（environ/android/WindowForm.h）使 setter 直接短路，windowEx 在那边同样不加载。
+- **修复**（WindowImpl.cpp）：`tTJSNI_Window::GetFullScreen()`（TJS 可见的 `Window.fullScreen` getter）在 `__SWITCH__` 恒返 true；`TVPWindowWindow::GetFullScreenMode()`（FullScreenGuard+引擎内部）保持真实 SDL 状态。
+- **⚠ 教训（v1 回归）**：v1 把 GetFullScreenMode 整体翻 true → `tTJSNI_Window::FullScreenGuard()` 开始拦截 TJS 写窗口几何 → **我们自己的** romfs/startup.tjs `launcherWindow.setInnerSize(1280,720)` 抛 `Invalid property in fullscreen` → 启动器主线程 tick=2 起永久 STALLED（NRO "打不开"）。**游戏语义层与引擎 guard 层必须解耦**；另：模拟器跑的就是 Switch NRO（`__SWITCH__` 已定义），不存在"模拟器走桌面分支"。
+- **验证**：LimeLight 开机全通（getNormalRect 异常消失、进标题、跑剧情 25fps，用户确认）。
+
+### P64: 内置插件文件存在性探测 — 游戏侧子系统启用判定 (2026-09-12)
+- **现象**：LimeLight OP（yuzulogo/m2logo.mtn）与标题背景（title_bg.mtn）加载抛空消息异常（affinesourceimage.tjs loadImages），且 motion.tjs 根本没被加载。
+- **根因**：游戏对插件可用性做**文件存在性探测**（`TVPGetPlacedPath` 对 emoteplayer.dll 等做四路径探测 → `[miss]`）→ 内置插件无实体文件 → 探测失败 → 游戏自行禁用 emote 子系统 → .mtn 被当作图片走 `Layer.loadImages` → 失败。Kirikiroid2 靠 APK 私有内置插件仓库（`import-module, plugins`，zeas2 未公开）让探测全部通过。
+- **修复**：PluginImpl.cpp 新增 `krkrsdl2_is_builtin_plugin_name()`（emoteplayer/motionplayer/emotedriver/layerexbtoa + `TVPHasSwitchBuiltin` 名单：kagparser/csvparser/psbfile/textrender/wuopus）；StorageIntf.cpp `TVPGetPlacedPath` miss 分支对 `<builtin>.dll` 返回合成路径（`romfs:/compat/system/dummy_colorpicker.png`——`Plugins.link` 对 builtin 走原生注册不读文件）。非内置插件探测保持失败，游戏走自身降级路径。
+- **验证**：`loaded built-in plugin: emoteplayer.dll`、motion.tjs/affinesourcemotion.tjs 载入、`[emote] ResourceManager size=1920x1440`、`EmotePlayer.play motion=yuzulogo`，affinesourceimage 异常清零，OP/标题美术恢复。
+
+### P65: KAGEX 方屏扩展画布（exHeight）满屏呈现 (2026-09-12)
+- **现象**：LimeLight 画面整体缩到约 75% 宽（左右黑边）且底部一条大黑带（用户截图证实：内容顶对齐、底部 band 全黑）。
+- **根因**：游戏 main/config.tjs（明文 UTF-16）`scWidth/scHeight`=可见区 1920×1080、`exHeight`=1440=方屏扩展画布；主层被游戏设为 1920×1440（`[win] SetPaintBoxSize w=1920 h=1440`），底部 360 行由游戏自身 SquareMaskLayer 遮盖；引擎把整个画布按 SDL 逻辑尺寸塞进 16:9 窗口 → 整体 0.75 缩放+黑带。
+- **修复**（SDLApplication.cpp TickBeat 呈现分支，`__SWITCH__`）：texture 高于窗口时取顶部 `visibleH = winH*texW/winW` 行（恒等于游戏 scHeight，底座 1:1 / 手持 0.667 同一公式），`SDL_RenderSetLogicalSize(tw, visibleH)` + `RenderCopy(src=顶部可见区)`；画布≤窗口（启动器 1280×720）走原路径不受影响。
+- **附带诊断**：TVPScreen.cpp 首次调用打印 `[ns] screen usable bounds`（`System.screenWidth/Height` = `SDL_GetDisplayUsableBounds`，KAGEX 舞台尺寸的依据）。
+
+### P66: 加密 xp3 数据包支持 — Kirikiroid2 xp3filter.tjs 兼容 (2026-09-12)
+- **现象**：Riddle Joker（Yuzusoft）点击启动即失败退回启动器：`launchXP3` 抛 `Cannot convert given narrow string to wide string`；日志中 startup.tjs 字节码头非 `TJS2` 魔数（`a64b...`，密文）。
+- **根因**：数据包（运行游戏.xp3）内容加密；游戏目录自带 `xp3filter.tjs`——Kirikiroid2 补丁生态的解密过滤器脚本：`Storages.setXP3ArchiveExtractionFilter(function(h,o,b,l){...逐块 XOR...})`。Kirikiroid2 自动把它装入**专用 per-thread tTJS 引擎**并对每个解压块回调解密；本移植无此机制 → 密文原样进引擎当文本编译。
+- **实现**（新增 src/core/base/sdl2/XP3ExtractionFilter.cpp，照 Kirikiroid2 src/plugins/xp3filter.cpp 移植）：① `CBinaryAccessor` 字节缓冲对象（`b[i]` 复合赋值运算、`xor/add(start,len,val)`、`ptr`/`count`）；② `XP3FilterRegister` 把游戏回调存入 per-thread 解码引擎（独立 `tTJS` + 专用 Storages 原生类，`thread_local` + 脚本版本号懒重建，脚本不进主引擎=工作线程解压天然线程安全）；③ `TVPXP3ArchiveExtractionFilterWrapper` 挂到 krkrz 树**既有**的逐块过滤钩子（`tTVPXP3ArchiveStream::Read`，info={Offset, Buffer, BufferSize, FileHash}）。launchXP3 在挂载前读 `<游戏目录>/xp3filter.tjs` → `TVPSetXP3FilterScript()`（无文件则清空，其他游戏零影响）。XP3Archive.h 补 `TVPSetXP3FilterScript` 声明与钩子指针 extern。
+- **编译坑**：tjs2 无 `TJS_E_BOUNDS`（用 `TJS_E_FAIL`）；同签名成员函数类内声明+定义重复报错。
+- **发布**：本批 P62–P66 随 GitHub Release v0.3.1（替换附件，md5 `c5ec1038`）发布。
+
 ### P60-R2: 同进程路径重写为「整引擎重建」+ P60b–g 跨会话残留六连修 (2026-09-12，当前版本)
 P60 提交后，同进程回退路径由 DeepSeek 重写，随后围绕「第二个游戏异常」累计六处修复。**本节描述的即当前工作区状态**；上一节 P60 的"原地修补活引擎"方案已被取代。
 
