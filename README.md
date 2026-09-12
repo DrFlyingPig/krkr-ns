@@ -2,7 +2,9 @@
 
 # KRKR-ns
 
-**吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版 (实验性项目，不保证稳定性)**
+**吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版**
+
+**`⚠️ 实验性项目，不保证稳定性 ⚠️`**
 
 基于 [krkrsdl2](https://github.com/krkrsdl2/krkrsdl2)（pinned `bf207f2`）· 内嵌 krkrsdl2/krkrz（pinned `b11c43a`）
 
@@ -10,7 +12,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-red?style=flat-square)]()
 
-**[⬇️ 下载最新版](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
+**[⬇️ NRO下载入口](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
 
 </div>
 
