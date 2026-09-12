@@ -1655,27 +1655,42 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 	ttstr content = *param[0];
 
 #ifdef __SWITCH__
+	// KRKR-ns: [eval] / [eval] result logging cap, declared at function scope
+	// because both log lines (command and result) gate on it.  KAG evaluates
+	// constantly during play; an uncapped pair per call dominated the
+	// per-session log volume.  (The runaway-script guard below is
+	// unconditional and unaffected.)
+	static int evalLogs = 0;
+	const bool logThisEval = evalLogs < 200;
+	if (logThisEval) ++evalLogs;
+#endif
+
+#ifdef __SWITCH__
 	{
 		// KRKR-ns diagnostic: games drive KAG boot through eval("exec ...");
-		// log every eval so a silently failing boot command is visible.
-		std::string utf8;
-		for (tjs_uint i = 0; i < content.GetLen() && i < 150; ++i)
+		// log the first evals of the session so a silently failing boot
+		// command is visible.
+		if (logThisEval)
 		{
-			tjs_uint32 ch = static_cast<tjs_uint32>(content[i]);
-			if (ch < 0x80) utf8 += static_cast<char>(ch);
-			else if (ch < 0x800)
+			std::string utf8;
+			for (tjs_uint i = 0; i < content.GetLen() && i < 150; ++i)
 			{
-				utf8 += static_cast<char>(0xC0 | (ch >> 6));
-				utf8 += static_cast<char>(0x80 | (ch & 0x3F));
+				tjs_uint32 ch = static_cast<tjs_uint32>(content[i]);
+				if (ch < 0x80) utf8 += static_cast<char>(ch);
+				else if (ch < 0x800)
+				{
+					utf8 += static_cast<char>(0xC0 | (ch >> 6));
+					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+				else
+				{
+					utf8 += static_cast<char>(0xE0 | (ch >> 12));
+					utf8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
 			}
-			else
-			{
-				utf8 += static_cast<char>(0xE0 | (ch >> 12));
-				utf8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
-				utf8 += static_cast<char>(0x80 | (ch & 0x3F));
-			}
+			KRKRNS_LOG("[eval] %s", utf8.c_str());
 		}
-		KRKRNS_LOG("[eval] %s", utf8.c_str());
 
 		// KRKR-ns: runaway-script guard.  A menu page can spin thousands of
 		// Scripts.eval calls with no I/O and no frame output (device logs:
@@ -1748,7 +1763,7 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 		{
 			TVPScriptEngine->EvalExpression(content, result, context,
 				&name, lineofs);
-			if (result && result->Type() != tvtVoid)
+			if (result && result->Type() != tvtVoid && logThisEval)
 			{
 				// KRKR-ns: startup control flow branches on eval results
 				// (e.g. "@if(kirikiriz)1@endif"); log what actually came back.
@@ -1772,7 +1787,7 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 				}
 				KRKRNS_LOG("[eval] result: %s", utf8r.c_str());
 			}
-			else
+			else if (logThisEval)
 			{
 				KRKRNS_LOG("[eval] result: <void>");
 			}

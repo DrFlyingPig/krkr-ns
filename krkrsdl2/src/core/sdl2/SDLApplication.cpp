@@ -77,6 +77,59 @@
 // reclaimed its thread-local storage, faulting in armGetTls (observed as an
 // "Invalid memory access at 0x0" right after the guest issued Exit).
 volatile bool krkrsdl2_log_shutdown = false;
+// Keep only the two newest krkrsdl2_debug_*.log files (the current boot adds
+// a third); every older boot log is deleted, so the SD root does not fill up
+// with one file per launch.  The legacy fixed-name logs from earlier builds
+// are removed as well.  Runs once, at the first log write of the process.
+static void krkrsdl2_prune_old_logs(void)
+{
+	static const char * const prefix = "krkrsdl2_debug_";
+	static const size_t prefixLen = 15;
+	DIR *d = opendir("sdmc:/");
+	if (!d) return;
+	char newest1[64] = "", newest2[64] = "";
+	struct dirent *ent;
+	while ((ent = readdir(d)) != nullptr)
+	{
+		const char *n = ent->d_name;
+		const size_t len = strlen(n);
+		if (len < prefixLen + 5 || strncmp(n, prefix, prefixLen) != 0 ||
+			strncmp(n + len - 4, ".log", 4) != 0)
+			continue;
+		if (strcmp(n, newest1) > 0)
+		{
+			snprintf(newest2, sizeof(newest2), "%s", newest1);
+			snprintf(newest1, sizeof(newest1), "%s", n);
+		}
+		else if (strcmp(n, newest2) > 0)
+		{
+			snprintf(newest2, sizeof(newest2), "%s", n);
+		}
+	}
+	closedir(d);
+	// Second pass: unlink every timestamped log except the two newest.  Also
+	// drop the retired fixed-name logs of earlier builds.
+	d = opendir("sdmc:/");
+	if (!d) return;
+	while ((ent = readdir(d)) != nullptr)
+	{
+		const char *n = ent->d_name;
+		const size_t len = strlen(n);
+		const bool timestamped = len >= prefixLen + 5 &&
+			strncmp(n, prefix, prefixLen) == 0 &&
+			strncmp(n + len - 4, ".log", 4) == 0;
+		const bool legacy = strcmp(n, "krkrsdl2_debug.log") == 0 ||
+			strcmp(n, "krkrsdl2_debug.log.prev") == 0;
+		if (!timestamped && !legacy) continue;
+		if (timestamped && (strcmp(n, newest1) == 0 || strcmp(n, newest2) == 0))
+			continue;
+		char path[96];
+		snprintf(path, sizeof(path), "sdmc:/%s", n);
+		unlink(path);
+	}
+	closedir(d);
+}
+
 void krkrsdl2_logf_impl(const char *fmt, ...)
 {
 	if (krkrsdl2_log_shutdown) return;
@@ -84,6 +137,7 @@ void krkrsdl2_logf_impl(const char *fmt, ...)
 	static char logname[96];
 	if (logfd < 0)
 	{
+		krkrsdl2_prune_old_logs();
 		// Unique file per boot.  The Switch's MTP server serves stale metadata
 		// for files whose content changed while the session was mounted (a
 		// post-crash pull used to return only the boot-time head of the log),
