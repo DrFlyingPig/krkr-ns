@@ -48,7 +48,7 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 
 - KAG2 / KAG3 兼容层（Switch 桩替换桌面版插件脚本，自动维持优先级）
 - 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等；游戏对插件的文件存在性探测对内置插件生效，E-mote 等子系统正常启用
-- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密，如《Riddle Joker》）
+- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密）
 - KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现
 - 缺失资源垫图、`Layer.loadImages` 容错、脚本异常记录并继续（风暴熔断）
 
