@@ -4830,9 +4830,23 @@ void krkrsdl2_return_to_launcher()
 	// across games is fragile — game boot scripts define classes and globals
 	// every time and expect a pristine engine.  On a real console libnx can
 	// chain-load this same NRO, which both resets the engine completely and
-	// lands on the launcher (the first screen).  Everything below is the
-	// in-process fallback for hosts without next-load support.
-	if (envHasNextLoad() && krkrsdl2_resolve_own_path())
+	// lands on the launcher (the first screen).
+	//
+	// REALITY CHECK (device, 2026-09-12): even with a fully clean C++
+	// teardown ([shutdown] complete in the log), the chain-restarted instance
+	// died inside its own romfsInit, and once one session had run, every
+	// subsequent launch (even direct from hbmenu) crashed the same way -- the
+	// hbloader process carries the previous session's state.  The chain load
+	// is therefore OFF by default; the in-process rebuild below is the same
+	// code path the emulator uses and is verified end-to-end.  Create
+	// sdmc:/switch/krkrsdl2/chainload.txt to experiment with it again.
+	bool wantChainLoad = false;
+	if (FILE* f = fopen("sdmc:/switch/krkrsdl2/chainload.txt", "rb"))
+	{
+		fclose(f);
+		wantChainLoad = true;
+	}
+	if (wantChainLoad && envHasNextLoad() && krkrsdl2_resolve_own_path())
 	{
 		if (R_SUCCEEDED(envSetNextLoad(krkrsdl2_own_path.c_str(), krkrsdl2_own_path.c_str())))
 		{
@@ -5239,16 +5253,12 @@ void krkrsdl2_cleanup(void)
 	// Stop the detached diagnostic heartbeat before teardown: its log writes
 	// would otherwise race libnx thread/TLS destruction and fault.
 	krkrsdl2_log_shutdown = true;
-	// Balance the references init_platform took (romfsInit /
-	// socketInitializeDefault are documented there as never unbalanced).
-	// Without this, the envSetNextLoad chain restart relaunches the NRO in
-	// the SAME hbloader process with the previous session's "romfs:" device
-	// still registered -- the relaunched instance then died inside its own
-	// romfsInit before printing anything (observed as: exit-to-launcher
-	// worked once, then every chain-restarted boot flashed back to hbmenu
-	// with a 4-line log), while direct hbmenu launches kept working.
-	romfsExit();
-	socketExit();
+	// NOTE: deliberately NO romfsExit/socketExit here.  An earlier theory
+	// blamed the chain-restart romfs double-mount on these unbalanced refs,
+	// but calling them during this teardown crashed the device instead; the
+	// chain restart is now disabled by default (see
+	// krkrsdl2_return_to_launcher) and this path only runs on a true process
+	// exit, where hbloader/hbmenu reclaims everything itself.
 #endif
 	// delete application and exit forcely
 	// this prevents ugly exception message on exit
