@@ -6,7 +6,7 @@
 
 ## 下载
 
-无需自行构建：到 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases) 下载最新 `krkrsdl2.nro`，放到 SD 卡 `sdmc:/switch/` 下即可（真机经 hbmenu 加载，需按住 R 进 title-override；模拟器直接加载该 nro）。
+无需自行构建：到 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases) 下载最新版附件（`vX.Y.Z.nro`），改名/直接以 `krkrsdl2.nro` 放到 SD 卡 `sdmc:/switch/` 下（真机经 hbmenu 加载，需按住 R 进 title-override；模拟器直接加载）。
 
 ## 使用
 
