@@ -2,7 +2,7 @@
 
 # KRKR-ns
 
-**吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版**
+**吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版 (实验性项目，不保证稳定性)**
 
 基于 [krkrsdl2](https://github.com/krkrsdl2/krkrsdl2)（pinned `bf207f2`）· 内嵌 krkrsdl2/krkrz（pinned `b11c43a`）
 
