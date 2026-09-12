@@ -70,14 +70,6 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 - 统一 SD 日志、每帧分段剖析（`[prof]`）、心跳与阶段标记、资源未解析探针（`[miss]`）、帧捕获与图层树转储
 - 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）
 
-## 📋 当前源码验证（2026-09-12）
-
-P62 / P63 已通过 5 项本地测试和 22,813 项完整 ARM 引擎校验，覆盖字体、存档、PSB、固实归档、文字对象生命周期和大位图写时复制。选项居中已由实际游戏截图确认；本版菜单延迟与长时间剧情稳定性仍需真机复验。
-
-- [菜单性能优化与前后对比](MENU_PERFORMANCE.md)
-- [剧情卡死排查、修复与验证记录](FREEZE_DIAGNOSIS.md)
-- [补丁清单](PATCHES.md) · [开发记录](DEVLOG.md) · [性能优化方案](OPTIMIZATION_PLAN.md)
-
 ## 📄 许可
 
 本仓库以 [krkrsdl2 的 MIT 许可](LICENSE) 发布；内嵌/引用的上游组件（krkrz 引擎、FAudio、SDL2 及其 Switch 端口、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留其原始许可证与归属，见各组件目录内的 LICENSE/COPYING 文件。
