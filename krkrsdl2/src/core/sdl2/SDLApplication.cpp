@@ -4980,6 +4980,7 @@ static void krkrsdl2_init_platform_once()
 			static_cast<unsigned long long>(used));
 	}
 	{
+		KRKRNS_LOG("[ns] calling romfsInit (file-backed engine data)");
 		Result r = romfsInit();
 		KRKRNS_LOG("[ns] romfsInit result: 0x%x", (unsigned int)r);
 		DIR *d = opendir("romfs:/");
@@ -5233,6 +5234,16 @@ void krkrsdl2_cleanup(void)
 	// Stop the detached diagnostic heartbeat before teardown: its log writes
 	// would otherwise race libnx thread/TLS destruction and fault.
 	krkrsdl2_log_shutdown = true;
+	// Balance the references init_platform took (romfsInit /
+	// socketInitializeDefault are documented there as never unbalanced).
+	// Without this, the envSetNextLoad chain restart relaunches the NRO in
+	// the SAME hbloader process with the previous session's "romfs:" device
+	// still registered -- the relaunched instance then died inside its own
+	// romfsInit before printing anything (observed as: exit-to-launcher
+	// worked once, then every chain-restarted boot flashed back to hbmenu
+	// with a 4-line log), while direct hbmenu launches kept working.
+	romfsExit();
+	socketExit();
 #endif
 	// delete application and exit forcely
 	// this prevents ugly exception message on exit
