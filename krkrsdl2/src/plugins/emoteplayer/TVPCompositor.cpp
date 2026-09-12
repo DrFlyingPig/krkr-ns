@@ -4,6 +4,9 @@
 #include "KrkrNSLog.h"
 
 extern SDL_Renderer* TVPGetPrimarySDLRenderer();
+// Set by SDLApplication.cpp while an engine session is being torn down
+// (process exit on the chain-restart path, or the in-process rebuild window).
+extern volatile bool krkrsdl2_engine_teardown_active;
 
 namespace krkrsdl3
 {
@@ -14,6 +17,19 @@ iTVPRenderBackend* TVPGetRenderBackend()
     static iTVPRenderBackend* selected = nullptr;
     if (!selected)
     {
+        // During teardown, E-mote object destructors (~EmotePlayer / ~D3DAdaptor
+        // / SeparateLayerAdaptor::clear) call this just to release leftover
+        // targets.  Selecting a backend here would create a GL context and run
+        // the full self-test WHILE the window / graphics system are being torn
+        // down -- on the real device that crashed the exit (the process died
+        // between "restarting application" and the chain load, so the console
+        // fell back to hbmenu).  Serve the CPU backend without latching: its
+        // DestroyTarget ignores unknown pointers, so the destructors no-op.
+        if (krkrsdl2_engine_teardown_active)
+        {
+            KRKRNS_LOG("[emote] teardown active; serving CPU without selection");
+            return &cpu;
+        }
         // Backend preference (KRKR-ns Phase 2): the isolated-GL backend was
         // verified on the real Switch (2026-09-07 — correct sprites, mesh
         // raster moved off the CPU), and IsAvailable() now self-tests the

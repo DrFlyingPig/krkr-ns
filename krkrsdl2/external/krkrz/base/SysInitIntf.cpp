@@ -18,6 +18,7 @@
 #include "SysInitIntf.h"
 #include "ScriptMgnIntf.h"
 #include "tvpgl.h"
+#include "KrkrNSLog.h"
 
 
 //---------------------------------------------------------------------------
@@ -60,9 +61,16 @@ void TVPSystemUninit(void)
 	if(TVPSystemUninitCalled) return;
 	TVPSystemUninitCalled = true;
 
+	// KRKR-ns: progress markers -- the real device crashed somewhere inside this
+	// sequence (exit-to-launcher chain restart), and without them the log ends
+	// without saying which phase died.
+	KRKRNS_LOG("[shutdown] TVPSystemUninit begin");
+
 	TVPBeforeSystemUninit();
+	KRKRNS_LOG("[shutdown] before-uninit done; graphics down next");
 
 	TVPUninitTVPGL();
+	KRKRNS_LOG("[shutdown] graphics down; script engine down next");
 
 	try
 	{
@@ -72,10 +80,13 @@ void TVPSystemUninit(void)
 	{
 		// ignore errors
 	}
+	KRKRNS_LOG("[shutdown] script engine down; after-uninit next");
 
 	TVPAfterSystemUninit();
+	KRKRNS_LOG("[shutdown] after-uninit done; atexit next");
 
 	TVPCauseAtExit();
+	KRKRNS_LOG("[shutdown] complete");
 }
 //---------------------------------------------------------------------------
 

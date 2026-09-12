@@ -4196,6 +4196,11 @@ void krkrsdl2_request_return_to_launcher()
 // Set when the in-process fallback decided to rebuild the engine instead of
 // patching the live one; consumed by krkrsdl2_run_main_loop().
 bool krkrsdl2_engine_reinit_wanted = false;
+// Set for the WHOLE teardown window (chain-restart exit or in-process rebuild).
+// While it is up, TVPGetRenderBackend refuses to select and self-test a fresh
+// backend: E-mote destructors call it during script-engine shutdown, and
+// creating a GL context there crashed the real device on exit.
+volatile bool krkrsdl2_engine_teardown_active = false;
 bool krkrsdl2_take_return_to_launcher()
 {
 	return krkrsdl2_return_to_launcher_flag.exchange(false);
@@ -4802,6 +4807,13 @@ void krkrsdl2_return_to_launcher()
 {
 	KRKRNS_STAGE("return to launcher");
 	KRKRNS_LOG("[launcher] ending game session, returning to launcher");
+	// From here on the engine (or the whole process) is going away.  Block
+	// first-time render-backend selection: E-mote destructors fire during the
+	// coming script-engine shutdown and used to trigger a GL context creation
+	// plus self-test right in the middle of system teardown, which crashed the
+	// real device before the chain restart could happen.  The in-process
+	// rebuild clears this again once the fresh engine is up.
+	krkrsdl2_engine_teardown_active = true;
 
 	// Preferred: restart the application.  Re-using one process/TJS engine
 	// across games is fragile — game boot scripts define classes and globals
@@ -5180,6 +5192,9 @@ static void krkrsdl2_reinitialize_engine()
 		krkrsdl2_create_engine();
 	}
 	KRKRNS_STAGE("reinit: done");
+	// The fresh engine may select its render backend lazily again (first E-mote
+	// draw of the next game lifts the teardown guard).
+	krkrsdl2_engine_teardown_active = false;
 }
 
 bool krkrsdl2_take_engine_reinit()
