@@ -29,6 +29,10 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 3. 游戏放到 `sdmc:/krkr/<游戏目录>/`，启动器会列出其中的 `.xp3`，选择即可开始；同目录的其余 xp3 会自动挂载为资源包。
 4. 存档按游戏隔离存放于 `sdmc:/switch/krkrsdl2/saves/<游戏目录>/`。
 
+> ⚠️ **特别说明：Switch 的文件路径不支持中文。**
+> 真机上游戏目录名与 xp3 文件名必须使用英文 / 数字等 **ASCII 字符**（如 `sdmc:/krkr/CafeStella/play.xp3`）。自己找来的游戏资源若带有中文文件名或中文名目录（含补丁、追加包），请**先全部重命名为 ASCII** 再放入，否则真机无法识别。
+> 模拟器走 PC 文件系统不受此限制，但建议统一使用 ASCII 命名，避免同一份资源两端行为不一致。
+
 > 诊断日志位于 `sdmc:/krkrsdl2_debug.log`；运行时开关（标记文件）与全部源码级补丁清单见 [PATCHES.md](PATCHES.md)。
 > 自行构建：devkitPro 工具链（`NINTENDO_SWITCH=ON`），`build_nro.sh` 一键完成构建、打包与模拟器部署。
 
