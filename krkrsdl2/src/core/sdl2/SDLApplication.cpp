@@ -82,7 +82,13 @@ void krkrsdl2_logf_impl(const char *fmt, ...)
 	if (krkrsdl2_log_shutdown) return;
 	static int logfd = -1;
 	if (logfd < 0)
+	{
+		// Rotate, don't truncate: the previous run's log (krkrsdl2_debug.log.prev)
+		// survives a crash that happens AFTER the next launch, so a post-crash
+		// relaunch can no longer destroy the evidence of the crash itself.
+		rename("sdmc:/krkrsdl2_debug.log", "sdmc:/krkrsdl2_debug.log.prev");
 		logfd = open("sdmc:/krkrsdl2_debug.log", O_WRONLY | O_CREAT | O_TRUNC);
+	}
 	if (logfd < 0) return;
 	char buf[4096];
 	va_list ap;
