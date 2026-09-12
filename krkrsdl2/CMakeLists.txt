@@ -550,6 +550,7 @@ pkg_check_modules(VORBIS_STACK REQUIRED IMPORTED_TARGET vorbisfile vorbis ogg)
 # KRKR-ns built-ins: homebrew cannot load the Win32 psbfile plug-in, while
 # modern games commonly use PSB/PIMG UI archives containing PNG/TLG/WebP.
 list(APPEND KRKRSDL2COMMON_SRC
+src/core/base/sdl2/XP3ExtractionFilter.cpp
 src/core/base/sdl2/SevenZipArchive.cpp
 src/core/base/sdl2/7zip/7zArcIn.c
 src/core/base/sdl2/7zip/7zBuf.c

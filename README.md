@@ -47,7 +47,9 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 **引擎兼容与适配**
 
 - KAG2 / KAG3 兼容层（Switch 桩替换桌面版插件脚本，自动维持优先级）
-- 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等
+- 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等；游戏对插件的文件存在性探测对内置插件生效，E-mote 等子系统正常启用
+- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密，如《Riddle Joker》）
+- KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现
 - 缺失资源垫图、`Layer.loadImages` 容错、脚本异常记录并继续（风暴熔断）
 
 **图形与性能**
@@ -68,7 +70,7 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 **诊断基建**
 
 - 统一 SD 日志、每帧分段剖析（`[prof]`）、心跳与阶段标记、资源未解析探针（`[miss]`）、帧捕获与图层树转储
-- 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）
+- 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）、启动时记录游戏读取的屏幕尺寸
 
 ## 📄 许可
 

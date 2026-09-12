@@ -1761,6 +1761,10 @@ void TVPWindowWindow::SetFullScreenMode(bool fullscreen)
 }
 bool TVPWindowWindow::GetFullScreenMode()
 {
+	// Real SDL window state only.  The TJS-visible Window.fullScreen property
+	// is overridden separately (tTJSNI_Window::GetFullScreen) so that game
+	// scripts see the console as always-fullscreen while the guard and
+	// engine/launcher window-geometry code keep working.
 #ifndef KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE
 	return !!this->window && !!(SDL_GetWindowFlags(this->window) & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP));
 #else
@@ -2752,8 +2756,45 @@ const int sw = this->surface->w;
 						// backbuffer and the queue below is empty -> swap only.)
 						if (!gpuPresented)
 						{
-							SDL_RenderClear(this->renderer);
-							SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+							// KRKR-ns: KAGEX square-screen stages are TALLER than the
+							// window (LimeLight: 1920x1440 paint box on a 1920x1080
+							// screen; the bottom exHeight-scHeight band is hidden by
+							// the game's own mask layers).  Letterboxing the whole
+							// canvas shrinks the game to 3/4 with a black band.
+							// Present the TOP rows at fit-width scale instead: the
+							// visible height is windowH * textureW / windowW, which
+							// equals the game's scHeight on both docked and handheld.
+							int tw = 0, th = 0;
+							if (SDL_QueryTexture(this->texture, nullptr, nullptr, &tw, &th) != 0)
+							{
+								tw = th = 0;
+							}
+							int winW = 0, winH = 0;
+							SDL_GetWindowSize(this->window, &winW, &winH);
+							if (winW <= 0 || winH <= 0)
+							{
+								winW = tw;
+								winH = th;
+							}
+							if (tw > 0 && th > 0 && th > winH && winW > 0)
+							{
+								int visibleH = (int)(((int64_t)winH * tw) / winW);
+								if (visibleH > th) visibleH = th;
+								if (visibleH < 1) visibleH = 1;
+								SDL_Rect src;
+								src.x = 0;
+								src.y = 0;
+								src.w = tw;
+								src.h = visibleH;
+								SDL_RenderSetLogicalSize(this->renderer, tw, visibleH);
+								SDL_RenderClear(this->renderer);
+								SDL_RenderCopy(this->renderer, this->texture, &src, nullptr);
+							}
+							else
+							{
+								SDL_RenderClear(this->renderer);
+								SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+							}
 						}
 #elif defined(KRKRSDL2_RENDERER_FULL_UPDATES)
 						SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
@@ -4766,23 +4807,56 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	if (!found) throw eTJSError(TJS_W("The selected XP3 file does not exist"));
 	if (!selected_is_supported) throw eTJSError(TJS_W("The selected file is not a supported archive"));
 
-	// Non-selected resource packs first; the chosen entry archive has the
-	// highest game-resource priority.  The engine patch folder stays last.
-	// The game-specific entries are remembered so ending the session can
-	// remove exactly them (compat/patch stay for the whole process).
+	// Queue the resource paths, but expose them only AFTER sibling patch.tjs.
+	// Kirikiroid boot patches probe loose files before KAG installs auto paths;
+	// eagerly indexing archives makes those probes match internal scripts and
+	// can run delayed modules before their game globals have been initialized.
 	krkrsdl2_game_autopaths.clear();
 	for (const auto &file : archives)
 		if (file != selected)
 		{
 			const ttstr ap = krkrsdl2_archive_path(file);
-			TVPAddAutoPath(ap);
 			krkrsdl2_game_autopaths.push_back(ap);
 		}
 	{
 		const ttstr ap = krkrsdl2_archive_path(selected);
-		TVPAddAutoPath(ap);
 		krkrsdl2_game_autopaths.push_back(ap);
 	}
+
+	mkdir(KRKRNS_BASE_A "/saves", 0777);
+	const std::string native_save = KRKRNS_BASE_A "/saves/" + directory8;
+	mkdir(native_save.c_str(), 0777);
+	tjs_string save16;
+	if (!TVPUtf8ToUtf16(save16, native_save + "/"))
+		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));
+
+	krkrsdl2_game_mode = true;
+	krkrsdl2_game_had_window = false; // a window close before the game's own
+	                                  // window exists is not a quit
+	krkrsdl2_saved_project_dir = TVPProjectDir;
+	krkrsdl2_saved_native_project_dir = TVPNativeProjectDir;
+	krkrsdl2_saved_data_path = TVPDataPath;
+	krkrsdl2_saved_native_data_path = TVPNativeDataPath;
+	krkrsdl2_saved_game_dir = krkrsdl2_game_dir;
+	krkrsdl2_session_saved = true;
+	TVPProjectDir = TVPNormalizeStorageName(krkrsdl2_game_dir);
+	TVPNativeProjectDir = krkrsdl2_game_dir.AsStdString();
+	TVPDataPath = TVPNormalizeStorageName(ttstr(save16));
+	TVPNativeDataPath = save16;
+	TVPSetCurrentDirectory(krkrsdl2_game_dir);
+	chdir(native_game_dir.c_str());
+
+	KRKRNS_LOG("[launcher] launching directory/file: %s/%s", directory8.c_str(), selected8.c_str());
+	KRKRNS_LOG("[launcher] save path: %s/", native_save.c_str());
+	return krkrsdl2_archive_path(selected) + TJS_W("startup.tjs");
+}
+
+void krkrsdl2_mount_xp3_resources()
+{
+	// Keep the existing resource priority: siblings first, selected entry last.
+	for (const auto &path : krkrsdl2_game_autopaths)
+		TVPAddAutoPath(path);
+
 	// The portable NRO contains the compatibility layer used by the verified
 	// emulator build, so a real console only needs this NRO and untouched game
 	// archives.  Keep the SD patch directory last so users can override a
@@ -4806,40 +4880,12 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 		TVPAddAutoPath(patch_path);
 	}
 
-	mkdir(KRKRNS_BASE_A "/saves", 0777);
-	const std::string native_save = KRKRNS_BASE_A "/saves/" + directory8;
-	mkdir(native_save.c_str(), 0777);
-	tjs_string save16;
-	if (!TVPUtf8ToUtf16(save16, native_save + "/"))
-		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));
-
-	krkrsdl2_game_mode = true;
-	krkrsdl2_game_had_window = false; // a window close before the game's own
-	                                  // window exists is not a quit
-	// Remember the pre-game paths so krkrsdl2_return_to_launcher() can restore
-	// them without guessing the launcher's defaults.
-	krkrsdl2_saved_project_dir = TVPProjectDir;
-	krkrsdl2_saved_native_project_dir = TVPNativeProjectDir;
-	krkrsdl2_saved_data_path = TVPDataPath;
-	krkrsdl2_saved_native_data_path = TVPNativeDataPath;
-	krkrsdl2_saved_game_dir = krkrsdl2_game_dir;
-	krkrsdl2_session_saved = true;
-	TVPProjectDir = TVPNormalizeStorageName(krkrsdl2_game_dir);
-	TVPNativeProjectDir = krkrsdl2_game_dir.AsStdString();
-	TVPDataPath = TVPNormalizeStorageName(ttstr(save16));
-	TVPNativeDataPath = save16;
-	TVPSetCurrentDirectory(krkrsdl2_game_dir);
-	chdir(native_game_dir.c_str());
-
-	KRKRNS_LOG("[launcher] launching directory/file: %s/%s", directory8.c_str(), selected8.c_str());
-	KRKRNS_LOG("[launcher] save path: %s/", native_save.c_str());
 	// The auto-path list at this instant decides which archive every unqualified
 	// game resource name resolves to, so record exactly what it holds.
 	{
 		extern void krkrsdl2_log_autopath_state(const char *);
 		krkrsdl2_log_autopath_state("at game mount");
 	}
-	return krkrsdl2_archive_path(selected) + TJS_W("startup.tjs");
 }
 
 // Free any window form that still owns the single native window, even one that

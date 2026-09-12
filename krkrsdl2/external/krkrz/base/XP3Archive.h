@@ -51,6 +51,12 @@ struct tTVPXP3ExtractionFilterInfo
 typedef void (TVP_tTVPXP3ArchiveExtractionFilter_CONVENTION *
 	tTVPXP3ArchiveExtractionFilter)(tTVPXP3ExtractionFilterInfo *info);
 
+// KRKR-ns: Kirikiroid2-compatible per-game XP3 extraction filter.  The launcher
+// arms the game folder's xp3filter.tjs through this before mounting; see
+// src/core/base/sdl2/XP3ExtractionFilter.cpp.
+TJS_EXP_FUNC_DEF(void, TVPSetXP3FilterScript, (const ttstr & content));
+extern tTVPXP3ArchiveExtractionFilter TVPXP3ArchiveExtractionFilter;
+
 
 /*]*/
 //---------------------------------------------------------------------------

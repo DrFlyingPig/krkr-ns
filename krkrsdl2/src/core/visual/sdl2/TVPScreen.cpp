@@ -8,6 +8,7 @@
 
 #include "DebugIntf.h"
 #include "MsgIntf.h"
+#include "KrkrNSLog.h"
 
 int tTVPScreen::GetWidth() {
 #if 0
@@ -22,6 +23,16 @@ int tTVPScreen::GetWidth() {
 	if (SDL_GetDisplayUsableBounds(0, &r) != 0)
 	{
 		return 0;
+	}
+	// KRKR-ns: KAGEX games size their stage from System.screenWidth/Height.
+	// A wrong value here shows up as a 4:3 stage (e.g. LimeLight 1920x1440)
+	// letterboxed into the 16:9 console screen.  Log once so every run is
+	// self-describing.
+	static bool boundsLogged = false;
+	if (!boundsLogged)
+	{
+		boundsLogged = true;
+		KRKRNS_LOG("[ns] screen usable bounds: %dx%d (origin %d,%d)", r.w, r.h, r.x, r.y);
 	}
 	return r.w;
 }

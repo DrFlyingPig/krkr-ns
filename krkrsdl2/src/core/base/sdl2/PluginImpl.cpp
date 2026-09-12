@@ -535,6 +535,20 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 	return false;
 }
 
+bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
+{
+	// Storage-level visibility for statically-linked plugins.  Games gate their
+	// subsystems on FILE-EXISTENCE PROBES of plugin names before Plugins.link;
+	// the built-ins have no file behind them, so those probes must be answered
+	// here (see TVPGetPlacedPath in StorageIntf.cpp).  Lower-cased short name.
+	if (short_name == TJS_W("emoteplayer.dll") ||
+		short_name == TJS_W("motionplayer.dll") ||
+		short_name == TJS_W("emotedriver.dll") ||
+		short_name == TJS_W("layerexbtoa.dll"))
+		return true;
+	return TVPHasSwitchBuiltin(short_name);
+}
+
 // Ending a game session drops every global that session added (see
 // sessionglobals_drop.tjs), which takes the plugin-provided classes with it.
 // ncbind keeps its own per-class record and refuses to register a name twice

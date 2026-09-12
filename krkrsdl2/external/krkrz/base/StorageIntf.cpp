@@ -21,6 +21,7 @@
 #include "MsgIntf.h"
 #include "EventIntf.h"
 #include "DebugIntf.h"
+#include "TextStream.h"
 #include "tjsArray.h"
 #include "SysInitIntf.h"
 #include "XP3Archive.h"
@@ -33,8 +34,10 @@
 
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
 extern std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory);
+extern bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name);
 extern unsigned krkrsdl2_autocycle_round_count();
 extern ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &selected);
+extern void krkrsdl2_mount_xp3_resources();
 extern bool krkrsdl2_can_launch_game();
 extern bool TVPTerminateOnWindowClose;
 #endif
@@ -1569,6 +1572,27 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 	}
 
 #ifdef __SWITCH__
+	// KRKR-ns: games gate their subsystems (E-mote, text render, UI effects)
+	// on file-existence probes of plugin names before calling Plugins.link.
+	// Native builds answer those probes with real DLL files; our statically
+	// linked plugins have none, so the game disables features that actually
+	// work -- LimeLight skipped motion.tjs and then routed E-mote motion
+	// files (.mtn) through Layer.loadImages, breaking the OP and title art.
+	// Report built-in plugin names as existing, pointing at a harmless real
+	// file: Plugins.link resolves built-ins natively and never reads it.
+	{
+		const std::string lname8 = krkrns_utf8_of_path(storagename);
+		if (lname8.size() > 4 && lname8.compare(lname8.size() - 4, 4, ".dll") == 0 &&
+			krkrsdl2_is_builtin_plugin_name(storagename))
+		{
+			const ttstr dummy(TJS_W("file://?/romfs:/compat/system/dummy_colorpicker.png"));
+			TVPAutoPathCache.Add(name, dummy);
+			return dummy;
+		}
+	}
+#endif
+
+#ifdef __SWITCH__
 	// KRKR-ns diagnostic: an unqualified name that resolves nowhere is the
 	// mechanism behind "missing images / videos after switching games".  Logging
 	// the NAME (and the table state) separates "the resource is not in the game
@@ -2058,6 +2082,33 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 	}
 	const ttstr entry = krkrsdl2_prepare_xp3_game(*param[0], *param[1]);
 
+	// KRKR-ns: Kirikiroid2-compatible per-game XP3 extraction filter.  Titles
+	// with scrambled archive content (Riddle Joker) ship xp3filter.tjs beside
+	// the archives; Kirikiroid2 feeds it to a dedicated decoder engine whose
+	// registered TJS callback decrypts every extracted chunk.  Arm it here
+	// (before any game content is read); games without one clear the filter.
+	{
+		ttstr filter_script;
+		const ttstr filter_path = TVPProjectDir + TJS_W("xp3filter.tjs");
+		if(TVPIsExistentStorageNoSearch(filter_path))
+		{
+			iTJSTextReadStream *stream = TVPCreateTextStreamForRead(filter_path, TJS_W(""));
+			if(stream)
+			{
+				try
+				{
+					stream->Read(filter_script, 0);
+				}
+				catch(...)
+				{
+					filter_script.Clear();
+				}
+				delete stream;
+			}
+		}
+		TVPSetXP3FilterScript(filter_script);
+	}
+
 	// Kirikiroid-compatible distributions commonly place patch.tjs beside
 	// their XP3 files.  It installs decrypt hooks and links compatibility
 	// modules (notably emoteplayer) before the archive startup script runs.
@@ -2067,6 +2118,7 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 		KRKRNS_LOG("[launcher] executing sibling patch.tjs before game startup");
 		TVPExecuteStorage(game_patch);
 	}
+	krkrsdl2_mount_xp3_resources();
 
 	// KAG-standard boot globals. Stock Windows system init defines these;
 	// game startup scripts evaluate expressions like "kirikiriz -debugwin"

@@ -1779,8 +1779,22 @@ void tTJSNI_Window::SetFullScreen(bool b)
 //---------------------------------------------------------------------------
 bool tTJSNI_Window::GetFullScreen() const
 {
+#ifdef __SWITCH__
+	// Report the console window as always-fullscreen to game scripts, like
+	// krkrz's android backend does.  KAGEX games read Window.fullScreen
+	// before their own fullscreen transition and must see true, otherwise
+	// they enter the win32 windowEx.dll code path (getNormalRect) that
+	// cannot exist here -- the transition aborts midway and the boot wait
+	// never completes (LimeLight boot white screen).  This deliberately
+	// bypasses only the TJS-visible property: TVPWindowWindow::
+	// GetFullScreenMode() (and thus FullScreenGuard) keeps its real state
+	// so engine/launcher code may still resize the window.
+	if(Form) return true;
+	return false;
+#else
 	if(!Form) return false;
 	return Form->GetFullScreenMode();
+#endif
 }
 //---------------------------------------------------------------------------
 void tTJSNI_Window::SetUseMouseKey(bool b)
