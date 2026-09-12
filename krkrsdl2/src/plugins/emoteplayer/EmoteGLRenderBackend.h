@@ -28,6 +28,13 @@ public:
     void SetBlendMode(int mode, const float* uniformColor) override;
     void DrawMesh(const float* vertices, int vertexCount, const uint16_t* indices,
                   int indexCount, void* texture, float opacity) override;
+    // The in-process engine restart may hand the next game an SDL_Window at
+    // the SAME address as the destroyed one; the window-pointer comparison in
+    // begin() then keeps the context built against the dead window, and every
+    // mesh draw/readback runs through it (observed on the emulator as E-mote
+    // art rendered into the left quarter of the screen).  Drop the cached
+    // context unconditionally, exactly like the pointer-change path does.
+    void ResetForEngineRestart() override;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

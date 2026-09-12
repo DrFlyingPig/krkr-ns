@@ -1,6 +1,12 @@
 // KRKR-ns compat patch: win32dialog plugin unavailable on Switch.
 // Provide stub classes so KAG's wrapper chain (WIN32DialogEX and its
 // subclasses in k2compat_*.tjs) can be defined and instantiated.
+//
+// Install exactly once per process: see k2compat.tjs for why (TJS raises on a
+// repeated class definition and the rest of the script -- here the static
+// WIN32DialogEX.* members KAG binds -- would never run).
+if (typeof(global.__krkrns_compat_win32dialog) == "undefined") {
+global.__krkrns_compat_win32dialog = true;
 class WIN32DialogEX {
     function WIN32DialogEX(owner) {
         this.className = 'WIN32DialogEX';
@@ -37,3 +43,4 @@ class WIN32GenericDialogEX extends WIN32DialogEX {
 WIN32DialogEX.modeless = function(owner, template, onClose) { return null; };
 WIN32DialogEX.notify = function(owner, message, id) { return null; };
 WIN32DialogEX.removeAllBitmap = function() { return null; };
+}

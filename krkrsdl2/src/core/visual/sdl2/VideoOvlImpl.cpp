@@ -241,6 +241,12 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 	Close();
 	if(!Window) TVPThrowExceptionMessage(TVPWindowAlreadyMissing);
 
+	// KRKR-ns diagnostic: record every movie open attempt at entry.  On a title
+	// screen that shows a movie the UI can render while the movie layer stays
+	// black; without this line there is no way to tell "the game never asked for
+	// a movie" from "the request failed before the stream was opened".
+	KRKRNS_LOG("[video] open requested: %s", _name.AsNarrowStdString().c_str());
+
 	ttstr name(_name);
 	const tjs_char *param_pos = TJS_strchr(name.c_str(), TJS_W('?'));
 	if(param_pos != NULL)
@@ -257,6 +263,8 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 	}
 	catch(...)
 	{
+		KRKRNS_LOG("[video] open FAILED: stream not found for '%s'",
+			name.AsNarrowStdString().c_str());
 		if(stream) delete stream;
 		throw;
 	}

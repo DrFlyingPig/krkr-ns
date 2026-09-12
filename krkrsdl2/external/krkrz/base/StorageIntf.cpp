@@ -33,6 +33,7 @@
 
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
 extern std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory);
+extern unsigned krkrsdl2_autocycle_round_count();
 extern ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &selected);
 extern bool krkrsdl2_can_launch_game();
 extern bool TVPTerminateOnWindowClose;
@@ -819,9 +820,10 @@ private:
 static void TVPClearArchiveCache() { TVPArchiveCache.Clear(); }
 static tTVPAtExit TVPClearArchiveCacheAtExit
 	(TVP_ATEXIT_PRI_SHUTDOWN, TVPClearArchiveCache);
-// KRKR-ns: exported for the "end game session -> back to launcher" path
-// (SDLApplication.cpp), which must not keep the finished game's archives open.
+// KRKR-ns: exported for the "end game session -> back to launcher" path, which
+// must not keep the finished game's archives open.
 void krkrsdl2_clear_archive_cache() { TVPClearArchiveCache(); }
+//---------------------------------------------------------------------------
 //---------------------------------------------------------------------------
 
 
@@ -1065,6 +1067,71 @@ bool AutoPathTableInit = false;
 // full-table rebuild (sec: device log "Rebuilding Auto Path Table ... 220-550ms"
 // repeated dozens of times) made the startup pause for many seconds.
 static size_t AutoPathBuiltCount = 0;
+// KRKR-ns diagnostic: how many unresolved-name reports to emit for the current
+// session.  0 outside a probe, so normal runs pay nothing.  Sized to outlast
+// boot: the earlier limit filled up entirely on optional files the game probes
+// for (k2compat.xp3, patch_appendN.xp3, plugin DLLs), which are all absent by
+// design and hid the real failure that happens later in the session.
+static int AutoPathProbeFailuresLeft = 0;
+// Every unexpected miss in the session, regardless of the logging sample size.
+int AutoPathMissTotal = 0;
+void krkrsdl2_arm_miss_probe()
+{
+	AutoPathProbeFailuresLeft = 50; // log sample
+	AutoPathMissTotal = 0;          // full-session counter
+}
+int krkrsdl2_take_miss_total()
+{
+	const int total = AutoPathMissTotal;
+	KRKRNS_LOG("[miss] session total (unexpected): %d", total);
+	return total;
+}
+
+// KAG's Layer.loadImages probes sibling variants of a name ("3_p.png",
+// "3_m.tlg", ...).  Those misses are by design and appear in normal sessions
+// too, so they are counted but not logged.
+static bool krkrns_variant_suffix_probe(const ttstr &name)
+{
+	ttstr base = TVPExtractStorageName(name);
+	base.ToLowerCase();
+	// Strip the extension, then look for a "_p"/"_m"/"_s" style variant tail.
+	ttstr stem = TVPChopStorageExt(base);
+	const tjs_char *s = stem.c_str();
+	const size_t n = stem.GetLen();
+	if (n < 3) return false;
+	const tjs_char c = s[n - 2];
+	if (c != TJS_W('_')) return false;
+	const tjs_char t = s[n - 1];
+	return t == TJS_W('p') || t == TJS_W('m') || t == TJS_W('s') || t == TJS_W('e');
+}
+
+// Names that are EXPECTED to be absent: KAG probes optional archives and
+// per-game plugin DLLs at every boot, on every platform.  Reporting them hid
+// the real unresolved resources, so filter them out of the probe.
+static bool krkrns_miss_probe_ignored(const ttstr &name)
+{
+	if (name.IsEmpty()) return true;
+	// Only the file name matters; the request may carry a full storage path.
+	ttstr base = TVPExtractStorageName(name);
+	base.ToLowerCase();
+	const tjs_char *b = base.c_str();
+
+	static const tjs_char * const ignored[] = {
+		TJS_W("k2compat.xp3"), TJS_W("system.xp3"), TJS_W("sysscn.xp3"),
+		TJS_W("others.xp3"), TJS_W("rule.xp3"), TJS_W("sound.xp3"),
+		TJS_W("scenario.xp3"), TJS_W("image.xp3"), TJS_W("face.xp3"),
+		TJS_W("init.xp3"), TJS_W("font.xp3"), TJS_W("sysse.xp3"),
+		TJS_W("thum.xp3"), TJS_W("motion.xp3"), TJS_W("motiondx.xp3"),
+		TJS_W("emote.xp3"), TJS_W("emotedx.xp3"), TJS_W("bishamon.xp3"),
+		TJS_W("debug.xp3"), TJS_W("sdmotion.xp3"), TJS_W("packinone.dll"),
+		TJS_W("fstat.dll"), TJS_W("messenger.dll"), TJS_W("autocycle.txt"),
+	};
+	for (size_t i = 0; i < sizeof(ignored) / sizeof(ignored[0]); ++i)
+		if (TJS_strcmp(b, ignored[i]) == 0) return true;
+	// patch_append0..9.xp3 / patchN.xp3 style optional patch packs.
+	if (TJS_strncmp(b, TJS_W("patch_append"), 12) == 0) return true;
+	return false;
+}
 //---------------------------------------------------------------------------
 static void TVPClearAutoPathCache()
 {
@@ -1072,6 +1139,21 @@ static void TVPClearAutoPathCache()
 	TVPAutoPathTable.Clear();
 	AutoPathTableInit = false;
 	AutoPathBuiltCount = 0;
+}
+// KRKR-ns: drop ONLY the name->placed-path lookup memo, keeping the
+// filename->auto-path table and the incremental-rebuild latches.  The table
+// is a pure function of TVPAutoPathList, so it may only be wiped when the
+// LIST itself changes (add/remove/reset below) -- anything else only needs
+// the memo.  The stock TVPClearStorageCaches wiped the table, and every
+// WRITE-mode stream open goes through it: the second game's boot, which
+// probes the system-save path several times, paid a full 97k-file table
+// rebuild (~250ms each on the device) per save attempt.  Residual semantic
+// difference: a NEW file created inside an existing auto-path folder is not
+// picked up by unqualified lookups until the list next changes; no Switch
+// title writes into its auto-path folders (saves live in the data path).
+static void TVPClearAutoPathLookupCache()
+{
+	TVPAutoPathCache.Clear();
 }
 //---------------------------------------------------------------------------
 struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
@@ -1125,6 +1207,16 @@ void TVPRemoveAutoPath(const ttstr &name)
 	if(i != TVPAutoPathList.end())
 		TVPAutoPathList.erase(i);
 
+	// KRKR-ns: TVPAutoPathTable maps file name -> the path it was found under, so
+	// an entry left behind here keeps resolving (and serving!) files from a path
+	// that is no longer an auto path.  Removing from the list alone was silently
+	// broken: TVPRebuildAutoPathTable's fast path compares AutoPathBuiltCount
+	// against the list SIZE, and removing one entry while adding another keeps
+	// those equal, so the stale entries survived indefinitely.
+	//
+	// Observed on the device: after ending a game and launching a second one, the
+	// second game rendered the FIRST game's title screen and menus, because every
+	// unqualified resource name still resolved into the finished game's archive.
 	TVPClearAutoPathCache();
 }
 //---------------------------------------------------------------------------
@@ -1298,6 +1390,135 @@ static tjs_uint TVPRebuildAutoPathTable()
 	return totalcount;
 }
 //---------------------------------------------------------------------------
+// KRKR-ns diagnostic (cold path only): the auto-path table maps every file name
+// to the path it was found under, so a stale entry silently serves assets from a
+// finished game.  A session teardown logs this before and after dropping the
+// game's paths; `table` must fall back to just the compat/patch entries.
+// UTF-8 view of a storage path for the SD log (ttstr is UTF-16, and game
+// directory names are non-ASCII, so AsNarrowStdString() is not usable here).
+static std::string krkrns_utf8_of_path(const ttstr &s)
+{
+	std::string out;
+	for (tjs_uint i = 0; i < s.GetLen() && i < 200; ++i)
+	{
+		tjs_uint32 ch = static_cast<tjs_uint32>(s[i]);
+		if (ch < 0x80) out += static_cast<char>(ch);
+		else if (ch < 0x800)
+		{
+			out += static_cast<char>(0xC0 | (ch >> 6));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+		else
+		{
+			out += static_cast<char>(0xE0 | (ch >> 12));
+			out += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+	}
+	return out;
+}
+
+// Caller holds TVPCreateStreamCS.
+static tjs_int TVPRemoveAutoPathsUnderLocked(const ttstr &prefix)
+{
+	if (prefix.IsEmpty()) return 0;
+
+	tjs_int removed = 0;
+	for (size_t i = TVPAutoPathList.size(); i-- > 0;)
+	{
+		if (TVPAutoPathList[i].StartsWith(prefix))
+		{
+			TVPAutoPathList.erase(TVPAutoPathList.begin() + (ptrdiff_t)i);
+			++removed;
+		}
+	}
+	return removed;
+}
+
+tjs_int TVPRemoveAutoPathsUnder(const ttstr &prefix)
+{
+	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+
+	const tjs_int removed = TVPRemoveAutoPathsUnderLocked(prefix);
+	// The name->path table still maps bare names onto this game's archives;
+	// dropping the list entries without invalidating it would leave those
+	// mappings live.
+	if (removed > 0) TVPClearAutoPathCache();
+	return removed;
+}
+//---------------------------------------------------------------------------
+
+void krkrsdl2_log_autopath_state(const char *when)
+{
+	KRKRNS_LOG("[autopath] %s: list=%d table=%d init=%d built=%d",
+		when,
+		(int)TVPAutoPathList.size(),
+		(int)TVPAutoPathTable.GetCount(),
+		(int)AutoPathTableInit,
+		(int)AutoPathBuiltCount);
+
+	// Counts alone cannot distinguish "the previous game's archive is still
+	// listed" from "it is gone": list=140 after removing 11 entries looks the
+	// same whether the removed ones were the game's or something else.  Dump the
+	// entries that actually resolve files -- the archives -- so a cross-session
+	// leak is visible directly instead of inferred.
+	int shown = 0;
+	for (size_t i = 0; i < TVPAutoPathList.size() && shown < 24; ++i)
+	{
+		const ttstr &p = TVPAutoPathList[i];
+		const tjs_char *sharp = TJS_strchr(p.c_str(), TVPArchiveDelimiter);
+		if (!sharp) continue; // plain folders are the permanent compat/patch ones
+		KRKRNS_LOG("[autopath]   archive[%d] = %s", (int)i,
+			krkrns_utf8_of_path(p).c_str());
+		++shown;
+	}
+	if (shown == 0) KRKRNS_LOG("[autopath]   (no archive entries)");
+}
+
+// KRKR-ns diagnostic: prove how a prefix compares against the entries that are
+// supposed to match it.  StartsWith() semantics (literal vs case-folded vs
+// character-set) are not worth guessing about when the evidence is one line.
+void krkrsdl2_probe_autopath_prefix(const ttstr &prefix, const char *when)
+{
+	KRKRNS_LOG("[autopath] prefix probe (%s): prefix=\"%s\" len=%d",
+		when, krkrns_utf8_of_path(prefix).c_str(), (int)prefix.GetLen());
+	int shown = 0;
+	for (size_t i = 0; i < TVPAutoPathList.size() && shown < 6; ++i)
+	{
+		const ttstr &p = TVPAutoPathList[i];
+		if (TJS_strchr(p.c_str(), TVPArchiveDelimiter) == nullptr) continue;
+		KRKRNS_LOG("[autopath]   [%d] startsWith=%d  entry=\"%s\"", (int)i,
+			(int)p.StartsWith(prefix), krkrns_utf8_of_path(p).c_str());
+		++shown;
+	}
+}
+
+// KRKR-ns: reset the auto-path subsystem to its pristine boot state.  Called by
+// krkrsdl2_reinitialize_engine (SDLApplication.cpp).
+//
+// The engine rebuild tears down the script engine and window system, but the
+// storage layer's process-global state survives it: the finished game's
+// archive entries stayed in TVPAutoPathList, so every later mount started from
+// a polluted list (observed growth across three emulator sessions: 12 -> 69 ->
+// 80 entries, including duplicate `file://?/` and `file://` forms the game
+// itself added).  Wipe the whole list, the name->path table and the resolution
+// cache, then re-seed the single path boot itself seeds -- exactly the state
+// krkrsdl2_init_platform_once leaves behind.  compat/patch paths do not need
+// re-seeding here: every game mount removes and re-adds them last.
+void krkrsdl2_reset_auto_paths()
+{
+	{
+		tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+		TVPAutoPathList.clear();
+		// Also drops the name->path table and its init/built latches, so the
+		// next lookup rebuilds from the fresh list only.
+		TVPClearAutoPathCache();
+	}
+	// Outside the lock: TVPAddAutoPath takes the same critical section.
+	TVPAddAutoPath(ttstr(TJS_W("file://?/romfs:/")));
+	KRKRNS_LOG("[autopath] reset to boot state (list=%d)", (int)TVPAutoPathList.size());
+}
+//---------------------------------------------------------------------------
 
 
 
@@ -1346,6 +1567,32 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 		TVPAutoPathCache.Add(name, found);
 		return found;
 	}
+
+#ifdef __SWITCH__
+	// KRKR-ns diagnostic: an unqualified name that resolves nowhere is the
+	// mechanism behind "missing images / videos after switching games".  Logging
+	// the NAME (and the table state) separates "the resource is not in the game
+	// at all" from "it is there but the search table lost it", which the caller's
+	// generic failure message cannot show.
+	//
+	// The previous version stopped at a fixed budget, so BOTH sessions hit the
+	// cap and their counts could not be compared at all.  Now every miss is
+	// COUNTED for the whole session, while only a sample is logged.
+	if (!krkrns_miss_probe_ignored(name))
+	{
+		++AutoPathMissTotal;
+		// KAG's own variant search ("3_p.png", "3_m.tlg") is expected to miss;
+		// it is Layer.loadImages trying suffixes, not a broken resource.
+		if (AutoPathProbeFailuresLeft > 0 && !krkrns_variant_suffix_probe(name))
+		{
+			--AutoPathProbeFailuresLeft;
+			KRKRNS_LOG("[miss] unresolved: %s  (table=%d init=%d list=%d)",
+				krkrns_utf8_of_path(name).c_str(),
+				(int)TVPAutoPathTable.GetCount(), (int)AutoPathTableInit,
+				(int)TVPAutoPathList.size());
+		}
+	}
+#endif
 
 	// not found
 	TVPAutoPathCache.Add(name, ttstr());
@@ -1583,9 +1830,14 @@ tTJSBinaryStream * TVPCreateStream(const ttstr & _name, tjs_uint32 flags)
 //---------------------------------------------------------------------------
 void TVPClearStorageCaches()
 {
-	// clear all storage related caches
+	// clear all storage related caches.  The auto-path TABLE survives: this
+	// runs on every write-mode stream open and every directory change, and the
+	// table depends only on the auto-path list, which neither touches.  Wiping
+	// it here (stock behavior) forced a full re-enumeration of every mounted
+	// archive on the next lookup -- 97k files / ~250ms on the device, once per
+	// system-save probe during a game's boot.
 	TVPClearXP3SegmentCache();
-	TVPClearAutoPathCache();
+	TVPClearAutoPathLookupCache();
 }
 //---------------------------------------------------------------------------
 
@@ -1780,6 +2032,21 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGameFileList)
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getGameFileList)
 //----------------------------------------------------------------------
+#ifdef __SWITCH__
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getAutocycleRound)
+{
+	// Test harness support (see krkrsdl2_service_autocycle).  The in-process
+	// engine restart rebuilds the script engine, so a TJS-side cycle counter
+	// would reset to 0 and the harness would launch the first game folder
+	// forever, never exercising a cross-game hand-over.  The native counter
+	// survives the restart, so the launcher script rotates through the folders
+	// based on this value instead.
+	if(result) *result = (tjs_int)krkrsdl2_autocycle_round_count();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getAutocycleRound)
+//----------------------------------------------------------------------
+#endif
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 {
 	if(numparams < 2) return TJS_E_BADPARAMCOUNT;
@@ -1894,6 +2161,20 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 				KRKRNS_LOG("[launcher] startup stream probe threw");
 			}
 		}
+		// KRKR-ns: guarantee the KAG2 compatibility namespace before the game's
+		// startup script runs.  A game ships its own system/k2compat.tjs, which
+		// REPLACES global.Krkr2CompatUtils with a stub whose members are supposed
+		// to come from k2compat.dll -- absent here.  That copy is loaded from the
+		// game's archive and therefore WINS over our compat path, and it strips
+		// loadPlugin/unloadPlugin/isLoaded/autoLoad from the namespace.
+		//
+		// Repairing only after the game's script has run is too late:
+		// initialize.tjs -> KAGLoadScriptOnce -> custom.tjs calls
+		// Krkr2CompatUtils.loadPlugin and the boot dies first.  Reinstall here,
+		// immediately before startup, so the members KAG needs are always
+		// present; ScriptMgnIntf.cpp also reinstalls after any k2compat.tjs the
+		// game loads, covering the rest of the session.
+		TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat_reinstall.tjs")));
 		TVPExecuteStorage(entry);
 		KRKRNS_STAGE("game startup returned");
 		KRKRNS_LOG("[launcher] game startup returned");

@@ -2540,7 +2540,31 @@ iTJSDispatch2 * tTJSNI_BaseLayer::LoadImages(const ttstr &name, tjs_uint32 color
 	}
 	catch(eTJSScriptException & e)
 	{
-		KRKRNS_LOG("[layer] loadImages: resource unavailable, layer left empty");
+		// This catch fires ONLY when a resource genuinely cannot be loaded, so
+		// unlike the auto-path miss counter it is not swamped by the optional
+		// files KAG probes for at boot (DXcheck.dll, patchN.xp3, sysse_N.ini...).
+		// A healthy session logs none of these; a session showing blank images
+		// logs one per failed image -- and the name says which resource.
+		{
+			std::string u8;
+			for (tjs_uint i = 0; i < name.GetLen() && i < 180; ++i)
+			{
+				tjs_uint32 ch = static_cast<tjs_uint32>(name[i]);
+				if (ch < 0x80) u8 += static_cast<char>(ch);
+				else if (ch < 0x800)
+				{
+					u8 += static_cast<char>(0xC0 | (ch >> 6));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+				else
+				{
+					u8 += static_cast<char>(0xE0 | (ch >> 12));
+					u8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+			}
+			KRKRNS_LOG("[layer] loadImages FAILED: '%s' (layer left empty)", u8.c_str());
+		}
 		return NULL;
 	}
 	try

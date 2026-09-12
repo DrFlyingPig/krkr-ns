@@ -1,6 +1,12 @@
 // KRKR-ns compat: k2compat console layer shim (KAG2 compat plugin
 // unavailable on Switch). Provide the common win32 commctrl constants
 // and no-op entry points the game's k2compat_console.tjs uses.
+//
+// Install exactly once per process.  A game re-executes every compat script on
+// each launch; this one only assigns globals, but the same guard is applied to
+// every compat script so the rule holds uniformly (see k2compat.tjs).
+if (typeof(global.__krkrns_compat_k2compat_console) == "undefined") {
+global.__krkrns_compat_k2compat_console = true;
 var ICC_LISTVIEW_CLASSES = 0x00000001;
 var ICC_TREEVIEW_CLASSES = 0x00000002;
 var ICC_BAR_CLASSES = 0x00000004;
@@ -21,3 +27,4 @@ function initComboBoxEx() { return null; }
 function initListView() { return null; }
 function initTrackBar() { return null; }
 function initUpDown() { return null; }
+}

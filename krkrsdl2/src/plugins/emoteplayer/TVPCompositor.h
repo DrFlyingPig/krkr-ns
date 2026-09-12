@@ -30,9 +30,17 @@ public:
     virtual void DrawMesh(const float* vertices, int vertexCount,
                           const uint16_t* indices, int indexCount,
                           void* texture, float opacity) = 0;
+
+    // Called when the host rebuilds the engine in-process and the SDL renderer
+    // this backend cached has been destroyed.  Backends that hold no renderer
+    // state keep the default no-op.
+    virtual void ResetForEngineRestart() {}
 };
 
 iTVPRenderBackend* TVPGetRenderBackend();
+
+// Resets whichever backend is selected; see the definition in TVPCompositor.cpp.
+void TVPResetRenderBackendForEngineRestart();
 } // namespace krkrsdl3
 
 

@@ -1,4 +1,14 @@
 // KRKR-ns compat: KAG2 plugin classes unavailable on Switch.
+//
+// Install exactly once per process.  Ending a game returns to the built-in
+// launcher and the next game re-executes every compat script; TJS raises on a
+// repeated `class` definition and ABORTS the remainder of the script, so the
+// static members bound further down (WIN32Dialog.Header, ICC_USEREX_CLASSES,
+// Scripts.getObjectKeys, ...) would silently never be installed and the next
+// game's boot would fail on missing members.  The guard makes every re-run a
+// no-op instead.
+if (typeof(global.__krkrns_compat_k2compat) == "undefined") {
+global.__krkrns_compat_k2compat = true;
 class DebugConsoleCompatDialog {
     function DebugConsoleCompatDialog(owner) {
         this.owner = owner;
@@ -61,7 +71,10 @@ if (typeof(global.Pad) == "undefined") {
 }
 
 // KAG2 compatibility namespace object (plugin-provided in the original).
-function Krkr2CompatUtils() {}
+// Assigned rather than declared as a bare `function`: inside the install guard
+// below a function declaration is block-scoped, so it would not become a
+// global when this script runs as a function body.
+global.Krkr2CompatUtils = function() {};
 Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
 Krkr2CompatUtils.getWindowRect = function() { return null; };
 
@@ -243,3 +256,5 @@ if (typeof(WaveSoundBuffer.setDefaultAheads) == "undefined") {
         return null;
     };
 }
+
+} // __krkrns_compat_k2compat (install once per process)

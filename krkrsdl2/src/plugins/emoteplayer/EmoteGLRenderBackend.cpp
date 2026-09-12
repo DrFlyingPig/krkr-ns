@@ -152,7 +152,12 @@ struct EmoteGLRenderBackend::Impl
         target = nullptr; mask = nullptr;
         window = nullptr; context = nullptr;
         savedWindow = nullptr; savedContext = nullptr;
-        readTileWidth = 0; readScratch.clear();
+        // readTileWidth is a property of the RENDERER (the self-test-measured
+        // largest full-row readback the driver performs honestly), not of the
+        // window -- keep it, or a truncating renderer (the emulator) would
+        // silently fall back to corrupting full-width reads after an engine
+        // restart.  readScratch is resized on demand.
+        readScratch.clear();
         active = false; failed = false; blend = 0;
     }
     struct Scope
@@ -441,6 +446,18 @@ EmoteGLRenderBackend::~EmoteGLRenderBackend()
         impl->end();
         SDL_GL_DeleteContext(impl->context);
     }
+}
+void EmoteGLRenderBackend::ResetForEngineRestart()
+{
+    // The engine restart destroyed the SDL window this context was built
+    // against.  begin()'s window-pointer check normally covers a new window,
+    // but SDL routinely hands the replacement the SAME address, in which case
+    // the dead context is kept and mesh drawing/readback corrupts (observed
+    // as E-mote art filling only the left quarter of the screen on the
+    // emulator).  Drop unconditionally; the next begin() rebuilds against the
+    // current window.  resetForNewWindow() issues no GL calls, which matters
+    // because the old context is already gone here.
+    impl->resetForNewWindow();
 }
 bool EmoteGLRenderBackend::IsAvailable()
 {

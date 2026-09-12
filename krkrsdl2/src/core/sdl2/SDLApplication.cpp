@@ -12,6 +12,8 @@
 #include "SystemImpl.h"
 #include "TVPWindow.h"
 #include "SysInitIntf.h"
+// E-mote state that outlives the script engine; reset on an engine restart.
+#include "../../plugins/emoteplayer/emoteplayer_reset.h"
 #include "SysInitImpl.h"
 #include "CharacterSet.h"
 #include "WaveImpl.h"
@@ -219,6 +221,17 @@ static void process_events();
 #else
 static bool process_events();
 #endif
+
+// Defined near the launcher code below; declared here because process_events()
+// has to know whether a terminate means "exit" or "rebuild the engine".
+extern bool krkrsdl2_engine_reinit_wanted;
+// Also defined below: frees any window form still holding the single native
+// window, which the rebuild needs before creating the launcher's own.
+void krkrsdl2_release_leftover_windows();
+// Render-trace: when set, `trace-render.once` is not consumed, so a capture is
+// taken for every game session instead of only the first.  Enabled by writing
+// the marker file as "keep" instead of empty.
+extern bool krkrsdl2_trace_keep_marker;
 
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 static int sdl_event_watch(void *userdata, SDL_Event *in_event);
@@ -834,6 +847,11 @@ public:
 	void TranslateWindowToDrawArea(int &x, int &y);
 	void TranslateDrawAreaToWindow(int &x, int &y);
 #ifdef __SWITCH__
+	/* KRKR-ns diagnostic: dump the engine layer tree to the log.  Comparing the
+	   tree of a working session with one where art is missing says whether the
+	   content layer exists at all, and with what size -- which a per-frame pixel
+	   diff cannot tell apart from "present but empty". */
+	void krkrsdl2_dump_layer_tree();
 	/* KRKR-ns patch: gamepad -> mouse/keyboard synthesis, polled each frame */
 	void switch_process_gamepad_input();
 	/* KRKR-ns patch: mark the whole compose surface as damaged so the next
@@ -1236,6 +1254,13 @@ else
 
 TVPWindowWindow::~TVPWindowWindow()
 {
+	// KRKR-ns diagnostic: the in-process engine restart depends on this running.
+	// The engine restart deletes the Application, which deletes its window list,
+	// and only here are the native SDL objects released.  If this never logs, the
+	// new engine keeps drawing into the previous engine's SDL window/renderer --
+	// which shows up as UI that renders while the background stays black.
+	KRKRNS_LOG("[win] ~TVPWindowWindow %p: sdlwindow=%p renderer=%p texture=%p",
+		this, (void *)this->window, (void *)this->renderer, (void *)this->texture);
 	if (_lastWindowWindow == this)
 	{
 		_lastWindowWindow = this->_prevWindow;
@@ -2204,7 +2229,155 @@ static void KrkrDumpLayerBmps(tTJSNI_BaseLayer* layer, int depth, int& count, in
 		KrkrDumpLayerBmps(layer->GetChildren(i), depth + 1, count, path * 10 + (i + 1));
 	}
 }
+
+// Same access context as KrkrDumpLayerBmps: logs each layer's name, size and
+// visibility.  A tree dump is far cheaper than one BMP per layer, so it can run
+// at capture time and still say whether a missing artwork layer exists at all.
+static void KrkrDumpLayerTree(tTJSNI_BaseLayer *layer, int depth, int manager)
+{
+	if (!layer || depth > 6) return;
+	static int budget = 400;
+	if (budget <= 0) return;
+	--budget;
+	KRKRNS_LOG("[layerdump] m%d %*s'%s' %ux%u visible=%d children=%d",
+		manager, depth * 2, "", layer->GetName().AsNarrowStdString().c_str(),
+		(unsigned)layer->GetImageWidth(), (unsigned)layer->GetImageHeight(),
+		(int)layer->GetVisible(), (int)layer->GetCount());
+	for (tjs_int i = 0; i < (tjs_int)layer->GetCount(); ++i)
+		KrkrDumpLayerTree(layer->GetChildren(i), depth + 1, manager);
+}
 #endif
+// Render-trace controls, at file scope so an engine restart can reset them.
+static Uint32 krkrsdl2_last_trace_check = 0;
+bool krkrsdl2_trace_keep_marker = false;
+
+// One-shot frame capture state (see the capture block in TickBeat).  A real
+// capture is written exactly once per process, driven by a delay read from
+// sdmc:/switch/krkrsdl2/capture-once.txt.
+static Uint32 krkrsdl2_capture_at_ms = 0;
+static bool krkrsdl2_capture_armed = false;
+static bool krkrsdl2_capture_done = false;
+static Uint32 krkrsdl2_capture_launch_ms = 0;
+
+// One-shot frame capture.
+//
+// Reads back what is actually on screen, so "the background is black" can be
+// separated from "the background was composed but never presented".
+//
+// Marker sdmc:/switch/krkrsdl2/capture-once.txt holds a delay in seconds from
+// process start.  Exactly ONE capture happens, then the marker is consumed, so
+// this costs a single readback instead of the per-frame cost that made the
+// earlier repeating trace stutter.
+//
+// Called from the top of the texture branch in TickBeat, i.e. on EVERY rendered
+// frame.  It was first placed inside the dirty-rect update branch, which a
+// static title screen never enters -- so the deadline passed capturing nothing.
+static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surface, SDL_Renderer *renderer)
+{
+	if (krkrsdl2_capture_done) return;
+
+	const Uint32 capNow = SDL_GetTicks();
+	// Latch the baseline on the first frame: SDL_GetTicks() reads 0 before the
+	// video subsystem is up, so reading it during platform init recorded
+	// launch=0 and pushed the deadline a whole boot past what was asked for.
+	if (krkrsdl2_capture_launch_ms == 0) krkrsdl2_capture_launch_ms = capNow;
+
+	if (!krkrsdl2_capture_armed)
+	{
+		static Uint32 lastMarkerCheck = 0;
+		if (lastMarkerCheck != 0 && capNow - lastMarkerCheck < 1000) return;
+		lastMarkerCheck = capNow;
+		FILE *cf = fopen("sdmc:/switch/krkrsdl2/capture-once.txt", "rb");
+		if (!cf) return;
+		char cbuf[16] = {0};
+		const size_t cn = fread(cbuf, 1, sizeof(cbuf) - 1, cf);
+		fclose(cf);
+		int secs = (cn > 0) ? atoi(cbuf) : 0;
+		if (secs < 0) secs = 0;
+		krkrsdl2_capture_at_ms = krkrsdl2_capture_launch_ms + (Uint32)secs * 1000u;
+		krkrsdl2_capture_armed = true;
+		KRKRNS_LOG("[capture] armed: %d s after process start (launch=%u now=%u fire=%u)",
+			secs, (unsigned)krkrsdl2_capture_launch_ms, (unsigned)capNow,
+			(unsigned)krkrsdl2_capture_at_ms);
+		return;
+	}
+
+	if (capNow < krkrsdl2_capture_at_ms) return;
+	krkrsdl2_capture_done = true;
+	remove("sdmc:/switch/krkrsdl2/capture-once.txt");
+	KRKRNS_LOG("[capture] taking frame (surface=%p renderer=%p)",
+		(void *)surface, (void *)renderer);
+
+	// Dump the engine layer tree alongside the pixels.  The tree distinguishes
+	// the three cases a pixel diff cannot: the content layer does not exist, it
+	// exists but is empty/invisible, or it is fine and lost later in the pipeline.
+	if (win) win->krkrsdl2_dump_layer_tree();
+
+	// 1) What the game composed on the CPU side, before any present.  This is
+	//    the trustworthy artifact here: the emulator's GPU readback is truncated.
+	if (surface)
+	{
+		SDL_SaveBMP(surface, "sdmc:/switch/krkrsdl2/capture-surface.bmp");
+		KRKRNS_LOG("[capture] surface %dx%d saved", surface->w, surface->h);
+	}
+	else
+	{
+		KRKRNS_LOG("[capture] no CPU surface (renderer path active)");
+	}
+
+	// 2) What the renderer holds.  Advisory only -- the emulator's software
+	//    GLES truncates this readback to a quarter width.
+	if (renderer)
+	{
+		int ow = 0, oh = 0;
+		if (SDL_GetRendererOutputSize(renderer, &ow, &oh) == 0 && ow > 0 && oh > 0)
+		{
+			SDL_Surface *shot =
+				SDL_CreateRGBSurfaceWithFormat(0, ow, oh, 32, SDL_PIXELFORMAT_ABGR8888);
+			if (shot)
+			{
+				if (SDL_RenderReadPixels(renderer, nullptr, shot->format->format,
+						shot->pixels, shot->pitch) == 0)
+				{
+					SDL_SaveBMP(shot, "sdmc:/switch/krkrsdl2/capture-present.bmp");
+					KRKRNS_LOG("[capture] present %dx%d saved", ow, oh);
+				}
+				else
+				{
+					KRKRNS_LOG("[capture] RenderReadPixels failed: %s", SDL_GetError());
+				}
+				SDL_FreeSurface(shot);
+			}
+		}
+	}
+}
+
+#ifdef __SWITCH__
+// Defined above, next to KrkrDumpLayerBmps (it needs that function's access).
+static void KrkrDumpLayerTree(tTJSNI_BaseLayer *layer, int depth, int manager);
+
+void TVPWindowWindow::krkrsdl2_dump_layer_tree()
+{
+	if (!this->TJSNativeInstance) return;
+	iTVPDrawDevice *dev = this->TJSNativeInstance->GetDrawDevice();
+	tTVPDrawDevice *zdev = dynamic_cast<tTVPDrawDevice *>(dev);
+	if (!zdev) return;
+	for (size_t m = 0; m < 16; ++m)
+	{
+		iTVPLayerManager *mgr = zdev->GetLayerManagerAt(m);
+		if (!mgr) break;
+		tTJSNI_BaseLayer *pri = mgr->GetPrimaryLayer();
+		if (!pri)
+		{
+			KRKRNS_LOG("[layerdump] manager %u: no primary layer", (unsigned)m);
+			continue;
+		}
+		KRKRNS_LOG("[layerdump] --- manager %u ---", (unsigned)m);
+		KrkrDumpLayerTree(pri, 0, (int)m);
+	}
+}
+#endif
+
 void TVPWindowWindow::TickBeat()
 {
 	if (!this->visibilityHasInitialized)
@@ -2217,17 +2390,22 @@ void TVPWindowWindow::TickBeat()
 	// composite surface, the presented backbuffer and the real engine layer
 	// tree, without changing scripts. Checked even when the scene is static,
 	// then forces one full present so both captures are consistent.
-	static Uint32 lastTraceCheck = 0;
 	const Uint32 traceNow = SDL_GetTicks();
-	if (traceNow - lastTraceCheck >= 1000)
+	if (traceNow - krkrsdl2_last_trace_check >= 1000)
 	{
-		lastTraceCheck = traceNow;
+		krkrsdl2_last_trace_check = traceNow;
 		const char* marker = "sdmc:/switch/krkrsdl2/trace-render.once";
 		FILE* trace = fopen(marker, "rb");
 		if (trace)
 		{
+			// A marker containing "keep" makes the trace repeat every second and
+			// survive an engine restart, so each game session gets captured.
+			char buf[8] = {0};
+			const size_t n = fread(buf, 1, sizeof(buf) - 1, trace);
 			fclose(trace);
-			remove(marker);
+			krkrsdl2_trace_keep_marker = (n > 0 && buf[0] == 'k');
+			if (!krkrsdl2_trace_keep_marker)
+				remove(marker);
 			if (this->surface)
 				SDL_SaveBMP(this->surface, "sdmc:/switch/krkrsdl2/render-surface.bmp");
 			KRKRNS_LOG("[render-trace] surface=%dx%d texture=%d update=%d,%d %dx%d",
@@ -2319,6 +2497,10 @@ void TVPWindowWindow::TickBeat()
 #endif
 				if (this->texture)
 				{
+					// Runs on every rendered frame, including frames with no
+					// damage (a static title screen), so the capture deadline is
+					// actually observed.
+					krkrsdl2_maybe_capture_frame(this, this->surface, this->renderer);
 					if (this->surface)
 					{
 #ifdef __SWITCH__
@@ -3896,6 +4078,24 @@ static bool process_events()
 			::Application->Run();
 			if (::Application->IsTarminate())
 			{
+				// KRKR-ns: on an in-process engine restart, do NOT run the final
+				// system teardown.  TVPSystemUninit() is one-way: it latches
+				// TVPSystemUninitCalled, calls TVPUninitTVPGL() (dropping the
+				// SIMD dispatch tables that are only built once at startup) and
+				// runs the atexit list via TVPCauseAtExit().  A freshly rebuilt
+				// engine would come back to torn-down graphics and an exhausted
+				// atexit list.  The rebuild path handles its own cleanup, so
+				// just leave the loop and let krkrsdl2_run_main_loop() rebuild.
+				if (krkrsdl2_engine_reinit_wanted)
+				{
+					KRKRNS_LOG("[reinit] terminate with engine restart pending: skipping system uninit");
+					// Window forms are script-owned, so drop them while the
+					// script engine is still alive.  This also lets go of the
+					// single native window libnx permits before the rebuilt
+					// engine creates the launcher's own.
+					krkrsdl2_release_leftover_windows();
+					return false;
+				}
 				TVPSystemUninit();
 				if (TVPSystemControl)
 				{
@@ -3993,6 +4193,9 @@ void krkrsdl2_request_return_to_launcher()
 {
 	krkrsdl2_return_to_launcher_flag.store(true);
 }
+// Set when the in-process fallback decided to rebuild the engine instead of
+// patching the live one; consumed by krkrsdl2_run_main_loop().
+bool krkrsdl2_engine_reinit_wanted = false;
 bool krkrsdl2_take_return_to_launcher()
 {
 	return krkrsdl2_return_to_launcher_flag.exchange(false);
@@ -4061,8 +4264,18 @@ public:
 		tjs_uint32 *hint, tTJSVariant *result, tjs_int numparams,
 		tTJSVariant **param, iTJSDispatch2 *objthis)
 	{
-		if (membername) Names.push_back(ttstr(membername));
-		else if (numparams >= 3 && param[2]->Type() == tvtString) Names.push_back(ttstr(*param[2]));
+		// EnumMembers() passes the member name as param[0] and the member
+		// flags as param[1]; `membername` is null and `param[2]` holds the
+		// VALUE, not the name.  Reading param[2] here silently collected
+		// nothing (log: "base globals captured: 0"), which disabled the whole
+		// cross-session cleanup.  Same contract as the engine's own enumerator
+		// in ScriptMgnIntf.cpp (tTVPScriptObjectKeysCaller).
+		if (numparams >= 2)
+		{
+			const tjs_int flags = (tjs_int)*param[1];
+			if (param[0]->Type() == tvtString && (flags & TJS_HIDDENMEMBER) == 0)
+				Names.push_back(ttstr(*param[0]));
+		}
 		if (result) *result = (tjs_int)1;
 		return TJS_S_OK;
 	}
@@ -4111,8 +4324,33 @@ void krkrsdl2_capture_base_globals()
 	KRKRNS_LOG("[launcher] base globals captured: %d", (int)krkrsdl2_base_globals.size());
 }
 
-void krkrsdl2_drop_session_globals()
+// KRKR-ns diagnostic: does `global.Krkr2CompatUtils.loadPlugin` exist right now?
+// The KAG compatibility namespace is defined by compat/system/k2compat.tjs (and
+// minimally by our own launcher script).  A game that calls it during startup
+// fails with `Member "loadPlugin" does not exist`, so log the actual state
+// around the session teardown instead of guessing which script defined what.
+static const char *krkrns_compat_utils_state()
 {
+	iTJSDispatch2 *global = TVPGetScriptDispatch();
+	if (!global) return "no-global";
+	tTJSVariant value;
+	const tjs_error err =
+		global->PropGet(0, TJS_W("Krkr2CompatUtils"), nullptr, &value, global);
+	const char *state = "absent";
+	if (TJS_SUCCEEDED(err) && value.Type() == tvtObject && value.AsObjectNoAddRef())
+	{
+		iTJSDispatch2 *utils = value.AsObjectNoAddRef();
+		tTJSVariant member;
+		const tjs_error merr =
+			utils->PropGet(0, TJS_W("loadPlugin"), nullptr, &member, utils);
+		state = (TJS_SUCCEEDED(merr) && member.Type() != tvtVoid)
+			? "present" : "missing-member";
+	}
+	global->Release();
+	return state;
+}
+
+void krkrsdl2_drop_session_globals(){
 	std::vector<ttstr> names;
 	krkrsdl2_collect_global_names(names);
 	iTJSDispatch2 *global = TVPGetScriptDispatch();
@@ -4147,6 +4385,26 @@ extern void TVPTerminateSync(int code);
 static bool krkrsdl2_autocycle_checked = false;
 static bool krkrsdl2_autocycle_on = false;
 static unsigned krkrsdl2_autocycle_frames = 0;
+static unsigned krkrsdl2_autocycle_rounds = 0;
+// Read by Storages.getAutocycleRound (StorageIntf.cpp): this counter lives in
+// native static storage, so it SURVIVES the in-process engine restart that
+// ends a game session -- a TJS-side counter would reset to 0 on the rebuilt
+// engine and the harness would pick the first folder forever.
+unsigned krkrsdl2_autocycle_round_count() { return krkrsdl2_autocycle_rounds; }
+// The harness could be left armed by an aborted test run, and while armed the
+// launcher skips the picker and boots a game by itself -- which looks exactly
+// like a broken build to whoever picks up the console next.  So it is
+// self-limiting: it deletes its own marker after a few sessions, and every run
+// therefore starts from the picker no matter what a previous run did.
+static const unsigned KRKRNS_AUTOCYCLE_MAX_ROUNDS = 4;
+static void krkrsdl2_autocycle_disarm(const char *why)
+{
+	krkrsdl2_autocycle_on = false;
+	if (remove("sdmc:/switch/krkrsdl2/autocycle.txt") == 0)
+		KRKRNS_LOG("[autocycle] disarmed (%s), marker deleted", why);
+	else
+		KRKRNS_LOG("[autocycle] disarmed (%s), marker delete failed", why);
+}
 void krkrsdl2_service_autocycle()
 {
 	if (!krkrsdl2_autocycle_checked)
@@ -4157,7 +4415,7 @@ void krkrsdl2_service_autocycle()
 		{
 			fclose(f);
 			krkrsdl2_autocycle_on = true;
-			KRKRNS_LOG("[autocycle] enabled");
+			KRKRNS_LOG("[autocycle] enabled (max %u sessions)", KRKRNS_AUTOCYCLE_MAX_ROUNDS);
 		}
 	}
 	if (!krkrsdl2_autocycle_on || !krkrsdl2_game_mode)
@@ -4169,6 +4427,10 @@ void krkrsdl2_service_autocycle()
 	{
 		krkrsdl2_autocycle_frames = 0;
 		KRKRNS_LOG("[autocycle] ending game session");
+		// Disarm BEFORE ending the session: the launcher script also checks this
+		// marker, and with it gone the picker is rebuilt and simply stays up.
+		if (++krkrsdl2_autocycle_rounds >= KRKRNS_AUTOCYCLE_MAX_ROUNDS)
+			krkrsdl2_autocycle_disarm("round limit reached");
 		TVPTerminateSync(0); // the real end-game entry; intercepted while in a game
 	}
 }
@@ -4366,6 +4628,21 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	// globals pointing at objects destroyed with the previous window
 	// ("The object is already invalidated" from k2compat/utils).
 	krkrsdl2_capture_base_globals();
+	// Arm the probes for EVERY game, not just the ones after the first session
+	// boundary.  Arming them only at teardown made the two sessions
+	// incomparable: the first game produced no probe results at all, so "game 2
+	// has unresolved names" could not be told apart from "every game has them".
+	{
+		extern void GraphicsLoaderResetSessionProbe();
+		extern void krkrsdl2_arm_miss_probe();
+		GraphicsLoaderResetSessionProbe();
+		krkrsdl2_arm_miss_probe();
+	}
+	// The compat namespace is repaired at each session end, so log it here too:
+	// this is the state the game is about to boot with, and a `missing-member`
+	// reading is exactly what produces
+	// `Member "loadPlugin" does not exist` from KAGLoadScriptOnce.
+	KRKRNS_LOG("[compat] namespace at game mount: %s", krkrns_compat_utils_state());
 
 	std::string directory8;
 	std::string selected8;
@@ -4479,6 +4756,12 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 
 	KRKRNS_LOG("[launcher] launching directory/file: %s/%s", directory8.c_str(), selected8.c_str());
 	KRKRNS_LOG("[launcher] save path: %s/", native_save.c_str());
+	// The auto-path list at this instant decides which archive every unqualified
+	// game resource name resolves to, so record exactly what it holds.
+	{
+		extern void krkrsdl2_log_autopath_state(const char *);
+		krkrsdl2_log_autopath_state("at game mount");
+	}
 	return krkrsdl2_archive_path(selected) + TJS_W("startup.tjs");
 }
 
@@ -4534,60 +4817,40 @@ void krkrsdl2_return_to_launcher()
 			Application->Terminate();
 			return;
 		}
-		KRKRNS_LOG("[launcher] envSetNextLoad failed, using in-process launcher");
+		KRKRNS_LOG("[launcher] envSetNextLoad failed, using in-process restart");
 	}
 
-	// Tearing the game windows down must not terminate the process.
+	// In-process restart: rebuild the engine from scratch rather than patching
+	// this one back into shape.
+	//
+	// The old approach cleaned the live engine (drop the game's auto paths,
+	// remove the globals it added, repair the compat namespace) and every defect
+	// in that cleanup leaked into the next game -- the second game showing the
+	// first game's art, unresolved resources, stale globals, "Member ... does
+	// not exist".  A fresh engine removes the entire class of bug instead of
+	// chasing each symptom, and gives the same guarantee the console gets from
+	// chain-loading the NRO: the launcher is the first screen of a new engine.
+	//
+	// Order matters.  The windows are script objects owned by the engine being
+	// torn down, so release them while it is still alive; then signal the main
+	// loop, which performs the teardown-and-rebuild outside this call stack
+	// (doing it here would free the engine underneath the running frame).
+	KRKRNS_STAGE("teardown: request engine restart");
 	TVPTerminateOnWindowClose = false;
-	krkrsdl2_game_mode = false;
-
-	// Destroy whatever windows the game left (libnx allows one native window
-	// and the launcher is about to create its own).
-	krkrsdl2_release_leftover_windows();
-
-	// Drop exactly the auto-path entries this game added (compat/patch stay).
-	for (size_t i = 0; i < krkrsdl2_game_autopaths.size(); ++i)
-		TVPRemoveAutoPath(krkrsdl2_game_autopaths[i]);
-	krkrsdl2_game_autopaths.clear();
-
-	// Restore the pre-game project/data paths.
-	if (krkrsdl2_session_saved)
-	{
-		TVPProjectDir = krkrsdl2_saved_project_dir;
-		TVPNativeProjectDir = krkrsdl2_saved_native_project_dir;
-		TVPDataPath = krkrsdl2_saved_data_path;
-		TVPNativeDataPath = krkrsdl2_saved_native_data_path;
-		krkrsdl2_game_dir = krkrsdl2_saved_game_dir;
-		krkrsdl2_session_saved = false;
-	}
-	TVPSetCurrentDirectory(ttstr(TJS_W("file://?/romfs:/")));
-	chdir("romfs:/");
-
-	// Release resources that must not leak across games.
-	TVPClearGraphicCache();
-	krkrsdl2_clear_archive_cache();
-	krkrsdl2_psb_clear_resources();
-	TVPReleaseDirectSound();
-
-	// Launcher semantics: closing its window really exits the application.
-	TVPTerminateOnWindowClose = true;
-
-	// Drop globals the finished game (and the KAG layer it loaded) added.
-	// They reference objects destroyed together with the game window: KAG's
-	// own hook table (__InjectionTable) keeps wrappers around them, so the next
-	// game dies with "The object is already invalidated" while installing its
-	// hooks.  Plugin classes go with them, so unload the plugins first -- that
-	// removes their classes and clears the records that would otherwise make
-	// the next Plugins.link fail with "Already registerd class."
-	{
-		extern void TVPUnloadBuiltinPlugins();
-		TVPUnloadBuiltinPlugins();
-	}
-	krkrsdl2_drop_session_globals();
-
-	// Rebuild the picker (the script recreates Window/Layer and its list).
-	TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/startup.tjs")));
-	KRKRNS_LOG("[launcher] launcher restored");
+	// Ask the application to terminate, exactly as the console chain-load path
+	// above does.  process_events() leaves the loop on IsTarminate(), i.e. on
+	// tarminate_ -- which ONLY Terminate() sets.  Setting TVPTerminated instead
+	// did nothing here: the main loop kept running, the rebuild was never
+	// reached, and the game stayed on screen instead of returning to the menu.
+	//
+	// Only the signal happens here.  The engine teardown cannot run at this
+	// point: this code is reached from inside a script callback, so the frame is
+	// still on the stack and ::Application is still in use by process_events().
+	// krkrsdl2_reinitialize_engine() does the teardown once the loop has left.
+	Application->Terminate();
+	krkrsdl2_engine_reinit_wanted = true;
+	KRKRNS_LOG("[launcher] engine restart requested; main loop will rebuild");
+	return;
 }
 
 // Called once before the normal startup-script resolver.  Always start the
@@ -4675,7 +4938,11 @@ void switch_game_mount(void)
 }
 #endif
 
-bool krkrsdl2_init_platform(void)
+// One-time platform bring-up.  This MUST NOT run twice: romfsInit() and
+// socketInitializeDefault() take references that are never balanced again, and
+// the diagnostics heartbeat is a detached thread.  The engine restart path
+// therefore calls only krkrsdl2_create_engine() below.
+static void krkrsdl2_init_platform_once()
 {
 	KRKRNS_LOG("[ns] init_platform: entry");
 	KRKRNS_LOG("[ns] BUILD=REALMEM1(full-memory-guard)");
@@ -4768,6 +5035,12 @@ bool krkrsdl2_init_platform(void)
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	SDL_AddEventWatch(sdl_event_watch, nullptr);
 #endif
+}
+
+// Build the engine and run its startup sequence up to the startup script.
+// Called once from main() and again on every in-process engine restart.
+static bool krkrsdl2_create_engine()
+{
 	KRKRNS_LOG("[ns] before new tTVPApplication()");
 	::Application = new tTVPApplication();
 	KRKRNS_LOG("[ns] tTVPApplication created");
@@ -4776,13 +5049,160 @@ bool krkrsdl2_init_platform(void)
 	return !!ret;
 }
 
+bool krkrsdl2_init_platform(void)
+{
+	krkrsdl2_init_platform_once();
+	return krkrsdl2_create_engine();
+}
+
+// Restart the engine in this process.
+//
+// Hosts without next-load support (the emulator reports next-load=0 and passes
+// no argv) cannot chain-load this NRO, so returning to the launcher used to
+// mean patching the live engine back into shape -- removing the finished game's
+// auto paths, dropping the globals it added, repairing the compat namespace and
+// so on.  Every defect in that cleanup leaked into the next game (the second
+// game showing the first game's art, missing resources, stale globals).
+//
+// Instead, tear the engine down and build a new one exactly like main() does at
+// startup.  The launcher is then the first screen of a pristine engine, which is
+// the same guarantee the real console gets from the chain-load restart.
+static void krkrsdl2_reinitialize_engine()
+{
+	KRKRNS_STAGE("reinit: begin");
+	KRKRNS_LOG("[reinit] ===== restarting engine in-process =====");
+
+	// The window list lives in the Application object, so drop it first: the
+	// windows are script objects owned by the engine we are about to shut down.
+	KRKRNS_LOG("[reinit] step 1: destroy application (windows)");
+	delete ::Application;
+	::Application = nullptr;
+
+	// Release the engine-side caches that hold decoded/parsed data.  Doing this
+	// before the script engine shuts down keeps every owner alive while its
+	// contents are freed.
+	//
+	// The decoded-image cache is keyed by the NAME AS REQUESTED (checked before
+	// auto-path resolution), so two games that share a filename share a cache
+	// slot: without this clear, the second game receives the first game's
+	// decoded image for that name -- art from the wrong game, which reads as
+	// "resources missing".  The audio stack keeps buffers/settings of the
+	// finished game and is re-created on demand by the rebuilt engine.
+	KRKRNS_LOG("[reinit] step 2: release engine caches");
+	{
+		extern void krkrsdl2_clear_archive_cache();
+		krkrsdl2_clear_archive_cache();
+	}
+	{
+		extern void krkrsdl2_psb_clear_resources();
+		krkrsdl2_psb_clear_resources();
+	}
+	{
+		extern void TVPClearGraphicCache();
+		TVPClearGraphicCache();
+	}
+	{
+		extern void TVPReleaseDirectSound();
+		TVPReleaseDirectSound();
+	}
+
+	// Plugins register classes into the script engine, so unregister them while
+	// the engine is still alive; their records would otherwise make the next
+	// Plugins.link fail with "Already registerd class.".
+	KRKRNS_LOG("[reinit] step 3: unload plugins");
+	{
+		extern void TVPUnloadBuiltinPlugins();
+		TVPUnloadBuiltinPlugins();
+	}
+
+	// Shut the script engine down and forget that it ever ran.  TVPUninitScriptEngine
+	// is guarded by a one-shot latch and TVPInitScriptEngine by an init latch;
+	// both must be cleared or the restart below would be a silent no-op.
+	//
+	// Plugin-owned caches must be dropped FIRST: they hold script objects from
+	// the engine about to die, survive in statics, and are reached again by the
+	// next game.  E-mote caches its work layer that way, which produced a
+	// dangling object and a null dereference inside
+	// tTJSObjectProxy::PropGet -> tTJSCustomObject::Find.
+	KRKRNS_LOG("[reinit] step 4: drop plugin-side session caches");
+	{
+		emoteplayer::krkrsdl2_emote_reset_motion_work_layer();
+		// The E-mote render backend caches SDL textures/targets built against
+		// the renderer that just died with the old engine.  Its own
+		// "renderer changed" check compares pointers, and the allocator often
+		// reuses the same address, so reset it explicitly.
+		krkrsdl3::TVPResetRenderBackendForEngineRestart();
+	}
+	KRKRNS_LOG("[reinit] step 5: shutdown script engine");	{
+		extern void krkrsdl2_reset_script_engine_for_restart();
+		krkrsdl2_reset_script_engine_for_restart();
+	}
+
+	// Rebuild, mirroring the startup path in main().  Only the engine part is
+	// repeated: romfs/socket/heartbeat stay as brought up once at process start.
+	//
+	// Reset the session-scoped path state first.  After a game ends these still
+	// name the finished game, and the rebuilt engine resolves its startup script
+	// and auto paths through them -- so the "fresh" session would begin pointing
+	// at the previous game's directory instead of the launcher's.
+	KRKRNS_LOG("[reinit] step 6: reset session paths");
+	krkrsdl2_game_mode = false;
+	krkrsdl2_session_saved = false;
+	krkrsdl2_game_autopaths.clear();
+	krkrsdl2_game_dir = ttstr(TJS_W("sdmc:/krkr/"));
+	TVPProjectDir = ttstr(TJS_W("file://?/romfs:/"));
+	TVPNativeProjectDir = tjs_string(TJS_W("romfs:/"));
+	// The finished game left TVPDataPath at its per-game save directory; boot
+	// resolves it to the RomFS root (ApplicationSpecialPath, __SWITCH__) until
+	// the next game mount sets its own.  Restore that default, not the
+	// previous game's save dir.
+	TVPNativeDataPath = tjs_string(TJS_W("file://romfs:/"));
+	TVPDataPath = TVPNormalizeStorageName(ttstr(TJS_W("file://romfs:/")));
+	TVPSetCurrentDirectory(ttstr(TJS_W("file://?/romfs:/")));
+	chdir("romfs:/");
+	// The auto-path LIST is process-global and survives the engine rebuild:
+	// every archive the finished game mounted stayed in it (and the game's own
+	// boot adds plain `file://` duplicates on top of our `file://?/` forms),
+	// so the next game's resources resolved against the previous game's
+	// archives.  Wipe the list, the name->path table and the lookup cache,
+	// then re-seed what boot itself seeds.
+	{
+		extern void krkrsdl2_reset_auto_paths();
+		krkrsdl2_reset_auto_paths();
+	}
+
+	KRKRNS_LOG("[reinit] step 7: recreate application");
+	TVPTerminateCode = 0;
+	TVPTerminateOnWindowClose = true;
+	TVPStartupScriptName = ttstr(TJS_W("file://?/romfs:/startup.tjs"));
+	{
+		extern bool krkrsdl2_create_engine();
+		krkrsdl2_create_engine();
+	}
+	KRKRNS_STAGE("reinit: done");
+}
+
+bool krkrsdl2_take_engine_reinit()
+{
+	const bool wanted = krkrsdl2_engine_reinit_wanted;
+	krkrsdl2_engine_reinit_wanted = false;
+	return wanted;
+}
+
 void krkrsdl2_run_main_loop(void)
 {
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	emscripten_set_main_loop(process_events, 0, 0);
 #else
-	krkrsdl2_heartbeat_main_progress();
-	while (process_events());
+	for (;;)
+	{
+		krkrsdl2_heartbeat_main_progress();
+		while (process_events());
+		// main()'s own path: nothing asked for a restart, so we are shutting
+		// down for good (the console chain-load case lands here too).
+		if (!krkrsdl2_take_engine_reinit()) return;
+		krkrsdl2_reinitialize_engine();
+	}
 #endif
 }
 

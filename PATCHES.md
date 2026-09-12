@@ -486,7 +486,40 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 - **保留内容**（本会话该需求之外的修复，均与该功能无关）：P50 性能窗口统计修正+分层上传优化、P51 Auto Path 增量构建、P52 合成层计数器、P53 全帧上传默认+探针禁用、P54 图像缓存默认启用、P55 图像缓存并发锁、P56 dummy_colorpicker 缺资源垫图、Layer.loadImages 容错、eval 风暴守卫、心跳诊断、E-mote 脏区回读优化。
 - **行为回到**：游戏内「结束游戏」= 退出整个 NRO（回 hbmenu），与用户提出需求前一致。
 
-### P58 (已随 P59 整体回退，以下为当时记录): 第二个游戏启动失败的真正根因 + 修复（2026-09-11）
+### P60-R2: 同进程路径重写为「整引擎重建」+ P60b–g 跨会话残留六连修 (2026-09-12，当前版本)
+P60 提交后，同进程回退路径由 DeepSeek 重写，随后围绕「第二个游戏异常」累计六处修复。**本节描述的即当前工作区状态**；上一节 P60 的"原地修补活引擎"方案已被取代。
+
+- **核心机制变更（整引擎重建）**：会话结束时不再修补活引擎，只置 `Application->Terminate()` + `krkrsdl2_engine_reinit_wanted`；主循环退出后 `krkrsdl2_reinitialize_engine()`（SDLApplication.cpp）执行：`delete Application`（窗口随之释放）→ 清归档/PSB 缓存 → `TVPUnloadBuiltinPlugins()`（AllUnregist+清注册表，插件类随后由下一局 `Plugins.link` 经 ncbind 自动注册表重装）→ 脚本引擎 uninit 并复位 init/uninit 一次性 latch → E-mote work-layer/kagWindow/渲染后端重置 → 重置会话路径 → `krkrsdl2_create_engine()` 重建。启动器=全新引擎首屏。P58 的"删会话全局/sessionglobals_drop"路线彻底废弃。`tTJSObjectProxy` 增加空 Dispatch 防御（重建后残留 proxy 不再空指针崩）。`process_events()` 在重建挂起时跳过 `TVPSystemUninit()`（atexit/初始化 latch 均单向，二次初始化会坏）。
+- **compat 命名空间维护**：compat 三脚本加每进程一次安装守卫（`__krkrns_compat_*`，防重复 class 定义中断脚本）；新增 `compat-patches/system/k2compat_reinstall.tjs`——游戏自带桌面版 `system/k2compat.tjs` 会把 `Krkr2CompatUtils` 换成依赖 k2compat.dll 的空壳，故在 `launchXP3` 游戏启动前与 `execStorage` 检测到任意 k2compat.tjs 执行后各重装一次（`ScriptMgnIntf.cpp`）。
+- **P60b（重建清理第一轮）**：① 新增 `krkrsdl2_reset_auto_paths()`（StorageIntf.cpp）——引擎重建时清空 `TVPAutoPathList`+查找表+latch 并重播种 romfs 根（此前上一局归档跨局残留，列表实测 12→69→80→217 只增不减）；② 恢复被重写丢失的 `TVPClearGraphicCache()`（图像缓存按请求名做键且先查缓存后解析路径，上一局同名解码图会喂给第二局）与 `TVPReleaseDirectSound()`；③ `TVPDataPath/NativeDataPath` 恢复开机默认 `file://romfs:/`。
+- **P60c（脚手架）**：autocycle 轮次改由原生计数器驱动——新增 `Storages.getAutocycleRound()`（StorageIntf.cpp + `krkrsdl2_autocycle_round_count()`）；旧 TJS 全局计数器在引擎重建后归零，脚手架永远选第一个文件夹、测不到换游戏。
+- **P60d（第二局 OP/标题动画消失）**：tzxm 的 patch.tjs（TJS2 字节码，zlib 解包确认含 `Plugins.link("emoteplayer.dll")` + `ResourceManager.setEmotePSBDecryptFunc(...)`）向 E-mote ResourceManager 装 **PSB 解密闭包（inline static，进程级）**；引擎重建后闭包引用的旧引擎对象已死，第二局读 .mtn 时调用即抛异常 → `parsed=0` 静默放弃。修复=`ResourceManager::resetDecryptStateForEngineRestart()` 清闭包+种子（不 Release，借用指针）。方法论：[execStorage] 执行链完全一致 → 对比异常 dump（patch.tjs 异常只在故障局）→ 解包 patch.tjs 找 setter。
+- **P60e（第二局画面只剩左 1/4）**：`EmoteGLRenderBackend::begin()` 的窗口指针比较被 **SDL 地址复用**骗过，继续使用绑定在已销毁窗口上的私有 GL context，网格绘制/读回经坏 context 损坏。修复=覆写 `ResetForEngineRestart()` → `impl->resetForNewWindow()`（无条件丢弃，不发 GL 调用）。**教训：重建引擎后所有"指针变了才重置"的缓存都不可信**（GLComposite/SW 后端/GL 后端三处同型陷阱）。
+- **P60f（第二局启动卡顿）**：非只读流打开与 `TVPSetCurrentDirectory` 走 `TVPClearStorageCaches` → 连 `TVPAutoPathTable`+增量 latch 一起清 → 第二局启动 7+ 次全量建表（97k 文件 × ~250ms）。修复=新增 `TVPClearAutoPathLookupCache()`（仅清查找 memo），表只随列表变化失效。代价：运行时新建进 auto-path 目录的文件不再被未限定名命中——Switch 上无此场景（存档在 dataPath）。
+- **P60g（E-mote 慢 2-3 倍）**：后端选择一次性锁存存在竞态——进程首个 E-mote 调用落在窗口切换空档时 `begin()` 失败 → 整个进程锁死 CPU 后端（模拟器 GL 自检本就不稳定，GL=快、CPU=慢）。修复（TVPCompositor.cpp）：主渲染器不存在=临时状态，本次回 CPU 但**不锁存**，后续调用重试 GL；自检真失败才锁存。附带：`resetForNewWindow()` 保留 `readTileWidth`（渲染器属性=截断读回补偿值，清零会让 GL 局重建后 1/4 宽复发）。
+- **验证**：模拟器 tzxm↔星光咖啡馆多轮互换，OP/标题动画、菜单美术、分辨率、启动速度全部正常（用户确认，2026-09-12）。注意 P60d/e/g 仅存在于模拟器同进程重建路径；真机 envSetNextLoad 链式重启每次全新进程不受影响，P60f 对真机亦有普遍收益。
+- **交付**：NRO 见 GitHub Releases（md5 `5c928fbc`）。
+
+
+- **背景**：P57/P58 实现过该功能，P59 按用户要求整体回退。本次重启该工作，**复用 P58 的最终设计**（备份 `D:\KRKR-ns-tools\backup-p58-20260911-152242\working-tree.patch`）并重新落地。
+### P60: 重新实现「游戏内退出 → 回到内置启动器」(2026-09-12；同进程路径已被上方 P60-R2 取代，以下为当时记录)
+- **背景**：P57/P58 实现过该功能，P59 按用户要求整体回退。本次重启该工作，**复用 P58 的最终设计**（备份 `D:\KRKR-ns-tools\backup-p58-20260911-152242\working-tree.patch`）并重新落地。
+- **恢复方式（可复核）**：备份补丁是相对 `HEAD` 的 diff，含已保留的 P50–P56；直接用 `git apply` 会冲突。做法是先把 P50–P56 树提交为基线，再用 `git apply --3way` 复现 P58 状态，两者相减得到**纯功能增量：11 文件 / +644 −20**，确认与 P50–P56 **零重叠**（不会撤销既有修复）后应用到基线。逐文件复核确认 `BasicDrawDevice.cpp`、`KrkrNSProf.h`（P52 合成层计数器）与 `GraphicsLoaderIntf.cpp`（P55 缓存锁）等**未**被改动。
+- **核心机制**：
+  1. **汇聚**（`SysInitImpl.cpp`）：游戏会话中 `TVPTerminateSync/Async` 与 `TVPMainWindowClosed` 不再终止进程，改为 `krkrsdl2_request_return_to_launcher()`。
+  2. **窗口关闭延迟判定**（`SDLApplication.cpp`）：启动器→游戏的交接本身销毁窗口，KAG 也可能重建窗口，所以窗口关闭只是**候选**；需"本会话出现过窗口"+ 持续 30 帧无窗口才判定会话结束。（首版直接判定导致"游戏刚进 first.ks 就被打回启动器"。）
+  3. **主循环服务**（`Application.cpp::Run` 顶部）：每帧服务窗口关闭候选 + 取标志 + 执行拆卸。
+  4. **两条路径**（`krkrsdl2_return_to_launcher`）：真机 `envHasNextLoad()` → `envSetNextLoad(argv[0])` → `Application->Terminate()` 链式重启 NRO（引擎全新）；模拟器等无 next-load 宿主回退到**同进程拆卸**——释放残留原生窗口（libnx 只允许一个）→ 移除本游戏 AutoPath（compat/patch 保留）→ 还原 ProjectDir/DataPath/cwd → 清图像缓存/归档缓存/PSB/音频 → 重跑 `romfs:/startup.tjs`。
+- **跨会话状态**（同进程路径的真正难点，沿用 P58 结论）：
+  - **删除本会话新增的全局**（C++ 枚举 `TVPGetScriptDispatch()->EnumMembers` + `DeleteMember`，基准集在挂载首个游戏前采集，跳过 `__krkrns_*`）。P57b 的三条弯路（删全部/保留大写类名/按异常精准探测）均已被证伪，不再重复。
+  - **插件卸载次序**：`TVPUnloadBuiltinPlugins()` = `ncbAutoRegister::AllUnregist()` **然后** `TVPRegisteredPlugins.clear()`。**次序是正确性关键**：P58 §2 记录"不要清空 `TVPRegisteredPlugins`"针对的是**只清注册表、类仍在全局**的情形（那样 `Regist()` 必抛 `Already registerd class.`）；先 `AllUnregist()` 把类从全局摘掉、再清注册表，二者才自洽。
+  - **脚本错误容错**（`ScriptMgnIntf.cpp`）：`TVPShowScriptException` 两个重载在 Switch 上记录日志 + 恢复事件投递 + 继续执行，不再弹致命框终止；缺插件成员/缺资源/失效引用都由它兜住。3 秒内 >8 次则 `krkrsdl2_request_return_to_launcher()`（损坏状态下继续跑必崩）。
+  - **compat 脚本每进程一次安装**（`compat-patches/system/{k2compat,k2compat_console,win32dialog}.tjs`）：首行 `if (typeof(global.__krkrns_compat_<file>) == "undefined") {` + 置位 + 末行 `}`。TJS 对重复 `class` 定义抛异常并**中断其后整段脚本**，静态成员绑定（`WIN32Dialog.Header` 等）因此永不安装 → 第二局启动失败。`k2compat.tjs` 内的 `function Krkr2CompatUtils() {}` 同时改为 `global.Krkr2CompatUtils = function() {};`——块内的函数声明在 TJS2 是块作用域，不会成为全局。
+  - **AutoPath 优先级**（`krkrsdl2_prepare_xp3_game`）：compat/patch 路径每局先 `TVPRemoveAutoPath` 再 `TVPAddAutoPath`，保证它们恒在列表末尾。否则第二局时游戏自带的**桌面版** `system/k2compat.tjs` 会反超我们的 Switch 桩（`TVPAddAutoPath` 对已存在路径跳过）。
+  - **E-mote GL 后端**（`EmoteGLRenderBackend.cpp`）：`resetForNewWindow()` 在检测到 SDL 窗口变化时丢弃绑定在旧窗口的 context/program，在下一次 `begin()` 重建。
+- **测试脚手架**：`sdmc:/switch/krkrsdl2/autocycle.txt` 存在时，游戏约 20 秒自动结束、启动器轮流启动各游戏目录 → 无需 UI 输入即可回归"换游戏"全流程。**该文件平时不存在，行为与正式版一致**（验证完需删除）。
+
+### P58 (已随 P59 回退，P60 已重新落地；以下为当时记录): 第二个游戏启动失败的真正根因 + 修复（2026-09-11）
 以 `tkzm`（游戏A）→ 结束 → `【KRKR】星光咖啡馆与死神之蝶`（游戏B）的完整流程在模拟器复现并逐条定位。**P57b/P57c 的结论部分是误判**（当时被第 1 条根因掩盖），现更正如下。
 
 1. **【根因·通用】compat/patch 自动路径优先级被翻转**（`SDLApplication.cpp::krkrsdl2_prepare_xp3_game`）

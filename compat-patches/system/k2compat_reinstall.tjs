@@ -1,0 +1,26 @@
+// KRKR-ns compat: restore the KAG2 compatibility namespace.
+//
+// A game's boot sequence loads its own system/k2compat.tjs (KAG ships a desktop
+// copy), and that file REPLACES global.Krkr2CompatUtils with its own object --
+// which expects the real k2compat.dll to supply loadPlugin/unloadPlugin/isLoaded
+// /autoLoad.  On Switch that plugin does not exist, so after the first game the
+// namespace exists but its members are gone and the next game dies during boot:
+//
+//   initialize.tjs[KAGLoadScript] <-- initialize.tjs[KAGLoadScriptOnce]
+//     <-- custom.tjs(20)  Member "loadPlugin" does not exist
+//
+// k2compat.tjs is installed once per process (see its install guard), so it
+// cannot repair this by running again.  SDLApplication.cpp therefore executes
+// THIS file at every session boundary, before the next game can boot.
+//
+// Re-run this whole file: every line is an idempotent assignment, and the point
+// is precisely to overwrite whatever the finished game left behind.
+global.Krkr2CompatUtils = function() {};
+Krkr2CompatUtils.scriptBase = "";
+Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
+Krkr2CompatUtils.getWindowRect = function() { return null; };
+Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+Krkr2CompatUtils.isLoaded = function(name) { return true; };
+Krkr2CompatUtils.autoLoad = function(name) { return null; };
+Krkr2CompatUtils.Window = function() { return null; };

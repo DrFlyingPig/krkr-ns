@@ -101,7 +101,14 @@ if [ "$DO_EMU_COPY" = 1 ]; then
   cp "$NRO" "$EMU_GAMES/krkrsdl2.nro"
   echo "== deploy runtime compatibility patches =="
   mkdir -p "$EMU_PATCH"
-  rm -f "$EMU_PATCH/motion.tjs"
+  # The patch directory outranks the romfs compat folder in the auto-path order,
+  # so a leftover file here SHADOWS the copy bundled in the NRO.  Stale copies
+  # have already caused one silent misdiagnosis (an old k2compat_reinstall.tjs
+  # was executed instead of the freshly built one).  Drop the scripts we deploy
+  # before re-copying them, so the deployed set always matches this build.
+  for f in k2compat.tjs k2compat_console.tjs win32dialog.tjs k2compat_reinstall.tjs motion.tjs; do
+    rm -f "$EMU_PATCH/$f"
+  done
   cp -r compat-patches/system/. "$EMU_PATCH/"
 fi
 

@@ -50,7 +50,22 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
     if (dirtyRect)
         dirtyRect->clear();
     if (!renderer || !target || !layer || sourceWidth <= 0 || sourceHeight <= 0)
+    {
+        // KRKR-ns diagnostic: the E-mote frame is copied onto the KAG layer
+        // here, so a title screen that loads its .mtn correctly yet stays empty
+        // is explained by this early-out.  Logged (bounded) because the reason
+        // matters: a missing renderer/target means the backend produced
+        // nothing, whereas a missing layer means the copy target is gone.
+        static int logged = 0;
+        if (logged < 20)
+        {
+            ++logged;
+            KRKRNS_LOG("[emote] draw: cannot copy to layer (renderer=%p target=%p "
+                       "layer=%p src=%dx%d)", (void*)renderer, target, (void*)layer,
+                       sourceWidth, sourceHeight);
+        }
         return false;
+    }
 
     int sourcePitch = 0;
     uint8_t* source = renderer->LockTarget(target, sourcePitch);
@@ -192,6 +207,55 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
 
 iTJSDispatch2* ResourceManager::_kagWindow = nullptr;
 static SeparateLayerAdaptor* _motionWorkLayer = nullptr;
+
+// KRKR-ns: drop the cached work layer when the script engine is torn down.
+//
+// _motionWorkLayer is built once, from the KAG window's poolLayer, and cached in
+// this static for the lifetime of the process -- the `== nullptr` guard above
+// means it is never rebuilt.  That is fine while one engine lives forever, but
+// when a game ends and the engine is rebuilt (the in-process restart for hosts
+// without next-load support), the cached adaptor still references a layer that
+// died with the previous engine.  The next game's ResourceManager creation then
+// touches that dangling object and faults inside
+// tTJSObjectProxy::PropGet -> tTJSCustomObject::Find with a null `this`.
+//
+// Clearing the pointer makes the next ResourceManager build a fresh work layer
+// against the current engine.  The global `motionWorkLayer` goes away with the
+// old global object, so there is nothing else to unregister here.
+void krkrsdl2_emote_reset_motion_work_layer()
+{
+    if (_motionWorkLayer)
+    {
+        TVPConsoleLog("emote: clearing cached motionWorkLayer %p for engine restart",
+                      _motionWorkLayer);
+        _motionWorkLayer = nullptr;
+    }
+    // ResourceManager::_kagWindow is the other half of the same problem: it is a
+    // static copy of the KAG window's dispatch object (comment at its
+    // declaration: "本身就是唯一的，所以直接static"), written once by
+    // ResourceManager::init and read back by ResourceManager::load.  After an
+    // engine restart it still names the PREVIOUS game's window, which died with
+    // that engine -- reading it constructs a variant from a dead object and the
+    // next property access faults in tTJSObjectProxy::PropGet ->
+    // tTJSCustomObject::Find with a null `this`.  The next init() re-caches the
+    // window that actually belongs to the current engine.
+    //
+    // No Release() here on purpose: this mirror is a borrowed pointer (the
+    // script engine owns the window form), matching how init() stores it.
+    if (ResourceManager::_kagWindow)
+    {
+        TVPConsoleLog("emote: clearing cached kagWindow %p for engine restart",
+                      ResourceManager::_kagWindow);
+        ResourceManager::_kagWindow = nullptr;
+    }
+    // The PSB decrypt seed + closure (ResourceManager statics, installed by a
+    // game's patch script) are the SAME class of stale script reference and
+    // DID hit in practice: after an engine restart the cached closure still
+    // belongs to the previous game's patch script, and every .mtn parse of
+    // the next game died inside it -- the second game silently lost its
+    // E-mote opening animation and title art while loads kept succeeding.
+    ResourceManager::resetDecryptStateForEngineRestart();
+}
 
 // 递归查找 shapeNodeAreas 中指定名称的区域
 // 也作为后备: 直接检查节点的frame中的shape信息
@@ -594,8 +658,34 @@ void D3DAdaptor::captureCanvas(iTJSDispatch2* targetLayer)
         return;
     }
     tTVPRect dirtyRect;
-    if (CopyRenderTargetToLayer(renderer, _target, ths, _width, _height, &dirtyRect) &&
-        !dirtyRect.is_empty())
+    const bool copied =
+        CopyRenderTargetToLayer(renderer, _target, ths, _width, _height, &dirtyRect);
+    if (!copied || dirtyRect.is_empty())
+    {
+        // Reached the copy but produced nothing: the render target held no
+        // pixels, or the layer had no writable buffer.  Distinguished from the
+        // early-out above, which means the target/renderer itself was missing.
+        static int logged = 0;
+        if (logged < 20)
+        {
+            ++logged;
+            KRKRNS_LOG("[emote] draw: copy produced nothing (copied=%d empty=%d "
+                       "render=%dx%d)", (int)copied, (int)(dirtyRect.is_empty()),
+                       _width, _height);
+        }
+    }
+    else
+    {
+        static int logged = 0;
+        if (logged < 20)
+        {
+            ++logged;
+            KRKRNS_LOG("[emote] draw: copied %dx%d onto layer (rect %d,%d %dx%d)",
+                       _width, _height, (int)dirtyRect.left, (int)dirtyRect.top,
+                       (int)dirtyRect.get_width(), (int)dirtyRect.get_height());
+        }
+    }
+    if (copied && !dirtyRect.is_empty())
         ths->Update(dirtyRect);
 }
 void D3DAdaptor::unloadUnusedTextures()

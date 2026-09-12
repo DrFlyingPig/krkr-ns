@@ -451,6 +451,20 @@ static bool BeginContext()
         ResetGLState();
         gWindow = win;
     }
+    else if (gContext)
+    {
+        // Same window as before.  After an in-process engine restart this is the
+        // suspicious case: if SDL handed the new engine a recycled SDL_Window
+        // pointer, the context we keep is the one built against the window that
+        // was already destroyed, and compositing silently produces nothing --
+        // UI that still draws while the background stays black.
+        static void *lastLogged = nullptr;
+        if (gWindow != lastLogged)
+        {
+            lastLogged = gWindow;
+            KRKRNS_LOG("[glc] reusing GL context for window %p (no switch detected)", gWindow);
+        }
+    }
     if (gContext)
     {
         if (SDL_GL_MakeCurrent(gWindow, gContext) != 0) return false;

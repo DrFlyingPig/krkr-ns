@@ -47,6 +47,32 @@
 #include "SystemControl.h"
 #include "Application.h"
 
+#ifdef __SWITCH__
+// UTF-8 view of a ttstr (which is UTF-16) for the SD log, truncated to maxlen
+// characters.  Diagnostics only: the log is plain UTF-8 text.
+static std::string krkrns_utf8_of(const ttstr &s, tjs_uint maxlen)
+{
+	std::string out;
+	for (tjs_uint i = 0; i < s.GetLen() && i < maxlen; ++i)
+	{
+		tjs_uint32 ch = static_cast<tjs_uint32>(s[i]);
+		if (ch < 0x80) out += static_cast<char>(ch);
+		else if (ch < 0x800)
+		{
+			out += static_cast<char>(0xC0 | (ch >> 6));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+		else
+		{
+			out += static_cast<char>(0xE0 | (ch >> 12));
+			out += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+	}
+	return out;
+}
+#endif
+
 #include "RectItf.h"
 #include "ImageFunction.h"
 #include "BitmapIntf.h"
@@ -344,6 +370,28 @@ void TVPRestartScriptEngine()
 	TVPScriptEngineInit = false;
 	TVPInitScriptEngine();
 }
+//---------------------------------------------------------------------------
+#ifdef __SWITCH__
+// KRKR-ns: full script-engine restart for "end game -> back to launcher" on
+// hosts that cannot chain-load the NRO (the emulator reports next-load=0).
+//
+// TVPUninitScriptEngine() is latched by TVPScriptEngineUninit and
+// TVPInitScriptEngine() by TVPScriptEngineInit, so the pair can only ever run
+// once per process: a plain restart would silently do nothing, and the next
+// game would inherit the previous session's globals, classes and metadata.
+// Clearing both latches is what makes a second, pristine engine possible.
+void krkrsdl2_reset_script_engine_for_restart()
+{
+	KRKRNS_LOG("[reinit] script engine: uninit (init=%d uninit=%d engine=%p global=%p)",
+		(int)TVPScriptEngineInit, (int)TVPScriptEngineUninit,
+		(void *)TVPScriptEngine,
+		TVPScriptEngine ? (void *)TVPScriptEngine->GetGlobalNoAddRef() : (void *)nullptr);
+	TVPUninitScriptEngine();
+	TVPScriptEngineUninit = false; // re-arm the one-shot shutdown latch
+	TVPScriptEngineInit = false;   // and the one-shot init latch
+	KRKRNS_LOG("[reinit] script engine: latches cleared, next init builds a fresh engine");
+}
+#endif
 //---------------------------------------------------------------------------
 
 
@@ -886,27 +934,14 @@ void TVPShowScriptException(eTJS &e)
 		// session all surface here; reporting and continuing keeps every title
 		// playable (the alternative is a fatal dialog, a stalled frame loop or
 		// an exit).  Re-enable event delivery, which was disabled above.
-		{
-			std::string utf8;
-			ttstr msg(e.GetMessage());
-			for (tjs_uint i = 0; i < msg.GetLen() && i < 300; ++i)
-			{
-				tjs_uint32 ch = static_cast<tjs_uint32>(msg[i]);
-				if (ch < 0x80) utf8 += static_cast<char>(ch);
-				else if (ch < 0x800)
-				{
-					utf8 += static_cast<char>(0xC0 | (ch >> 6));
-					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
-				}
-				else
-				{
-					utf8 += static_cast<char>(0xE0 | (ch >> 12));
-					utf8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
-					utf8 += static_cast<char>(0x80 | (ch & 0x3F));
-				}
-			}
-			KRKRNS_LOG("[script] exception ignored (continuing): %s", utf8.c_str());
-		}
+		//
+		// Log the MESSAGE and the script call stack, not just a marker: without
+		// them a recovered error is undiagnosable (a bare "exception ignored"
+		// line cannot be traced to a script or line).
+		KRKRNS_LOG("[script] exception ignored (continuing): %s",
+			krkrns_utf8_of(e.GetMessage(), 300).c_str());
+		KRKRNS_LOG("[script]   script trace: %s",
+			krkrns_utf8_of(TJSGetStackTraceString(16), 900).c_str());
 		// A single recoverable error is fine, but a burst of them means the
 		// environment is broken (duplicate definitions, missing plugin members).
 		// Continuing in that state ends in a native crash, so end the session
@@ -999,7 +1034,11 @@ void TVPShowScriptException(eTJSScriptError &e)
 #endif
 #ifdef __SWITCH__
 		// KRKR-ns: report and continue (see TVPShowScriptException(eTJS&)).
-		KRKRNS_LOG("[script] script error ignored (continuing)");
+		// Include message and trace so a recovered error can still be located.
+		KRKRNS_LOG("[script] script error ignored (continuing): %s",
+			krkrns_utf8_of(e.GetMessage(), 300).c_str());
+		KRKRNS_LOG("[script]   script trace: %s",
+			krkrns_utf8_of(e.GetTrace(), 900).c_str());
 		TVPSetSystemEventDisabledState(false);
 #else
 		TVPTerminateSync(1);
@@ -1328,6 +1367,36 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/execStorage)
 	iTJSDispatch2 *context = numparams >= 3 && param[2]->Type() != tvtVoid ? param[2]->AsObjectNoAddRef() : NULL;
 	
 	TVPExecuteStorage(name, context, result, false, modestr.c_str());
+
+#ifdef __SWITCH__
+	// KRKR-ns: a game ships its own system/k2compat.tjs (the desktop KAG copy)
+	// and executes it during boot, which REPLACES global.Krkr2CompatUtils with a
+	// stub whose members are meant to come from k2compat.dll -- a plugin that
+	// does not exist here.  Everything looks fine until KAG's custom.tjs calls
+	// one of those members and the boot dies with
+	// `Member "loadPlugin" does not exist` (initialize.tjs -> KAGLoadScriptOnce).
+	//
+	// Repairing the namespace only at session end is not enough: the game
+	// overwrites it again on every boot, so the very next
+	// `-- back to the launcher -- pick another game --` cycle breaks while the
+	// first game still worked.  Re-install our namespace immediately after the
+	// game's own k2compat script runs, so the members KAG needs are always there
+	// no matter which copy of that script the game carries.
+	{
+		const std::string local = krkrns_utf8_of(name, 220);
+		std::string base = local;
+		const size_t slash = base.find_last_of("/\\");
+		if (slash != std::string::npos) base = base.substr(slash + 1);
+		for (size_t i = 0; i < base.size(); ++i)
+			base[i] = static_cast<char>(tolower(static_cast<unsigned char>(base[i])));
+		if (base == "k2compat.tjs")
+		{
+			KRKRNS_LOG("[compat] game loaded %s -> reinstalling namespace", base.c_str());
+			TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat_reinstall.tjs")),
+				nullptr, nullptr, false, nullptr);
+		}
+	}
+#endif
 
 	return TJS_S_OK;
 }

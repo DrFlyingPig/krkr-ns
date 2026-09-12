@@ -19,6 +19,10 @@ public:
         : gpuDisabled_(!enableSdlGeometry) {}
     ~EmoteSWRenderBackend() override;
 
+    // Drop every GPU handle because the SDL renderer was destroyed with the
+    // previous engine (in-process engine restart).  See the definition.
+    void ResetForEngineRestart() override;
+
     void* CreateTarget(int width, int height) override;
     void DestroyTarget(void* target) override;
     void SetTarget(void* target) override;

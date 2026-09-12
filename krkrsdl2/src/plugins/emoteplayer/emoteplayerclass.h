@@ -61,6 +61,21 @@ public:
     static void setEmotePSBDecryptSeed(tjs_int decryptkey);
     static void setEmotePSBDecryptFunc(tTJSVariant funclosure);
 
+    // Drop the cached PSB decrypt seed + closure for an in-process engine
+    // restart.  Both are process-global statics, set once by a game's patch
+    // script; after the script engine that created the closure is torn down,
+    // the closure points at dead objects and every later .mtn parse dies
+    // inside it (observed as silently missing OP / title animations in the
+    // SECOND game while the first game kept working).  The next game's own
+    // patch script re-installs whatever it needs.
+    static void resetDecryptStateForEngineRestart()
+    {
+        // No Release() on purpose: the closure is a borrowed pointer whose
+        // owner died with the previous engine (same reasoning as _kagWindow).
+        _decryptClo = NULL;
+        _decryptkey = 0;
+    }
+
     static iTJSDispatch2* _kagWindow; // 本身就是唯一的，所以直接static
     std::map<ttstr, emotefile*> cacheData;
 

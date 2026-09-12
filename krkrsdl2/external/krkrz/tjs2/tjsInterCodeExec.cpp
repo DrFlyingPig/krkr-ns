@@ -217,6 +217,11 @@ public:
 //		Dispatch1 = NULL;
 //		Dispatch2 = NULL;
 		// Dispatch1 and Dispatch2 are to be set by subsequent call of SetObjects
+		// KRKR-ns: initialise them regardless, because SetObjects(NULL, NULL) is
+		// a valid call (the objthis == NULL case at the ExecuteAsFunction call
+		// site does exactly that) and the methods below test these pointers.
+		Dispatch1 = NULL;
+		Dispatch2 = NULL;
 	};
 
 	virtual ~tTJSObjectProxy()
@@ -271,10 +276,20 @@ public:
 	tTJSVariant *result,
 		tjs_int numparams, tTJSVariant **param, iTJSDispatch2 *objthis)
 	{
+		// KRKR-ns: a proxy always has at least one dispatcher while its engine
+		// lives.  After an in-process engine restart the old engine is shut down
+		// (tTJS::Shutdown() nulls its Global), so a proxy still reachable from
+		// the teardown carries NULL dispatchers.  Report the member as missing
+		// instead of following a null pointer -- that dereference crashed as
+		// tTJSObjectProxy::PropGet -> tTJSCustomObject::Find with a null `this`.
+		if(!Dispatch1) return TJS_E_MEMBERNOTFOUND;
 		tjs_error hr =
 			Dispatch1->FuncCall(flag, membername, hint, result, numparams, param, OBJ1);
 		if(hr == TJS_E_MEMBERNOTFOUND && Dispatch1 != Dispatch2)
+		{
+			if(!Dispatch2) return hr;
 			return Dispatch2->FuncCall(flag, membername, hint, result, numparams, param, OBJ2);
+		}
 		return hr;
 	}
 
@@ -282,10 +297,14 @@ public:
 	FuncCallByNum(tjs_uint32 flag, tjs_int num, tTJSVariant *result,
 		tjs_int numparams, tTJSVariant **param, iTJSDispatch2 *objthis)
 	{
+		if(!Dispatch1) return TJS_E_MEMBERNOTFOUND;
 		tjs_error hr =
 			Dispatch1->FuncCallByNum(flag, num, result, numparams, param, OBJ1);
 		if(hr == TJS_E_MEMBERNOTFOUND && Dispatch1 != Dispatch2)
+		{
+			if(!Dispatch2) return hr;
 			return Dispatch2->FuncCallByNum(flag, num, result, numparams, param, OBJ2);
+		}
 		return hr;
 	}
 
@@ -294,10 +313,14 @@ public:
 	tTJSVariant *result,
 		iTJSDispatch2 *objthis)
 	{
+		if(!Dispatch1) return TJS_E_MEMBERNOTFOUND;
 		tjs_error hr =
 			Dispatch1->PropGet(flag, membername, hint, result, OBJ1);
 		if(hr == TJS_E_MEMBERNOTFOUND && Dispatch1 != Dispatch2)
+		{
+			if(!Dispatch2) return hr;
 			return Dispatch2->PropGet(flag, membername, hint, result, OBJ2);
+		}
 		return hr;
 	}
 
@@ -305,10 +328,14 @@ public:
 	PropGetByNum(tjs_uint32 flag, tjs_int num, tTJSVariant *result,
 		iTJSDispatch2 *objthis)
 	{
+		if(!Dispatch1) return TJS_E_MEMBERNOTFOUND;
 		tjs_error hr =
 			Dispatch1->PropGetByNum(flag, num, result, OBJ1);
 		if(hr == TJS_E_MEMBERNOTFOUND && Dispatch1 != Dispatch2)
+		{
+			if(!Dispatch2) return hr;
 			return Dispatch2->PropGetByNum(flag, num, result, OBJ2);
+		}
 		return hr;
 	}
 

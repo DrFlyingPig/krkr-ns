@@ -33,6 +33,9 @@
 #include <cstring>
 #include <mutex>
 #include "StorageImpl.h"
+#ifdef __SWITCH__
+#include "KrkrNSLog.h"
+#endif
 //---------------------------------------------------------------------------
 
 // PSB/PIMG resources keep historical virtual ".tlg" names even when their
@@ -1482,6 +1485,21 @@ tjs_uint64 TVPGraphicCacheSystemLimit = 0; // maximum possible value of  TVPGrap
 // few UI panels").  Recursive so nested helpers (CheckLimit inside Push /
 // SetLimit) do not deadlock.
 static std::recursive_mutex gGraphicCacheLock;
+
+#ifdef __SWITCH__
+// KRKR-ns diagnostic: how many graphic loads of the current session to log the
+// resolved path for.  Reset at every session boundary (and at every game mount),
+// so the log shows where a newly started game's images come from.
+//
+// Sized generously: a title screen alone pulls dozens of psb:// UI icons, and at
+// 60 the budget was exhausted before the background/title art was requested --
+// which made "no background loaded" indistinguishable from "not logged yet".
+static int GraphicsLoadProbeLeft = 600;
+void GraphicsLoaderResetSessionProbe()
+{
+	GraphicsLoadProbeLeft = 600;
+}
+#endif
 //---------------------------------------------------------------------------
 static void TVPCheckGraphicCacheLimit()
 {
@@ -1881,6 +1899,35 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	ttstr nname = TVPNormalizeStorageName(name);
 	tjs_uint32 hash;
 	tTVPGraphicsSearchData searchdata;
+
+#ifdef __SWITCH__
+	// KRKR-ns diagnostic: the resolved path is the ONE fact that says which game
+	// an image belongs to.  Logged for the first loads of each session only
+	// (see GraphicsLoaderResetSessionProbe), so the volume stays small while the
+	// transition into a new game is captured.
+	if (GraphicsLoadProbeLeft > 0)
+	{
+		--GraphicsLoadProbeLeft;
+		std::string u8;
+		for (tjs_uint i = 0; i < nname.GetLen() && i < 190; ++i)
+		{
+			tjs_uint32 ch = static_cast<tjs_uint32>(nname[i]);
+			if (ch < 0x80) u8 += static_cast<char>(ch);
+			else if (ch < 0x800)
+			{
+				u8 += static_cast<char>(0xC0 | (ch >> 6));
+				u8 += static_cast<char>(0x80 | (ch & 0x3F));
+			}
+			else
+			{
+				u8 += static_cast<char>(0xE0 | (ch >> 12));
+				u8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+				u8 += static_cast<char>(0x80 | (ch & 0x3F));
+			}
+		}
+		KRKRNS_LOG("[gload] %s", u8.c_str());
+	}
+#endif
 
 	if(TVPGraphicCacheEnabled)
 	{

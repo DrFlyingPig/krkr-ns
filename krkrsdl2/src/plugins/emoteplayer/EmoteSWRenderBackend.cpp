@@ -405,6 +405,29 @@ EmoteSWRenderBackend::~EmoteSWRenderBackend()
     textures_.clear();
 }
 
+// KRKR-ns: drop every GPU handle when a game session ends and the engine is
+// rebuilt in-process.
+//
+// EnsureGpuRenderer() re-creates the cached handles when the SDL renderer
+// POINTER changes, but that test cannot detect the dangerous case: the engine
+// restart destroys the SDL window and renderer, and the allocator routinely
+// hands the replacement the SAME address.  `renderer == gpuRenderer_` then
+// compares equal, the stale target/texture handles are reused, and the new
+// engine composites into textures owned by a renderer that no longer exists.
+// That shows up as a title screen whose UI draws while the background and
+// E-mote logo animation stay empty, and as a freeze on a later restart.
+//
+// The renderer is already gone at this point, so pass rendererIsAlive=false:
+// the old handles must be abandoned, not destroyed.
+void EmoteSWRenderBackend::ResetForEngineRestart()
+{
+    if (!gpuRenderer_ && !gpuScratch_)
+        return;
+    KRKRNS_LOG("[emote] CPU backend: releasing %d target(s) and %d texture(s) "
+               "for engine restart", (int)targets_.size(), (int)textures_.size());
+    ReleaseGpuResources(false);
+}
+
 EmoteSWRenderBackend::Target* EmoteSWRenderBackend::FindTarget(void* handle) const
 {
     for (Target* t : targets_)

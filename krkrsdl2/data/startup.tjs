@@ -2,7 +2,17 @@
 // treated as read-only; selecting an XP3 mounts that exact entry plus the
 // sibling resource archives from the same game directory.
 // Seed the KAG2 compatibility namespace before a game's initialize.tjs runs.
-if (typeof(global.Krkr2CompatUtils) == "undefined") {
+//
+// Tested on Krkr2CompatUtils.loadPlugin, NOT on the namespace object itself.
+// That distinction is the whole bug: k2compat.tjs creates `Krkr2CompatUtils`
+// near its top but only hangs loadPlugin/unloadPlugin/isLoaded/autoLoad off it
+// much further down, so the object can exist in a bare state with no members --
+// and k2compat.tjs is itself installed only once per process.  Guarding on the
+// object therefore skipped the seeding exactly when it was needed, leaving
+// KAG's custom.tjs to die in KAGLoadScriptOnce with
+// `Member "loadPlugin" does not exist`.
+if (typeof(global.Krkr2CompatUtils) == "undefined"
+    || typeof(global.Krkr2CompatUtils.loadPlugin) == "undefined") {
     function Krkr2CompatUtils() {}
     global.Krkr2CompatUtils = Krkr2CompatUtils;
     Krkr2CompatUtils.scriptBase = "";
@@ -13,7 +23,16 @@ if (typeof(global.Krkr2CompatUtils) == "undefined") {
     Krkr2CompatUtils.isLoaded = function(name) { return true; };
     Krkr2CompatUtils.autoLoad = function() { return null; };
     Krkr2CompatUtils.Window = function() { return null; };
+    Debug.message("[launcher] compat namespace (re)seeded by launcher script");
 }
+
+// Probe: the repair done by SDLApplication.cpp runs just before this script, so
+// the namespace here should already carry loadPlugin.  Logging it at this exact
+// point separates "the repair did not stick" from "something later in THIS
+// script or in the game's boot strips it".
+Debug.message("[launcher] probe after guard: loadPlugin="
+    + (typeof(Krkr2CompatUtils) == "undefined" ? "NO-NAMESPACE"
+       : (typeof(Krkr2CompatUtils.loadPlugin) == "undefined" ? "MISSING" : "ok")));
 
 var launcherWindow = new Window(0, 0, 0, 0);
 launcherWindow.caption = "KRKR-ns 游戏启动器";
@@ -219,11 +238,12 @@ Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gam
 // Test harness, inert unless the marker exists: rotate through the game
 // folders, booting one archive each pass, so the session hand-over (end game ->
 // launcher -> next game) can be exercised without UI input.  SDLApplication.cpp
-// ends each game under the same marker.  The counter lives on its own global,
-// which sessionglobals_drop.tjs leaves alone.
+// ends each game under the same marker.  The round number comes from the
+// NATIVE counter (Storages.getAutocycleRound): the in-process engine restart
+// rebuilds the script engine, so a TJS-side counter would reset to 0 and the
+// first folder would launch forever, never reaching a second game.
 if (Storages.isExistentStorage("sdmc:/switch/krkrsdl2/autocycle.txt")) {
-    var cycleIndex = (typeof(global.__krkrns_cycle_index) == "undefined") ? 0 : global.__krkrns_cycle_index;
-    global.__krkrns_cycle_index = cycleIndex + 1;
+    var cycleIndex = Storages.getAutocycleRound();
     if (gameFolders.count > 0) {
         selectedFolder = cycleIndex % gameFolders.count;
         loadSelectedFolder();
