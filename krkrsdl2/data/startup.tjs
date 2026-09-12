@@ -74,7 +74,7 @@ function loadSelectedFolder() {
     if (selectedFolder < 0) {
         gameFiles = new Array();
         selectedFile = -1;
-        statusText = "请在 SD:/krkr/ 下建立游戏文件夹";
+        statusText = "请在 SD:/switch/KRKR-ns/Game/ 下建立游戏文件夹";
         return;
     }
     gameFiles = Storages.getGameFileList(gameFolders[selectedFolder]);
@@ -136,11 +136,11 @@ function redrawLauncher() {
     // Right-side files inside the selected game directory.
     launcherLayer.fillRect(500, 0, 780, 720, 0x20242A);
     launcherLayer.fillRect(500, 78, 780, 2, 0x444B55);
-    drawText(536, 22, selectedFolder >= 0 ? currentFolderName() : "SD:/krkr/", 30, 0xF3F5F7, true);
+    drawText(536, 22, selectedFolder >= 0 ? currentFolderName() : "SD:/switch/KRKR-ns/Game/", 30, 0xF3F5F7, true);
     drawText(1176, 18, "☰", 42, 0xAAB1BA, true);
 
     if (gameFolders.count == 0) {
-        drawText(540, 132, "SD:/krkr/ 下没有游戏文件夹", 25, 0xC7CED8, false);
+        drawText(540, 132, "SD:/switch/KRKR-ns/Game/ 下没有游戏文件夹", 25, 0xC7CED8, false);
     } else if (gameFiles.count == 0) {
         drawText(540, 132, "该游戏文件夹中没有 XP3/TJS", 25, 0xC7CED8, false);
     } else {
