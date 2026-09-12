@@ -1,13 +1,24 @@
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 /*
+#include "KrkrNSPaths.h"
 	TVP2 ( T Visual Presenter 2 )  A script authoring tool
+#include "KrkrNSPaths.h"
 	Copyright (C) 2000 W.Dee <dee@kikyou.info> and contributors
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 	See details of license at "license.txt"
+#include "KrkrNSPaths.h"
 */
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 // System Initialization and Uninitialization
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
 
@@ -1554,8 +1565,8 @@ void TVPAfterSystemInit()
 		// thread — the "click any button -> one core pegged at 100% -> lag" symptom
 		// in the device logs (quickmenu 32 / file.pimg 99 resources).  With the
 		// cache on, a previously opened UI opens instantly.
-		// Marker sdmc:/switch/krkrsdl2/no-imagecache.txt disables it (A/B test).
-		FILE* noImageCache = fopen("sdmc:/switch/krkrsdl2/no-imagecache.txt", "rb");
+		// Marker sdmc:/switch/KRKR-ns/no-imagecache.txt disables it (A/B test).
+		FILE* noImageCache = fopen(KRKRNS_BASE_A "/no-imagecache.txt", "rb");
 		if (noImageCache) { fclose(noImageCache); }
 		else if (TVPGetGraphicCacheLimit() == 0 && TVPGraphicCacheSystemLimit > 0)
 		{
@@ -1619,11 +1630,11 @@ void TVPAfterSystemInit()
 	// never wired and every composite ran the scalar C variants. simde
 	// emulates SSE2..SSSE3 on NEON, so advertise those flags here; AVX/AVX2
 	// stay unset because their simde emulation is slower than scalar NEON.
-	// Marker sdmc:/switch/krkrsdl2/tvpgl-scalar.txt forces the old scalar
+	// Marker sdmc:/switch/KRKR-ns/tvpgl-scalar.txt forces the old scalar
 	// kernels (A/B pixel comparison, e.g. via trace-render.once BMP dumps).
 	bool tvpglScalar = false;
 	{
-		FILE* m = fopen("sdmc:/switch/krkrsdl2/tvpgl-scalar.txt", "rb");
+		FILE* m = fopen(KRKRNS_BASE_A "/tvpgl-scalar.txt", "rb");
 		if (m) { fclose(m); tvpglScalar = true; }
 	}
 	if (tvpglScalar)

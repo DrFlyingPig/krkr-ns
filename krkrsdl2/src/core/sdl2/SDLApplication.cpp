@@ -1,6 +1,10 @@
+#include "KrkrNSPaths.h"
 /* SPDX-License-Identifier: MIT */
+#include "KrkrNSPaths.h"
 /* Copyright (c) Kirikiri SDL2 Developers */
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 #include "tjsCommHead.h"
 #include "tjsDebug.h"
 #include <thread>
@@ -77,15 +81,17 @@
 // reclaimed its thread-local storage, faulting in armGetTls (observed as an
 // "Invalid memory access at 0x0" right after the guest issued Exit).
 volatile bool krkrsdl2_log_shutdown = false;
-// Keep only the two newest krkrsdl2_debug_*.log files (the current boot adds
-// a third); every older boot log is deleted, so the SD root does not fill up
-// with one file per launch.  The legacy fixed-name logs from earlier builds
-// are removed as well.  Runs once, at the first log write of the process.
+// Keep only the two newest krkrsdl2_debug_*.log files in the log folder (the
+// current boot adds a third); every older boot log is deleted, so the log
+// folder does not fill up with one file per launch.  The legacy fixed-name
+// logs of earlier builds (written to the SD root) are removed as well.  Runs
+// once, at the first log write of the process.
 static void krkrsdl2_prune_old_logs(void)
 {
+	static const char * const logDir = KRKRNS_BASE_A "/log";
 	static const char * const prefix = "krkrsdl2_debug_";
 	static const size_t prefixLen = 15;
-	DIR *d = opendir("sdmc:/");
+	DIR *d = opendir(logDir);
 	if (!d) return;
 	char newest1[64] = "", newest2[64] = "";
 	struct dirent *ent;
@@ -107,9 +113,8 @@ static void krkrsdl2_prune_old_logs(void)
 		}
 	}
 	closedir(d);
-	// Second pass: unlink every timestamped log except the two newest.  Also
-	// drop the retired fixed-name logs of earlier builds.
-	d = opendir("sdmc:/");
+	// Second pass: unlink every timestamped log except the two newest.
+	d = opendir(logDir);
 	if (!d) return;
 	while ((ent = readdir(d)) != nullptr)
 	{
@@ -118,23 +123,24 @@ static void krkrsdl2_prune_old_logs(void)
 		const bool timestamped = len >= prefixLen + 5 &&
 			strncmp(n, prefix, prefixLen) == 0 &&
 			strncmp(n + len - 4, ".log", 4) == 0;
-		const bool legacy = strcmp(n, "krkrsdl2_debug.log") == 0 ||
-			strcmp(n, "krkrsdl2_debug.log.prev") == 0;
-		if (!timestamped && !legacy) continue;
-		if (timestamped && (strcmp(n, newest1) == 0 || strcmp(n, newest2) == 0))
+		if (!timestamped) continue;
+		if (strcmp(n, newest1) == 0 || strcmp(n, newest2) == 0)
 			continue;
-		char path[96];
-		snprintf(path, sizeof(path), "sdmc:/%s", n);
+		char path[128];
+		snprintf(path, sizeof(path), "%s/%s", logDir, n);
 		unlink(path);
 	}
 	closedir(d);
+	// Legacy fixed-name logs of earlier builds, written to the SD root.
+	unlink("sdmc:/krkrsdl2_debug.log");
+	unlink("sdmc:/krkrsdl2_debug.log.prev");
 }
 
 void krkrsdl2_logf_impl(const char *fmt, ...)
 {
 	if (krkrsdl2_log_shutdown) return;
 	static int logfd = -1;
-	static char logname[96];
+	static char logname[128];
 	if (logfd < 0)
 	{
 		krkrsdl2_prune_old_logs();
@@ -144,8 +150,9 @@ void krkrsdl2_logf_impl(const char *fmt, ...)
 		// but BRAND-NEW directory entries show up immediately.  A timestamped
 		// name therefore makes every session's full log - including a crash -
 		// pullable over MTP.  time() comes from the console RTC.
+		mkdir(KRKRNS_BASE_A "/log", 0777);
 		const long long ts = (long long)time(nullptr);
-		snprintf(logname, sizeof(logname), "sdmc:/krkrsdl2_debug_%lld.log", ts);
+		snprintf(logname, sizeof(logname), KRKRNS_BASE_A "/log/krkrsdl2_debug_%lld.log", ts);
 		logfd = open(logname, O_WRONLY | O_CREAT | O_TRUNC);
 	}
 	if (logfd < 0) return;
@@ -2282,7 +2289,7 @@ static void KrkrDumpLayerBmps(tTJSNI_BaseLayer* layer, int depth, int& count, in
 	count++;
 	try
 	{
-		ttstr name = ttstr("sdmc:/switch/krkrsdl2/layer_") + ttstr(path) + ttstr(".bmp");
+		ttstr name = ttstr(KRKRNS_BASE_A "/layer_") + ttstr(path) + ttstr(".bmp");
 		layer->SaveLayerImage(name, TJS_W("bmp"));
 	}
 	catch(...)
@@ -2318,7 +2325,7 @@ bool krkrsdl2_trace_keep_marker = false;
 
 // One-shot frame capture state (see the capture block in TickBeat).  A real
 // capture is written exactly once per process, driven by a delay read from
-// sdmc:/switch/krkrsdl2/capture-once.txt.
+// sdmc:/switch/KRKR-ns/capture-once.txt.
 static Uint32 krkrsdl2_capture_at_ms = 0;
 static bool krkrsdl2_capture_armed = false;
 static bool krkrsdl2_capture_done = false;
@@ -2329,7 +2336,7 @@ static Uint32 krkrsdl2_capture_launch_ms = 0;
 // Reads back what is actually on screen, so "the background is black" can be
 // separated from "the background was composed but never presented".
 //
-// Marker sdmc:/switch/krkrsdl2/capture-once.txt holds a delay in seconds from
+// Marker sdmc:/switch/KRKR-ns/capture-once.txt holds a delay in seconds from
 // process start.  Exactly ONE capture happens, then the marker is consumed, so
 // this costs a single readback instead of the per-frame cost that made the
 // earlier repeating trace stutter.
@@ -2352,7 +2359,7 @@ static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surf
 		static Uint32 lastMarkerCheck = 0;
 		if (lastMarkerCheck != 0 && capNow - lastMarkerCheck < 1000) return;
 		lastMarkerCheck = capNow;
-		FILE *cf = fopen("sdmc:/switch/krkrsdl2/capture-once.txt", "rb");
+		FILE *cf = fopen(KRKRNS_BASE_A "/capture-once.txt", "rb");
 		if (!cf) return;
 		char cbuf[16] = {0};
 		const size_t cn = fread(cbuf, 1, sizeof(cbuf) - 1, cf);
@@ -2369,7 +2376,7 @@ static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surf
 
 	if (capNow < krkrsdl2_capture_at_ms) return;
 	krkrsdl2_capture_done = true;
-	remove("sdmc:/switch/krkrsdl2/capture-once.txt");
+	remove(KRKRNS_BASE_A "/capture-once.txt");
 	KRKRNS_LOG("[capture] taking frame (surface=%p renderer=%p)",
 		(void *)surface, (void *)renderer);
 
@@ -2382,7 +2389,7 @@ static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surf
 	//    the trustworthy artifact here: the emulator's GPU readback is truncated.
 	if (surface)
 	{
-		SDL_SaveBMP(surface, "sdmc:/switch/krkrsdl2/capture-surface.bmp");
+		SDL_SaveBMP(surface, KRKRNS_BASE_A "/capture-surface.bmp");
 		KRKRNS_LOG("[capture] surface %dx%d saved", surface->w, surface->h);
 	}
 	else
@@ -2404,7 +2411,7 @@ static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surf
 				if (SDL_RenderReadPixels(renderer, nullptr, shot->format->format,
 						shot->pixels, shot->pitch) == 0)
 				{
-					SDL_SaveBMP(shot, "sdmc:/switch/krkrsdl2/capture-present.bmp");
+					SDL_SaveBMP(shot, KRKRNS_BASE_A "/capture-present.bmp");
 					KRKRNS_LOG("[capture] present %dx%d saved", ow, oh);
 				}
 				else
@@ -2459,7 +2466,7 @@ void TVPWindowWindow::TickBeat()
 	if (traceNow - krkrsdl2_last_trace_check >= 1000)
 	{
 		krkrsdl2_last_trace_check = traceNow;
-		const char* marker = "sdmc:/switch/krkrsdl2/trace-render.once";
+		const char* marker = KRKRNS_BASE_A "/trace-render.once";
 		FILE* trace = fopen(marker, "rb");
 		if (trace)
 		{
@@ -2472,7 +2479,7 @@ void TVPWindowWindow::TickBeat()
 			if (!krkrsdl2_trace_keep_marker)
 				remove(marker);
 			if (this->surface)
-				SDL_SaveBMP(this->surface, "sdmc:/switch/krkrsdl2/render-surface.bmp");
+				SDL_SaveBMP(this->surface, KRKRNS_BASE_A "/render-surface.bmp");
 			KRKRNS_LOG("[render-trace] surface=%dx%d texture=%d update=%d,%d %dx%d",
 				this->surface ? this->surface->w : 0,
 				this->surface ? this->surface->h : 0,
@@ -2598,7 +2605,7 @@ void TVPWindowWindow::TickBeat()
 						// launcher on a real Switch before the first frame was
 						// shown.  diff-rows needs a marker to opt in after the
 						// driver is verified on the target.
-						// Markers (sdmc:/switch/krkrsdl2/):
+						// Markers (sdmc:/switch/KRKR-ns/):
 						//   diffrows-upload.txt   band uploads (opt-in)
 						//   fullframe-upload.txt  default, kept for clarity
 						{
@@ -2607,9 +2614,9 @@ void TVPWindowWindow::TickBeat()
 							if (!fUploadModeSet)
 							{
 								fUploadModeSet = true;
-								FILE* full = fopen("sdmc:/switch/krkrsdl2/fullframe-upload.txt", "rb");
+								FILE* full = fopen(KRKRNS_BASE_A "/fullframe-upload.txt", "rb");
 								if (full) { fclose(full); fFullFrameMode = true; }
-								FILE* diff = fopen("sdmc:/switch/krkrsdl2/diffrows-upload.txt", "rb");
+								FILE* diff = fopen(KRKRNS_BASE_A "/diffrows-upload.txt", "rb");
 								if (diff) { fclose(diff); fFullFrameMode = false; }
 								KRKRNS_LOG("[win] upload mode=%s",
 									fFullFrameMode ? "full-frame" : "diff-rows");
@@ -2772,7 +2779,7 @@ const int sw = this->surface->w;
 								// SDL reject the readback as "YUV destination".
 								if (SDL_RenderReadPixels(this->renderer, nullptr,
 										shot->format->format, shot->pixels, shot->pitch) == 0)
-									SDL_SaveBMP(shot, "sdmc:/switch/krkrsdl2/render-present.bmp");
+									SDL_SaveBMP(shot, KRKRNS_BASE_A "/render-present.bmp");
 								else
 									KRKRNS_LOG("[render-trace] readpixels failed: %s", SDL_GetError());
 								SDL_FreeSurface(shot);
@@ -4242,12 +4249,12 @@ void krkrsdl2_convert_set_args(int argc, char **argv)
 #ifdef __SWITCH__
 // game-mode globals (used by StorageImpl.cpp GetLocalName)
 bool krkrsdl2_game_mode = false;
-ttstr krkrsdl2_game_dir(TJS_W("sdmc:/krkr/")); // non-const: extern-linked
-static const char *krkrsdl2_game_root = "sdmc:/krkr";
+ttstr krkrsdl2_game_dir(KRKRNS_BASE_U TJS_W("/Game/")); // non-const: extern-linked
+static const char *krkrsdl2_game_root = KRKRNS_BASE_A "/Game";
 
 /* ---- return-to-launcher support -------------------------------------------
  * The NRO hosts the game picker (romfs:/startup.tjs) plus the games mounted
- * from sdmc:/krkr/<dir>.  A quit request inside a game (System.exit /
+ * from the Game folder (<base>/Game/<dir>).  A quit request inside a game (System.exit /
  * System.terminate / closing the game window / a fatal script error) must end
  * the *session*, not the process, so the player lands back on the picker.
  * TVPTerminate* (SysInitImpl.cpp) calls krkrsdl2_request_return_to_launcher();
@@ -4447,7 +4454,7 @@ void krkrsdl2_drop_session_globals(){
 		dropped, kept, sample.c_str());
 }
 
-// Test harness, inert unless sdmc:/switch/krkrsdl2/autocycle.txt exists: a
+// Test harness, inert unless sdmc:/switch/KRKR-ns/autocycle.txt exists: a
 // running game asks to end itself after a while so the session hand-over
 // (end game -> launcher -> next game) can be exercised without touching the UI.
 // The launcher script picks the next game in turn under the same marker.
@@ -4470,7 +4477,7 @@ static const unsigned KRKRNS_AUTOCYCLE_MAX_ROUNDS = 4;
 static void krkrsdl2_autocycle_disarm(const char *why)
 {
 	krkrsdl2_autocycle_on = false;
-	if (remove("sdmc:/switch/krkrsdl2/autocycle.txt") == 0)
+	if (remove(KRKRNS_BASE_A "/autocycle.txt") == 0)
 		KRKRNS_LOG("[autocycle] disarmed (%s), marker deleted", why);
 	else
 		KRKRNS_LOG("[autocycle] disarmed (%s), marker delete failed", why);
@@ -4480,7 +4487,7 @@ void krkrsdl2_service_autocycle()
 	if (!krkrsdl2_autocycle_checked)
 	{
 		krkrsdl2_autocycle_checked = true;
-		FILE *f = fopen("sdmc:/switch/krkrsdl2/autocycle.txt", "rb");
+		FILE *f = fopen(KRKRNS_BASE_A "/autocycle.txt", "rb");
 		if (f)
 		{
 			fclose(f);
@@ -4522,9 +4529,9 @@ void krkrsdl2_set_own_path(const char* path)
 // NRO's usual install locations.  Only an existing file is accepted: passing a
 // stale path to envSetNextLoad would chain-load a different copy.
 static const char * const krkrsdl2_own_path_candidates[] = {
-	"sdmc:/switch/krkrsdl2/krkrsdl2.nro",
-	"sdmc:/switch/krkrsdl2.nro",
-	"sdmc:/switch/KRKR-ns/krkrsdl2.nro",
+	KRKRNS_BASE_A "/krkrsdl2.nro",
+	"sdmc:/switch/krkrsdl2/krkrsdl2.nro", // legacy install location
+	"sdmc:/switch/krkrsdl2.nro",          // legacy install location
 };
 static bool krkrsdl2_resolve_own_path()
 {
@@ -4790,17 +4797,17 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	// the desktop versions and KAG boot dies on the unavailable plugins.
 	{
 		const ttstr compat_path(TJS_W("file://?/romfs:/compat/system/"));
-		const ttstr patch_path(TJS_W("sdmc:/switch/krkrsdl2/patch/system/"));
+		const ttstr patch_path(KRKRNS_BASE_U TJS_W("/patch/system/"));
 		TVPRemoveAutoPath(compat_path);
 		TVPRemoveAutoPath(patch_path);
-		mkdir("sdmc:/switch/krkrsdl2/patch", 0777);
-		mkdir("sdmc:/switch/krkrsdl2/patch/system", 0777);
+		mkdir(KRKRNS_BASE_A "/patch", 0777);
+		mkdir(KRKRNS_BASE_A "/patch/system", 0777);
 		TVPAddAutoPath(compat_path);
 		TVPAddAutoPath(patch_path);
 	}
 
-	mkdir("sdmc:/switch/krkrsdl2/saves", 0777);
-	const std::string native_save = "sdmc:/switch/krkrsdl2/saves/" + directory8;
+	mkdir(KRKRNS_BASE_A "/saves", 0777);
+	const std::string native_save = KRKRNS_BASE_A "/saves/" + directory8;
 	mkdir(native_save.c_str(), 0777);
 	tjs_string save16;
 	if (!TVPUtf8ToUtf16(save16, native_save + "/"))
@@ -4893,9 +4900,9 @@ void krkrsdl2_return_to_launcher()
 	// hbloader process carries the previous session's state.  The chain load
 	// is therefore OFF by default; the in-process rebuild below is the same
 	// code path the emulator uses and is verified end-to-end.  Create
-	// sdmc:/switch/krkrsdl2/chainload.txt to experiment with it again.
+	// sdmc:/switch/KRKR-ns/chainload.txt to experiment with it again.
 	bool wantChainLoad = false;
-	if (FILE* f = fopen("sdmc:/switch/krkrsdl2/chainload.txt", "rb"))
+	if (FILE* f = fopen(KRKRNS_BASE_A "/chainload.txt", "rb"))
 	{
 		fclose(f);
 		wantChainLoad = true;
@@ -5020,7 +5027,7 @@ static void krkrsdl2_start_heartbeat()
 
 void switch_game_mount(void)
 {
-	mkdir("sdmc:/switch/krkrsdl2", 0777);
+	mkdir("sdmc:/switch/KRKR-ns", 0777);
 	mkdir(krkrsdl2_game_root, 0777);
 	krkrsdl2_game_mode = false;
 	TVPStartupScriptName = ttstr(TJS_W("file://?/romfs:/startup.tjs"));
@@ -5086,8 +5093,8 @@ static void krkrsdl2_init_platform_once()
 	KRKRNS_LOG("[ns] chdir(romfs:/) ok");
 	// ensure the save/config directory exists
 	mkdir("sdmc:/switch", 0777);
-	mkdir("sdmc:/switch/krkrsdl2", 0777);
-	mkdir("sdmc:/krkr", 0777);
+	mkdir("sdmc:/switch/KRKR-ns", 0777);
+	mkdir(krkrsdl2_game_root, 0777);
 	KRKRNS_LOG("[ns] sdmc save dir ensured");
 	socketInitializeDefault();
 	KRKRNS_LOG("[ns] socketInitializeDefault ok");
@@ -5241,7 +5248,7 @@ static void krkrsdl2_reinitialize_engine()
 	krkrsdl2_game_mode = false;
 	krkrsdl2_session_saved = false;
 	krkrsdl2_game_autopaths.clear();
-	krkrsdl2_game_dir = ttstr(TJS_W("sdmc:/krkr/"));
+	krkrsdl2_game_dir = ttstr(KRKRNS_BASE_U TJS_W("/Game/"));
 	TVPProjectDir = ttstr(TJS_W("file://?/romfs:/"));
 	TVPNativeProjectDir = tjs_string(TJS_W("romfs:/"));
 	// The finished game left TVPDataPath at its per-game save directory; boot
@@ -5405,7 +5412,7 @@ ttstr TVPGetPlatformName()
 	{
 		platformResolved = 1;
 		platformName = ttstr(SDL_GetPlatform());
-		if (FILE* f = fopen("sdmc:/switch/krkrsdl2/platform-windows.txt", "rb"))
+		if (FILE* f = fopen(KRKRNS_BASE_A "/platform-windows.txt", "rb"))
 		{
 			fclose(f);
 			platformName = ttstr(TJS_W("Windows"));

@@ -1,3 +1,4 @@
+#include "KrkrNSPaths.h"
 #include "ncbind/ncbind.hpp"
 #include "emoteplayerclass.h"
 #include "tjsArray.h"
@@ -113,7 +114,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
             if (shot)
             {
                 char path[128];
-                snprintf(path, sizeof(path), "sdmc:/switch/krkrsdl2/emote-src-%d.bmp", dumpCount);
+                snprintf(path, sizeof(path), KRKRNS_BASE_A "/emote-src-%d.bmp", dumpCount);
                 SDL_SaveBMP(shot, path);
                 SDL_FreeSurface(shot);
             }
@@ -562,11 +563,11 @@ D3DAdaptor::D3DAdaptor(
     {
         // Official emoteplayer exposes d3dEmoteLowScale for slow GPUs. Full
         // resolution is the default (sharp); create the marker file
-        // sdmc:/switch/krkrsdl2/emote-halfres.txt to render at half
+        // sdmc:/switch/KRKR-ns/emote-halfres.txt to render at half
         // resolution (4x fewer pixels, softer) on slow systems.
         tjs_int renderW = width, renderH = height;
         bool halfRes = false;
-        if (FILE* f = fopen("sdmc:/switch/krkrsdl2/emote-halfres.txt", "rb"))
+        if (FILE* f = fopen(KRKRNS_BASE_A "/emote-halfres.txt", "rb"))
         {
             fclose(f);
             halfRes = true;

@@ -10,7 +10,7 @@ CMAKE="$TOOLS/cmake-3.31.6-windows-x86_64/bin/cmake.exe"
 NINJA="$TOOLS/ninja.exe"
 PKGCONF="$TOOLS/bin/pkg-config.exe"
 EMU_GAMES="$TOOLS/emulator/publish/portable/games"
-EMU_PATCH="$TOOLS/emulator/publish/portable/sdcard/switch/krkrsdl2/patch/system"
+EMU_PATCH="$TOOLS/emulator/publish/portable/sdcard/switch/KRKR-ns/patch/system"
 
 # NOTE: env may carry a stale DEVKITPRO (/opt/devkitpro) — force the real one
 export DEVKITPRO="${KRKRNS_DEVKITPRO:-D:/devkitPro}"

@@ -1,3 +1,4 @@
+#include "KrkrNSPaths.h"
 #include "emoterunner.h"
 
 #include <sstream>
@@ -901,7 +902,7 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
                 if (shot)
                 {
                     char path[128];
-                    snprintf(path, sizeof(path), "sdmc:/switch/krkrsdl2/emote-mask-%d.bmp",
+                    snprintf(path, sizeof(path), KRKRNS_BASE_A "/emote-mask-%d.bmp",
                              maskDumps);
                     SDL_SaveBMP(shot, path);
                     SDL_FreeSurface(shot);

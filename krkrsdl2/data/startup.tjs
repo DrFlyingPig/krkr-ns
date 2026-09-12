@@ -1,4 +1,4 @@
-// KRKR-ns launcher. Games live in sdmc:/krkr/<game directory>/ and are
+// KRKR-ns launcher. Games live in sdmc:/switch/KRKR-ns/Game/<game directory>/ and are
 // treated as read-only; selecting an XP3 mounts that exact entry plus the
 // sibling resource archives from the same game directory.
 // Seed the KAG2 compatibility namespace before a game's initialize.tjs runs.
@@ -242,7 +242,7 @@ Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gam
 // NATIVE counter (Storages.getAutocycleRound): the in-process engine restart
 // rebuilds the script engine, so a TJS-side counter would reset to 0 and the
 // first folder would launch forever, never reaching a second game.
-if (Storages.isExistentStorage("sdmc:/switch/krkrsdl2/autocycle.txt")) {
+if (Storages.isExistentStorage("sdmc:/switch/KRKR-ns/autocycle.txt")) {
     var cycleIndex = Storages.getAutocycleRound();
     if (gameFolders.count > 0) {
         selectedFolder = cycleIndex % gameFolders.count;

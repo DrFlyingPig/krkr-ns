@@ -1,19 +1,36 @@
+#include "KrkrNSPaths.h"
 /* SPDX-License-Identifier: MIT */
+#include "KrkrNSPaths.h"
 /* KRKR-ns Phase 3: GPU layer composite (Stage 3.1).
+#include "KrkrNSPaths.h"
  *
+#include "KrkrNSPaths.h"
  * The engine's whole layer tree lands on the layer manager's DrawBuffer
+#include "KrkrNSPaths.h"
  * through tTVPBaseBitmap::Blt/CopyRect. When enabled (marker file
- * sdmc:/switch/krkrsdl2/gpu-composite.txt + a full-readback driver probe),
+#include "KrkrNSPaths.h"
+ * sdmc:/switch/KRKR-ns/gpu-composite.txt + a full-readback driver probe),
+#include "KrkrNSPaths.h"
  * those final blits are drawn as textured quads into a private ES2 FBO,
+#include "KrkrNSPaths.h"
  * and the present path renders that FBO texture fullscreen and swaps —
+#include "KrkrNSPaths.h"
  * bypassing the surface memcpy, SDL_UpdateTexture and RenderCopy stages.
+#include "KrkrNSPaths.h"
  * Everything else (methods we don't map yet, hda modes, temp bitmaps,
+#include "KrkrNSPaths.h"
  * non-compose destinations) keeps the proven CPU path.
+#include "KrkrNSPaths.h"
  *
+#include "KrkrNSPaths.h"
  * On drivers whose full-rect ReadPixels truncate (the Nextendo emulator's
+#include "KrkrNSPaths.h"
  * software GLES returns only the left quarter), the probe fails and the
+#include "KrkrNSPaths.h"
  * module stays disabled — same gate as the E-mote backend. */
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 #include "GLCompositeBridge.h"
 #include "KrkrNSLog.h"
 #include <SDL.h>
@@ -548,15 +565,15 @@ bool krkrsdl2_glc_enabled()
     if (!gMarkerChecked)
     {
         gMarkerChecked = true;
-        FILE* m = fopen("sdmc:/switch/krkrsdl2/gpu-composite.txt", "rb");
+        FILE* m = fopen(KRKRNS_BASE_A "/gpu-composite.txt", "rb");
         if (m) { fclose(m); gMarkerFound = true; gMode = 1; }
-        FILE* o = fopen("sdmc:/switch/krkrsdl2/gpu-composite-obs.txt", "rb");
+        FILE* o = fopen(KRKRNS_BASE_A "/gpu-composite-obs.txt", "rb");
         if (o) { fclose(o); gMarkerFound = true; gMode = 2; }
-        FILE* l = fopen("sdmc:/switch/krkrsdl2/gpu-composite-log.txt", "rb");
+        FILE* l = fopen(KRKRNS_BASE_A "/gpu-composite-log.txt", "rb");
         if (l) { fclose(l); gMarkerFound = true; gMode = 3; }
-        FILE* c = fopen("sdmc:/switch/krkrsdl2/gpu-composite-cpuonly.txt", "rb");
+        FILE* c = fopen(KRKRNS_BASE_A "/gpu-composite-cpuonly.txt", "rb");
         if (c) { fclose(c); gMarkerFound = true; gMode = 4; }
-        FILE* g = fopen("sdmc:/switch/krkrsdl2/gpu-composite-gpuonly.txt", "rb");
+        FILE* g = fopen(KRKRNS_BASE_A "/gpu-composite-gpuonly.txt", "rb");
         if (g) { fclose(g); gMarkerFound = true; gMode = 5; }
         KRKRNS_LOG("[glc] marker %s mode=%d", gMarkerFound ? "found" : "absent (CPU composite)", gMode);
     }
@@ -1207,7 +1224,7 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
             unsigned int ww = w, hh = h;
             for (int i = 0; i < 4; ++i) { hdr[18+i] = (unsigned char)(ww >> (8*i)); hdr[22+i] = (unsigned char)(hh >> (8*i)); }
             hdr[26] = 1; hdr[28] = 24;
-            FILE* bmp = fopen("sdmc:/switch/krkrsdl2/glc-layer.bmp", "wb");
+            FILE* bmp = fopen(KRKRNS_BASE_A "/glc-layer.bmp", "wb");
             if (bmp)
             {
                 fwrite(hdr, 1, 54, bmp);
@@ -1402,7 +1419,7 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
                    gReadbackCount,
                    nonblack * 100.0 / (double)((gComposeW + 2) / 3 * (gComposeH + 2) / 3));
         static bool snapFailLogged = false;
-        FILE* bmp = fopen("sdmc:/switch/krkrsdl2/glc-frame.bmp", "wb");
+        FILE* bmp = fopen(KRKRNS_BASE_A "/glc-frame.bmp", "wb");
         if (bmp)
         {
             const int w = gComposeW, h = gComposeH;

@@ -1,3 +1,4 @@
+#include "KrkrNSPaths.h"
 #include "TVPCompositor.h"
 #include "EmoteSWRenderBackend.h"
 #include "EmoteGLRenderBackend.h"
@@ -36,16 +37,16 @@ iTVPRenderBackend* TVPGetRenderBackend()
         // driver's full-target rasterization so the Nextendo emulator's
         // software GLES (which clamps drawn triangles to a quarter of the
         // FBO) is detected and rejected automatically. Override markers:
-        //   sdmc:/switch/krkrsdl2/emote-cpu.txt  force the CPU backend
-        //   sdmc:/switch/krkrsdl2/emote-gl.txt   force the GL backend
+        //   sdmc:/switch/KRKR-ns/emote-cpu.txt  force the CPU backend
+        //   sdmc:/switch/KRKR-ns/emote-gl.txt   force the GL backend
         bool wantGl = true;
 #ifdef __SWITCH__
-        if (FILE* f = fopen("sdmc:/switch/krkrsdl2/emote-gl.txt", "rb"))
+        if (FILE* f = fopen(KRKRNS_BASE_A "/emote-gl.txt", "rb"))
         {
             fclose(f);
             wantGl = true;
         }
-        if (FILE* f = fopen("sdmc:/switch/krkrsdl2/emote-cpu.txt", "rb"))
+        if (FILE* f = fopen(KRKRNS_BASE_A "/emote-cpu.txt", "rb"))
         {
             fclose(f);
             wantGl = false;

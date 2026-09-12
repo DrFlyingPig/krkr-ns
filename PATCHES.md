@@ -486,6 +486,22 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 - **保留内容**（本会话该需求之外的修复，均与该功能无关）：P50 性能窗口统计修正+分层上传优化、P51 Auto Path 增量构建、P52 合成层计数器、P53 全帧上传默认+探针禁用、P54 图像缓存默认启用、P55 图像缓存并发锁、P56 dummy_colorpicker 缺资源垫图、Layer.loadImages 容错、eval 风暴守卫、心跳诊断、E-mote 脏区回读优化。
 - **行为回到**：游戏内「结束游戏」= 退出整个 NRO（回 hbmenu），与用户提出需求前一致。
 
+### P61: SD 卡目录结构集中化 (2026-09-12)
+所有运行时文件集中到 `sdmc:/switch/KRKR-ns/` 一个文件夹下，不再散落在 SD 根目录与 `switch/krkrsdl2/`：
+```
+KRKR-ns/
+├── krkrsdl2.nro        主程序（hbmenu 可列出子目录中的 nro）
+├── Game/<游戏目录>/     游戏（原 sdmc:/krkr/）
+├── saves/<游戏目录>/    存档（原 switch/krkrsdl2/saves/）
+├── patch/system/        用户覆盖层（原 switch/krkrsdl2/patch/）
+├── log/                 每次启动一个时间戳日志（保留最新 3 份）
+└── *.txt                运行时标记文件
+```
+- **实现**：新增 `KrkrNSPaths.h`（`KRKRNS_BASE_A/L/U` 三个编码形式的基路径宏，U 版匹配 `TJS_W` 的 `u##X` 编码可与其拼接），全部硬编码路径（SDLApplication 的游戏根/存档/补丁/标记/自带路径候选、GLComposite 的 gpu-composite 标记、SysInitImpl 的 tvpgl/no-imagecache 标记、ScriptMgnIntf 的 no-eval-guard、E-mote 后端选择/半分辨率/调试转储、blt-trace、startup.tjs 的 autocycle）改经该宏拼接。
+- **日志迁移**：时间戳日志移入 `KRKR-ns/log/`（启动时自动建目录），裁剪保留最新 3 份，并清理 SD 根目录的旧版固定名日志；`[eval]`/`[eval] result` 每会话上限 200 条（KAG 运行时持续求值，原先是日志体积大头；风暴熔断守卫不受影响）。
+- **注意**：旧位置不做自动迁移（游戏可达数 GB）。升级步骤：把旧 `sdmc:/krkr/` 的各游戏目录移到 `KRKR-ns/Game/`、旧 `switch/krkrsdl2/saves/*` 移到 `KRKR-ns/saves/`（保留存档进度）、需要的标记文件移到 `KRKR-ns/`，最后把 nro 放入 `KRKR-ns/` 并删除旧 `switch/krkrsdl2/` 目录。
+- **真机验证**：模拟器新布局全流程验证通过（启动器列出新 Game/ 下 2 个游戏、日志/存档/补丁就位）；真机待复验。
+
 ### P60-R2: 同进程路径重写为「整引擎重建」+ P60b–g 跨会话残留六连修 (2026-09-12，当前版本)
 P60 提交后，同进程回退路径由 DeepSeek 重写，随后围绕「第二个游戏异常」累计六处修复。**本节描述的即当前工作区状态**；上一节 P60 的"原地修补活引擎"方案已被取代。
 

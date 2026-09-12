@@ -1,13 +1,24 @@
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 /*
+#include "KrkrNSPaths.h"
 	TVP2 ( T Visual Presenter 2 )  A script authoring tool
+#include "KrkrNSPaths.h"
 	Copyright (C) 2000 W.Dee <dee@kikyou.info> and contributors
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 	See details of license at "license.txt"
+#include "KrkrNSPaths.h"
 */
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 // Base Layer Bitmap implementation
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 #include <vector>
 
 #include "tjsCommHead.h"
@@ -32,7 +43,7 @@ static void KrkrBltTrace(const char* fmt, ...)
 	static int lines = 0;
 	if (lines >= 400) return;
 	lines++;
-	FILE* f = fopen("sdmc:/switch/krkrsdl2/blt-trace.log", "a");
+	FILE* f = fopen(KRKRNS_BASE_A "/blt-trace.log", "a");
 	if (!f) return;
 	va_list ap;
 	va_start(ap, fmt);

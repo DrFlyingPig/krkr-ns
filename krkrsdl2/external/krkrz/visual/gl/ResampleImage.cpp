@@ -1,16 +1,30 @@
+#include "KrkrNSPaths.h"
 /******************************************************************************/
+#include "KrkrNSPaths.h"
 /**
+#include "KrkrNSPaths.h"
  * 拡大縮小を実装する
+#include "KrkrNSPaths.h"
  * ----------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
  * 	Copyright (C) T.Imoto <http://www.kaede-software.com>
+#include "KrkrNSPaths.h"
  * ----------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
  * @author		T.Imoto
+#include "KrkrNSPaths.h"
  * @date		2014/04/02
+#include "KrkrNSPaths.h"
  * @note
+#include "KrkrNSPaths.h"
  *****************************************************************************/
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 #define _USE_MATH_DEFINES
+#include "KrkrNSPaths.h"
 #ifdef TVP_COMPILING_KRKRSDL2
+#include "KrkrNSPaths.h"
 #include "aligned_allocator.h"
 #endif
 #include "tjsCommHead.h"
@@ -534,7 +548,7 @@ public:
 			static int rlines = 0;
 			if (rlines < 200) {
 				rlines++;
-				FILE* rf = fopen("sdmc:/switch/krkrsdl2/blt-trace.log", "a");
+				FILE* rf = fopen(KRKRNS_BASE_A "/blt-trace.log", "a");
 				if (rf) {
 					fprintf(rf, "ResampleMT threadNum=%d clip(off=%d h=%d w=%d destw=%d) dest=(%d,%d,%d,%d) src=(%d,%d,%d,%d)\n",
 						threadNum, clip.offsety_, clip.height_, clip.width_, clip.getDestWidth(),

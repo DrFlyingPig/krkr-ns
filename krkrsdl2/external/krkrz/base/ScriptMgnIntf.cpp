@@ -1,14 +1,26 @@
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 /*
+#include "KrkrNSPaths.h"
 	TVP2 ( T Visual Presenter 2 )  A script authoring tool
+#include "KrkrNSPaths.h"
 	Copyright (C) 2000 W.Dee <dee@kikyou.info> and contributors
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 	See details of license at "license.txt"
+#include "KrkrNSPaths.h"
 */
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 // TJS2 Script Managing
+#include "KrkrNSPaths.h"
 //---------------------------------------------------------------------------
+#include "KrkrNSPaths.h"
 
+#include "KrkrNSPaths.h"
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
 #include <string>
@@ -1697,14 +1709,14 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 		// thousands of "@'text/jp/…'"/"@'f_…'" evals, no [prof], heartbeats
 		// alone) — the game looks frozen.  Interrupt the script so KAG's
 		// error handler can drop back to its menu instead of freezing forever.
-		// Marker sdmc:/switch/krkrsdl2/no-eval-guard.txt disables this.
+		// Marker sdmc:/switch/KRKR-ns/no-eval-guard.txt disables this.
 		{
 			static bool guardChecked = false;
 			static bool guardEnabled = true;
 			if (!guardChecked)
 			{
 				guardChecked = true;
-				FILE* g = fopen("sdmc:/switch/krkrsdl2/no-eval-guard.txt", "rb");
+				FILE* g = fopen(KRKRNS_BASE_A "/no-eval-guard.txt", "rb");
 				if (g) { fclose(g); guardEnabled = false; }
 			}
 			if (guardEnabled)

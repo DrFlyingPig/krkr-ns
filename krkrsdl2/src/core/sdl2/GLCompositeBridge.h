@@ -4,7 +4,7 @@
  * The whole KiriKiri layer tree finally reaches the screen through
  * tTVPBaseBitmap::Blt / CopyRect onto the layer manager's DrawBuffer.
  * These hooks route that last composite onto a GL path when the module
- * is enabled (sdmc:/switch/krkrsdl2/gpu-composite.txt + driver probe).
+ * is enabled (sdmc:/switch/KRKR-ns/gpu-composite.txt + driver probe).
  *
  * Off-Switch (or when the module is off) every call is a cheap no-op, so
  * the embedded krkrz engine can call them unconditionally. */

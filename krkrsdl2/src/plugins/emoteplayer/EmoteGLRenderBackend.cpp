@@ -1,3 +1,4 @@
+#include "KrkrNSPaths.h"
 #include "EmoteGLRenderBackend.h"
 #include "KrkrNSLog.h"
 #include <SDL.h>
@@ -770,7 +771,7 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
         gl.ReadPixels(0, 0, gl.target->width, gl.target->height, GL_RGBA,
                       GL_UNSIGNED_BYTE, snap.data());
         char path[128];
-        snprintf(path, sizeof(path), "sdmc:/switch/krkrsdl2/emote-draw-%02d.bmp", fboSnaps);
+        snprintf(path, sizeof(path), KRKRNS_BASE_A "/emote-draw-%02d.bmp", fboSnaps);
         SDL_Surface* shot = SDL_CreateRGBSurfaceWithFormatFrom(
             snap.data(), gl.target->width, gl.target->height, 32,
             gl.target->width * 4, SDL_PIXELFORMAT_ABGR8888);
