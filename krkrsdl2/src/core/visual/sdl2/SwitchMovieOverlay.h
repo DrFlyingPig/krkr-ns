@@ -23,7 +23,12 @@
  * SetVideoBuffer provided — the pump hands it to the layer system via
  * AssignMainImage, which feeds the existing GPU compositor unchanged.
  *
- * Audio (movie sound) is not decoded yet: v1 is silent video.
+ * Audio: the container's first audio track is decoded on the same worker
+ * thread (FFmpeg + swresample, downmixed to S16) and streamed through the
+ * engine's global audio device (iTVPAudioStream / FAudio) with a small
+ * rotated-block queue; the movie reports completion only after the sound has
+ * finished.  A container without an audio track plays silent, exactly like
+ * before.
  */
 #ifndef SWITCH_MOVIE_OVERLAY_H
 #define SWITCH_MOVIE_OVERLAY_H
@@ -50,9 +55,12 @@
 #include "../win32/krmovie.h"
 
 struct AVFormatContext;
+struct SwrContext;
+class iTVPAudioStream;
 struct AVCodecContext;
 struct AVCodecParameters;
 struct AVIOContext;
+struct AVPacket;
 struct AVFrame;
 struct SwsContext;
 class NativeEventQueueImplement;
@@ -107,8 +115,8 @@ public:
     void __stdcall GetPlayRate(double * /*rate*/) override {}
     void __stdcall SetAudioBalance(long /*balance*/) override {}
     void __stdcall GetAudioBalance(long * /*balance*/) override {}
-    void __stdcall SetAudioVolume(long /*volume*/) override {}
-    void __stdcall GetAudioVolume(long * /*volume*/) override {}
+    void __stdcall SetAudioVolume(long volume) override;
+    void __stdcall GetAudioVolume(long * volume) override;
     void __stdcall GetNumberOfAudioStream(unsigned long * streamCount) override;
     void __stdcall SelectAudioStream(unsigned long /*num*/) override {}
     void __stdcall GetEnableAudioStreamNum(long * /*num*/) override {}
@@ -207,6 +215,32 @@ private:
     double durationSec_ = 0.0;
     int64_t totalFrames_ = 0;
     ttstr openPath_; // storage name for Rewind (full reopen)
+
+    /* ---- audio track (same worker thread decodes, FAudio plays) ---- */
+    static const size_t kPcmRingBytes = 1u << 20; // absorb decode-ahead
+    static const size_t kAudioBlockBytes = 4096 * 4; // ~21ms @48k stereo
+    static const int kAudioBlocks = 4;               // 3 queued + 1 free
+    int audioStream_ = -1;
+    AVCodecContext * audioCodec_ = nullptr;
+    SwrContext * swrResample_ = nullptr;
+    iTVPAudioStream * audioOut_ = nullptr;
+    int audioRate_ = 0;
+    int audioChannels_ = 2;
+    long audioVolume_ = 100000;
+    std::vector<uint8_t> pcmRing_;
+    size_t pcmRead_ = 0;  // monotonic offsets into the ring (decode thread only)
+    size_t pcmWrite_ = 0;
+    std::vector<uint8_t *> audioBlocks_;
+    std::atomic<int> audioFreeBlocks_{0};
+    int nextAudioBlock_ = 0;
+    bool audioEof_ = false;
+
+    void CloseAudio();
+    bool OpenAudioOutput();
+    void DecodeAudioPacket(AVPacket * pkt);
+    void ConsumeAudioFrame(AVFrame * frame);
+    void FeedAudio(bool flush);
+    static void AudioQueueCb(iTVPAudioStream * stream, void * user);
 };
 
 #endif // SWITCH_MOVIE_OVERLAY_H

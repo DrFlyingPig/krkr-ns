@@ -106,6 +106,21 @@ static tTVPAtExit TVPUninitAudioDeviceAtExit
 ( TVP_ATEXIT_PRI_RELEASE, TVPUninitAudioDevice );
 //---------------------------------------------------------------------------
 
+// KRKR-ns: the movie overlay (SwitchMovieOverlay) streams its decoded audio
+// track through the same output device the engine's sound buffers use.
+// Returns the initialized device and its mixing format; initializes lazily
+// so a movie can be the first sound of the session.  May return nullptr
+// when no audio device is available (null device selected).
+iTVPAudioDevice* TVPGetInitializedAudioDevice(tjs_uint32* rate, tjs_uint32* channels)
+{
+	TVPInitAudioDevice();
+	if( TVPAudioDevice == nullptr ) return nullptr;
+	if( rate ) *rate = (tjs_uint32)TVPSoundFrequency;
+	if( channels ) *channels = (tjs_uint32)TVPSoundChannels;
+	return TVPAudioDevice;
+}
+//---------------------------------------------------------------------------
+
 //---------------------------------------------------------------------------
 // Buffer management
 //---------------------------------------------------------------------------

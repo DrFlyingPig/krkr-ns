@@ -11,12 +11,20 @@
 #include "KrkrNSLog.h"
 #include "NativeEventQueue.h"
 
+#include "AudioDevice.h"
+
+// From QueueSoundBufferImpl.cpp: the engine's global audio output device and
+// its mixing format.  May return nullptr before sound is initialized.
+iTVPAudioDevice * TVPGetInitializedAudioDevice(tjs_uint32 * rate,
+                                               tjs_uint32 * channels);
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/mem.h>
+#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
@@ -132,6 +140,7 @@ SwitchMovieOverlay::~SwitchMovieOverlay()
 {
     Stop();
     CloseCodecs();
+    CloseAudio();
 }
 
 bool SwitchMovieOverlay::OpenStream(const ttstr & name,
@@ -283,6 +292,53 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
         return false;
     }
 
+    // Audio track (best effort): when present and decodable, it is decoded
+    // alongside the video and streamed through the engine's audio device.
+    // Any failure here simply falls back to the previous silent playback.
+    audioStream_ = -1;
+    {
+        const int a = av_find_best_stream(format_, AVMEDIA_TYPE_AUDIO, -1,
+                                          videoStream_, nullptr, 0);
+        if (a >= 0)
+        {
+            AVStream * ast = format_->streams[a];
+            const AVCodec * acodec =
+                avcodec_find_decoder(ast->codecpar->codec_id);
+            if (!acodec)
+            {
+                KRKRNS_LOG("[movie] no built-in audio decoder for codec %d",
+                           (int)ast->codecpar->codec_id);
+            }
+            else
+            {
+                audioCodec_ = avcodec_alloc_context3(acodec);
+                if (!audioCodec_ ||
+                    avcodec_parameters_to_context(audioCodec_, ast->codecpar) < 0 ||
+                    avcodec_open2(audioCodec_, acodec, nullptr) < 0)
+                {
+                    KRKRNS_LOG("[movie] audio decoder open failed codec=%d",
+                               (int)ast->codecpar->codec_id);
+                    avcodec_free_context(&audioCodec_);
+                }
+            }
+            if (audioCodec_)
+            {
+                audioStream_ = a;
+                audioRate_ = audioCodec_->sample_rate;
+                audioChannels_ = audioCodec_->ch_layout.nb_channels;
+                if (audioChannels_ != 1 && audioChannels_ != 2)
+                    audioChannels_ = 2; // FAudio mixes anything wider down
+                KRKRNS_LOG("[movie] audio stream idx=%d codec=%d rate=%d ch=%d",
+                           audioStream_, (int)ast->codecpar->codec_id,
+                           audioRate_, audioChannels_);
+            }
+        }
+        else
+        {
+            KRKRNS_LOG("[movie] container has no audio stream");
+        }
+    }
+
     width_ = videoCodec_->width;
     height_ = videoCodec_->height;
     if (width_ <= 0 || height_ <= 0)
@@ -318,6 +374,14 @@ void SwitchMovieOverlay::CloseCodecs()
 {
     if (sws_)
         sws_freeContext(sws_), sws_ = nullptr;
+    if (swrResample_)
+        swr_free(&swrResample_), swrResample_ = nullptr;
+    if (audioCodec_)
+        avcodec_free_context(&audioCodec_);
+    audioStream_ = -1;
+    audioRate_ = 0;
+    audioEof_ = false;
+    pcmRead_ = pcmWrite_ = 0;
     if (videoCodec_)
         avcodec_free_context(&videoCodec_);
     if (format_)
@@ -368,6 +432,18 @@ void SwitchMovieOverlay::Play()
     // drain any leftover events from a previous run
     evRead_.store(evWrite_.load(std::memory_order_acquire));
     startedMs_ = SDL_GetTicks();
+    // audio output (best effort): created on the first play, restarted on
+    // every play; a missing device keeps the previous silent behaviour.
+    audioEof_ = false;
+    pcmRead_ = pcmWrite_ = 0;
+    if (audioStream_ >= 0 && OpenAudioOutput())
+    {
+        audioFreeBlocks_.store(kAudioBlocks);
+        nextAudioBlock_ = 0;
+        audioOut_->StartStream();
+        KRKRNS_LOG("[movie] audio output started rate=%d ch=%d",
+                   audioRate_, audioChannels_);
+    }
     status_.store(vsPlaying);
     decoding_.store(true);
     thread_ = SDL_CreateThreadWithStackSize(DecodeThread, "movie",
@@ -395,6 +471,11 @@ void SwitchMovieOverlay::Stop()
     if (thread)
     {
         SDL_WaitThread(thread, nullptr);
+    }
+    if (audioOut_)
+    {
+        // stop and drop whatever buffered sound is left over
+        audioOut_->StopStream();
     }
     decoding_.store(false);
     status_.store(vsStopped);
@@ -538,7 +619,7 @@ void SwitchMovieOverlay::SetVideoBuffer(BYTE * buff1, BYTE * buff2, long size)
 
 void SwitchMovieOverlay::GetNumberOfAudioStream(unsigned long * streamCount)
 {
-    if (streamCount) *streamCount = 0;
+    if (streamCount) *streamCount = audioStream_ >= 0 ? 1 : 0;
 }
 
 void SwitchMovieOverlay::GetNumberOfVideoStream(unsigned long * streamCount)
@@ -620,6 +701,13 @@ void SwitchMovieOverlay::DecodeLoop()
             if (sent >= 0 || sent == AVERROR_EOF) receiveFrames();
             break;
         }
+        if (pkt->stream_index == audioStream_)
+        {
+            DecodeAudioPacket(pkt);
+            av_packet_unref(pkt);
+            FeedAudio(false);
+            continue;
+        }
         if (pkt->stream_index != videoStream_)
         {
             av_packet_unref(pkt);
@@ -653,6 +741,20 @@ void SwitchMovieOverlay::DecodeLoop()
         // KRKR event handler perform its normal Stop/loop transition.
         if (frameCount_.load() > 0)
             WaitForPlaybackTime((double)frameCount_.load() / fps_);
+        // Let the sound finish too (the tail chunk plus whatever is still
+        // queued), bounded so a stuck device cannot stall the movie end.
+        if (audioOut_)
+        {
+            FeedAudio(true);
+            int waited = 0;
+            while (!quit_.load() && audioFreeBlocks_.load() < kAudioBlocks &&
+                   waited < 4000)
+            {
+                SDL_Delay(8);
+                waited += 8;
+            }
+            audioOut_->StopStream();
+        }
         if (!quit_.load())
         {
             status_.store(vsEnded);
@@ -721,4 +823,208 @@ bool SwitchMovieOverlay::PublishFrame(AVFrame * frame)
     if (idx == 0 || ((idx + 1) % 120) == 0)
         KRKRNS_LOG("[movie] published frame=%d slot=%d", idx + 1, slot);
     return true;
+}
+
+
+/* ---- audio track ---- */
+
+bool SwitchMovieOverlay::OpenAudioOutput()
+{
+    if (audioOut_) return true;
+    if (audioStream_ < 0 || audioRate_ <= 0) return false;
+    tjs_uint32 devRate = 48000, devCh = 2;
+    iTVPAudioDevice * dev = TVPGetInitializedAudioDevice(&devRate, &devCh);
+    if (!dev)
+    {
+        KRKRNS_LOG("[movie] no audio device; movie plays silent");
+        return false;
+    }
+    tTVPAudioStreamParam p;
+    p.Channels = audioChannels_;
+    p.SampleRate = audioRate_;
+    p.BitsPerSample = 16;
+    p.SampleType = astInt16;
+    p.FramesPerBuffer = kAudioBlockBytes / (audioChannels_ * 2);
+    try
+    {
+        audioOut_ = dev->CreateAudioStream(p);
+    }
+    catch (...)
+    {
+        audioOut_ = nullptr;
+    }
+    if (!audioOut_)
+    {
+        KRKRNS_LOG("[movie] audio stream create failed");
+        return false;
+    }
+    audioOut_->SetVolume((tjs_int)audioVolume_);
+    audioOut_->SetCallback(AudioQueueCb, this);
+    pcmRing_.assign(kPcmRingBytes, 0);
+    pcmRead_ = pcmWrite_ = 0;
+    audioBlocks_.assign(kAudioBlocks, nullptr);
+    for (auto & b : audioBlocks_)
+        b = new uint8_t[kAudioBlockBytes];
+    KRKRNS_LOG("[movie] audio output ready rate=%d ch=%d", audioRate_,
+               audioChannels_);
+    return true;
+}
+
+void SwitchMovieOverlay::CloseAudio()
+{
+    if (audioOut_)
+    {
+        audioOut_->StopStream();
+        audioOut_->SetCallback(nullptr, nullptr);
+        delete audioOut_;
+        audioOut_ = nullptr;
+    }
+    for (auto & b : audioBlocks_)
+        delete[] b;
+    audioBlocks_.clear();
+    pcmRing_.clear();
+    pcmRing_.shrink_to_fit();
+    pcmRead_ = pcmWrite_ = 0;
+    audioFreeBlocks_.store(0);
+}
+
+void SwitchMovieOverlay::AudioQueueCb(iTVPAudioStream * stream, void * user)
+{
+    (void)stream;
+    // FAudio worker thread: one enqueued block has been consumed and its
+    // memory is free for reuse again.
+    static_cast<SwitchMovieOverlay *>(user)->audioFreeBlocks_.fetch_add(1);
+}
+
+// Convert one decoded audio frame to interleaved S16 (downmixing via
+// swresample) and append it to the PCM ring.  The ring is touched only by
+// the decode thread; when it runs full the decode loop simply waits, which
+// throttles the whole decode pipeline against the audio clock.
+void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
+{
+    if (quit_.load()) return;
+    if (!swrResample_)
+    {
+        AVChannelLayout outLayout;
+        av_channel_layout_default(&outLayout, audioChannels_);
+        if (swr_alloc_set_opts2(&swrResample_, &outLayout, AV_SAMPLE_FMT_S16,
+                                audioRate_, &frame->ch_layout,
+                                (AVSampleFormat)frame->format,
+                                frame->sample_rate, 0, nullptr) < 0 ||
+            !swrResample_)
+        {
+            KRKRNS_LOG("[movie] swr_alloc_set_opts2 failed");
+            return;
+        }
+        if (swr_init(swrResample_) < 0)
+        {
+            KRKRNS_LOG("[movie] swr_init failed");
+            swr_free(&swrResample_), swrResample_ = nullptr;
+            return;
+        }
+    }
+
+    const int bytesPerFrame = audioChannels_ * 2;
+    const int dstCap = frame->nb_samples + 256;
+    std::vector<uint8_t> converted((size_t)dstCap * bytesPerFrame);
+    uint8_t * outPlane[1] = {converted.data()};
+    const int got = swr_convert(swrResample_, outPlane, dstCap,
+                                (const uint8_t **)frame->extended_data,
+                                frame->nb_samples);
+    if (got <= 0) return;
+    const size_t bytes = (size_t)got * bytesPerFrame;
+
+    size_t written = 0;
+    while (written < bytes)
+    {
+        const size_t cap = pcmRing_.size();
+        const size_t used = pcmWrite_ - pcmRead_;
+        const size_t space = cap - used;
+        if (space == 0 || quit_.load()) return;
+        const size_t n = std::min(bytes - written, space);
+        const size_t pos = pcmWrite_ % cap;
+        const size_t tail = std::min(n, cap - pos);
+        std::memcpy(pcmRing_.data() + pos, converted.data() + written, tail);
+        if (n > tail)
+            std::memcpy(pcmRing_.data(), converted.data() + written + tail,
+                        n - tail);
+        pcmWrite_ += n;
+        written += n;
+        FeedAudio(false);
+        if (written < bytes) SDL_Delay(4);
+    }
+}
+
+// Decode one audio packet into the PCM ring.
+void SwitchMovieOverlay::DecodeAudioPacket(AVPacket * pkt)
+{
+    if (!audioCodec_) return;
+    int sent = avcodec_send_packet(audioCodec_, pkt);
+    if (sent == AVERROR(EAGAIN))
+    {
+        // codec queue full: pull one frame out and retry once
+        AVFrame * f = av_frame_alloc();
+        if (f)
+        {
+            if (avcodec_receive_frame(audioCodec_, f) >= 0)
+                ConsumeAudioFrame(f);
+            av_frame_free(&f);
+        }
+        sent = avcodec_send_packet(audioCodec_, pkt);
+    }
+    if (sent < 0) return;
+    for (;;)
+    {
+        AVFrame * f = av_frame_alloc();
+        const int got = avcodec_receive_frame(audioCodec_, f);
+        if (got < 0)
+        {
+            av_frame_free(&f);
+            break;
+        }
+        ConsumeAudioFrame(f);
+        av_frame_free(&f);
+    }
+}
+
+// Hand whole blocks of buffered PCM to the audio device.  flush=true also
+// sends a partial tail (marked end-of-stream) when the movie is over.
+void SwitchMovieOverlay::FeedAudio(bool flush)
+{
+    if (!audioOut_ || quit_.load()) return;
+    const size_t cap = pcmRing_.size();
+    const size_t available = pcmWrite_ - pcmRead_;
+    if (available == 0) return;
+    const size_t n = (available >= kAudioBlockBytes && !flush)
+        ? kAudioBlockBytes : available;
+    if (!flush && n < kAudioBlockBytes) return;
+    if (audioFreeBlocks_.load() <= 0) return;
+    if ((int)audioOut_->GetQueuedCount() >= kAudioBlocks - 1) return;
+
+    uint8_t * block = audioBlocks_[nextAudioBlock_];
+    for (size_t done = 0; done < n; )
+    {
+        const size_t pos = pcmRead_ % cap;
+        const size_t t = std::min(n - done, cap - pos);
+        std::memcpy(block + done, pcmRing_.data() + pos, t);
+        pcmRead_ += t;
+        done += t;
+    }
+    const bool last = flush && n == available;
+    audioFreeBlocks_.fetch_sub(1);
+    audioOut_->Enqueue(block, n, last);
+    nextAudioBlock_ = (nextAudioBlock_ + 1) % audioBlocks_.size();
+}
+
+void SwitchMovieOverlay::SetAudioVolume(long volume)
+{
+    if (volume < 0) volume = 0;
+    if (volume > 100000) volume = 100000;
+    audioVolume_ = volume;
+    if (audioOut_) audioOut_->SetVolume((tjs_int)volume);
+}
+
+void SwitchMovieOverlay::GetAudioVolume(long * volume)
+{
+    if (volume) *volume = audioVolume_;
 }
