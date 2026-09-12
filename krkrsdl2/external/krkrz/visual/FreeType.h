@@ -18,6 +18,7 @@
 #include "FreeTypeFace.h"
 #include "RectItf.h"
 #include "tjsHashSearch.h"
+#include "PagedCharacterCache.h"
 #include <memory>
 
 #ifdef _MSC_VER
@@ -81,7 +82,8 @@ typedef struct _GlyphMetricsCacheEntry {
 	int baseline;
 } GlyphMetricsCacheEntry;
 
-typedef tTJSHashTable<tjs_int, GlyphMetricsCacheEntry *> GlyphMetricsCacheForHeightHash;
+using GlyphMetricsPageTable = tTVPPagedCharacterCache<GlyphMetricsCacheEntry>;
+typedef tTJSHashTable<tjs_int, GlyphMetricsPageTable *> GlyphMetricsCacheForHeightHash;
 
 //---------------------------------------------------------------------------
 /**
@@ -108,7 +110,7 @@ class tFreeTypeFace
 
 	GlyphMetricsCacheForHeightHash GlyphMetricsCacheForHeight;
 
-	GlyphMetricsCacheEntry *GlyphMetricsCache = NULL;
+	GlyphMetricsPageTable *GlyphMetricsCache = NULL;
 	tjs_char FirstChar = 0;
 	tjs_char DefaultChar = 0;
 

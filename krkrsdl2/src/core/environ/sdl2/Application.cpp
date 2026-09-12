@@ -832,6 +832,16 @@ void tTVPApplication::Run() {
 #endif
 	const Uint64 prof_t0 = SDL_GetPerformanceCounter();
 #ifdef __SWITCH__
+	{
+		extern void TVPLogBitmapMemorySnapshot();
+		static Uint32 lastMemoryLog = 0;
+		const Uint32 now = SDL_GetTicks();
+		if (now - lastMemoryLog >= 10000)
+		{
+			lastMemoryLog = now;
+			TVPLogBitmapMemorySnapshot();
+		}
+	}
 	// A quit request from inside a game is not a process exit: tear the game
 	// session down and rebuild the built-in launcher, then keep running.
 	// A closed main window is only a *candidate* quit (the launcher hand-off
@@ -869,6 +879,17 @@ void tTVPApplication::Run() {
 		win->TickBeat();
 	}
 	const Uint64 prof_t3 = SDL_GetPerformanceCounter();
+#ifdef __SWITCH__
+	{
+		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
+		const double active = (prof_t3 - prof_t0) * 1000.0 / frequency;
+		if (active >= 100.0)
+			KRKRNS_LOG("[stall] active=%.1fms events=%.1f dispatch=%.1f draw=%.1f",
+				active, (prof_t1 - prof_t0) * 1000.0 / frequency,
+				(prof_t2 - prof_t1) * 1000.0 / frequency,
+				(prof_t3 - prof_t2) * 1000.0 / frequency);
+	}
+#endif
 	if (should_sync_savedata_ && syncfs_is_finished_)
 	{
 		should_sync_savedata_ = false;

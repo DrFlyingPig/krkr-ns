@@ -3,8 +3,10 @@
 
 #include "CharacterSet.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSSlowOperation.h"
 #include "StorageIntf.h"
 #include "UtilStreams.h"
+#include "SharedMemoryStream.h"
 #include "tjsArray.h"
 #include "tjsDictionary.h"
 
@@ -35,7 +37,7 @@ class tTVPPsbMedia final : public iTVPStorageMedia
 {
 	std::atomic<tjs_uint> RefCount;
 	std::mutex Mutex;
-	std::map<tjs_string, ByteVector> Resources;
+	std::map<tjs_string, KrkrSharedBytes> Resources;
 	std::set<tjs_string> Containers;
 
 	static tjs_string Normalized(const ttstr &value)
@@ -91,19 +93,16 @@ public:
 		if ((flags & TJS_BS_ACCESS_MASK) != TJS_BS_READ)
 			throw std::runtime_error("PSB media is read-only");
 
-		ByteVector copy;
+		KrkrSharedBytes bytes;
 		{
 			std::lock_guard<std::mutex> lock(Mutex);
 			auto found = Resources.find(Normalized(name));
 			if (found == Resources.end())
 				throw std::runtime_error("PSB resource was not found");
-			copy = found->second;
+			bytes = found->second;
 		}
 
-		auto *stream = new tTVPMemoryStream();
-		if (!copy.empty()) stream->WriteBuffer(copy.data(), static_cast<tjs_uint>(copy.size()));
-		stream->SetPosition(0);
-		return stream;
+		return new tTVPSharedMemoryStream(std::move(bytes));
 	}
 
 	void TJS_INTF_METHOD GetListAt(const ttstr &name, iTVPStorageLister *lister) override
@@ -122,7 +121,7 @@ public:
 
 	void TJS_INTF_METHOD GetLocallyAccessibleName(ttstr &name) override { name.Clear(); }
 
-	void Commit(const ttstr &container, const std::map<tjs_string, ByteVector> &resources)
+	void Commit(const ttstr &container, const std::map<tjs_string, KrkrSharedBytes> &resources)
 	{
 		ttstr normalizedContainer(container);
 		normalizedContainer.ToLowerCase();
@@ -130,6 +129,11 @@ public:
 
 		std::lock_guard<std::mutex> lock(Mutex);
 		Containers.insert(normalizedContainer.AsStdString());
+		// A reloaded container replaces its complete namespace. Existing streams
+		// keep the previous immutable bytes until their last reader closes.
+		auto old = Resources.lower_bound(prefix);
+		while (old != Resources.end() && old->first.compare(0, prefix.size(), prefix) == 0)
+			old = Resources.erase(old);
 		for (const auto &entry : resources)
 		{
 			ttstr normalizedName(entry.first);
@@ -199,10 +203,11 @@ struct ParsedValue
 
 class PsbReader
 {
-	ByteVector Data;
+	std::shared_ptr<const ByteVector> Storage;
+	const ByteVector &Data;
 	PsbHeader Header;
 	std::vector<tjs_string> Names;
-	std::vector<tjs_string> Strings;
+	std::vector<ttstr> Strings;
 	std::vector<tjs_uint32> ChunkOffsets;
 	std::vector<tjs_uint32> ChunkLengths;
 	std::vector<tjs_uint32> ExtraChunkOffsets;
@@ -358,10 +363,10 @@ class PsbReader
 		const PsbArray offsets = ReadArray(Header.OffsetStrings);
 		Strings.reserve(offsets.Values.size());
 		for (tjs_uint32 offset : offsets.Values)
-			Strings.push_back(ReadZeroString(static_cast<size_t>(Header.OffsetStringsData) + offset));
+			Strings.emplace_back(ReadZeroString(static_cast<size_t>(Header.OffsetStringsData) + offset));
 	}
 
-	ByteVector ResourceBytes(tjs_uint32 index, bool extra) const
+	KrkrSharedBytes ResourceBytes(tjs_uint32 index, bool extra) const
 	{
 		const auto &offsets = extra ? ExtraChunkOffsets : ChunkOffsets;
 		const auto &lengths = extra ? ExtraChunkLengths : ChunkLengths;
@@ -371,7 +376,7 @@ class PsbReader
 		const size_t begin = static_cast<size_t>(base) + offsets[index];
 		const size_t length = lengths[index];
 		Require(begin, length, "resource data");
-		return ByteVector(Data.begin() + begin, Data.begin() + begin + length);
+		return {Storage, Data.data() + begin, length};
 	}
 
 	ParsedValue ParseValue(size_t offset, unsigned depth)
@@ -413,7 +418,9 @@ class PsbReader
 		{
 			const tjs_uint32 index = static_cast<tjs_uint32>(ReadUInt(offset, tag - 0x14, "string index"));
 			if (index >= Strings.size()) throw std::runtime_error("Invalid PSB string index");
-			result.Value = ttstr(Strings[index]);
+			// PSB strings are interned by index. TJS strings use copy-on-write,
+			// so repeated references can share storage without aliasing edits.
+			result.Value = Strings[index];
 			return result;
 		}
 		if ((tag >= 0x19 && tag <= 0x1c) || (tag >= 0x22 && tag <= 0x25))
@@ -421,8 +428,10 @@ class PsbReader
 			result.IsExtraResource = tag >= 0x22;
 			const tjs_uint8 baseTag = result.IsExtraResource ? 0x21 : 0x18;
 			result.ResourceIndex = static_cast<tjs_uint32>(ReadUInt(offset, tag - baseTag, "resource index"));
-			const ByteVector bytes = ResourceBytes(result.ResourceIndex, result.IsExtraResource);
-			result.Value = tTJSVariant(bytes.empty() ? nullptr : bytes.data(), static_cast<tjs_uint>(bytes.size()));
+			const auto bytes = ResourceBytes(result.ResourceIndex, result.IsExtraResource);
+			// TJS owns its octet value; copy once directly from the PSB, without
+			// constructing another full-size temporary resource vector.
+			result.Value = tTJSVariant(bytes.size ? bytes.data : nullptr, static_cast<tjs_uint>(bytes.size));
 			result.IsResource = true;
 			return result;
 		}
@@ -480,6 +489,11 @@ class PsbReader
 			iTJSDispatch2 *dictionary = TJSCreateDictionaryObject();
 			try
 			{
+				// Match Dictionary.assign's capacity reservation. Large UI tables
+				// otherwise put thousands of keys into the default small hash.
+				if (nameIndexes.Values.size() >= 8)
+					static_cast<tTJSDictionaryObject *>(dictionary)->RebuildHash(
+						static_cast<tjs_int>(nameIndexes.Values.size()));
 				for (size_t i = 0; i < nameIndexes.Values.size(); ++i)
 				{
 					const tjs_uint32 nameIndex = nameIndexes.Values[i];
@@ -509,7 +523,8 @@ class PsbReader
 	}
 
 public:
-	explicit PsbReader(ByteVector data) : Data(std::move(data)) {}
+	explicit PsbReader(ByteVector data)
+		: Storage(std::make_shared<const ByteVector>(std::move(data))), Data(*Storage) {}
 
 	ParsedValue Parse()
 	{
@@ -530,9 +545,9 @@ public:
 		return ParseValue(Header.OffsetEntries, 0);
 	}
 
-	std::map<tjs_string, ByteVector> NamedResources() const
+	std::map<tjs_string, KrkrSharedBytes> NamedResources() const
 	{
-		std::map<tjs_string, ByteVector> result;
+		std::map<tjs_string, KrkrSharedBytes> result;
 		for (const auto &entry : ResourceNames)
 			result[entry.second] = ResourceBytes(entry.first, false);
 		for (const auto &entry : ExtraResourceNames)
@@ -554,7 +569,7 @@ static ByteVector ReadAll(tTJSBinaryStream *stream)
 	return data;
 }
 
-static ByteVector ExpandMdf(const ByteVector &input)
+static ByteVector ExpandMdf(ByteVector input)
 {
 	// MDF files in the wild use both "MDF\0" and "mdf\0".  The classic
 	// mdftool writes the lowercase signature, while newer implementations
@@ -608,6 +623,7 @@ void TJS_INTF_METHOD tTJSNI_PSBFile::Invalidate()
 
 bool tTJSNI_PSBFile::Load(const ttstr &storage)
 {
+	KrkrNSSlowOperation slow("psb-load", &storage);
 	try
 	{
 		const ttstr placed = TVPGetPlacedPath(storage);
@@ -617,11 +633,12 @@ bool tTJSNI_PSBFile::Load(const ttstr &storage)
 		ParsedValue root = reader.Parse();
 		if (root.Value.Type() != tvtObject) throw std::runtime_error("PSB root is not a dictionary");
 
-		iTJSDispatch2 *newRoot = root.Value.AsObject();
+		iTJSDispatch2 *newRoot = root.Value.AsObjectNoAddRef();
 		// The script may use an extension-less auto-path lookup.  psb:// URLs,
 		// however, are keyed by the placed container name (common.pimg, etc.).
 		const ttstr container = TVPExtractStorageName(placed);
 		PsbMedia->Commit(container, reader.NamedResources());
+		newRoot->AddRef();
 		Invalidate();
 		Root = newRoot;
 		KRKRNS_LOG("[psb] loaded %s as %s version=%u named-resources=%u",

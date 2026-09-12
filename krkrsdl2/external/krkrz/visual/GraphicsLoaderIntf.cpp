@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 
 #include "tjsCommHead.h"
+#include "KrkrNSSlowOperation.h"
 
 #include <stdlib.h>
 #include "GraphicsLoaderIntf.h"
@@ -1528,6 +1529,31 @@ void TVPClearGraphicCache()
 	TVPGraphicCache.Clear();
 	TVPGraphicCacheTotalBytes = 0;
 }
+
+// Caller holds gGraphicCacheLock. Replacing the same key (e.g. an asynchronous
+// decode finishing after a synchronous load) must not count its bytes twice.
+// Enforce the budget after insertion and never evict the UI for an oversized
+// image which cannot itself stay in the cache.
+static void TVPStoreGraphicCache(const tTVPGraphicsSearchData &key, tjs_uint32 hash,
+	tTVPGraphicImageData *data)
+{
+	const tjs_uint size = data->GetSize();
+	auto *old = TVPGraphicCache.FindWithHash(key, hash);
+	const tjs_uint oldSize = old ? old->GetObjectNoAddRef()->GetSize() : 0;
+	if (size > TVPGraphicCacheLimit)
+	{
+		if (old)
+		{
+			TVPGraphicCache.DeleteWithHash(key, hash);
+			TVPGraphicCacheTotalBytes -= oldSize;
+		}
+		return;
+	}
+	tTVPGraphicImageHolder holder(data);
+	TVPGraphicCache.AddWithHash(key, hash, holder);
+	TVPGraphicCacheTotalBytes = TVPGraphicCacheTotalBytes - oldSize + size;
+	TVPCheckGraphicCacheLimit();
+}
 static tTVPAtExit
 	TVPUninitMessageLoad(TVP_ATEXIT_PRI_RELEASE, TVPClearGraphicCache);
 //---------------------------------------------------------------------------
@@ -1574,14 +1600,7 @@ void TVPPushGraphicCache( const ttstr& nname, tTVPBaseBitmap* bmp, std::vector<t
 			data->MetaInfo = meta;
 			meta = NULL;
 
-			// check size limit
-			TVPCheckGraphicCacheLimit();
-
-			// push into hash table
-			tjs_uint datasize = data->GetSize();
-			TVPGraphicCacheTotalBytes += datasize;
-			tTVPGraphicImageHolder holder(data);
-			TVPGraphicCache.AddWithHash(searchdata, hash, holder);
+			TVPStoreGraphicCache(searchdata, hash, data);
 		} catch(...) {
 			if(meta) delete meta;
 			if(data) data->Release();
@@ -1900,6 +1919,30 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	tjs_uint32 hash;
 	tTVPGraphicsSearchData searchdata;
 
+	if(TVPGraphicCacheEnabled)
+	{
+		std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+		searchdata.Name = nname;
+		searchdata.KeyIdx = keyidx;
+		searchdata.Mode = mode;
+		searchdata.DesW = desw;
+		searchdata.DesH = desh;
+
+		hash = tTVPGraphicCache::MakeHash(searchdata);
+
+		tTVPGraphicImageHolder * ptr =
+			TVPGraphicCache.FindAndTouchWithHash(searchdata, hash);
+		if(ptr)
+		{
+			// found in cache
+			ptr->GetObjectNoAddRef()->AssignToBitmap(dest);
+			if(provincename) *provincename = ptr->GetObjectNoAddRef()->ProvinceName;
+			if(metainfo)
+				*metainfo = TVPMetaInfoPairsToDictionary(ptr->GetObjectNoAddRef()->MetaInfo);
+			return;
+		}
+	}
+
 #ifdef __SWITCH__
 	// KRKR-ns diagnostic: the resolved path is the ONE fact that says which game
 	// an image belongs to.  Logged for the first loads of each session only
@@ -1929,33 +1972,10 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	}
 #endif
 
-	if(TVPGraphicCacheEnabled)
-	{
-		std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
-		searchdata.Name = nname;
-		searchdata.KeyIdx = keyidx;
-		searchdata.Mode = mode;
-		searchdata.DesW = desw;
-		searchdata.DesH = desh;
-
-		hash = tTVPGraphicCache::MakeHash(searchdata);
-
-		tTVPGraphicImageHolder * ptr =
-			TVPGraphicCache.FindAndTouchWithHash(searchdata, hash);
-		if(ptr)
-		{
-			// found in cache
-			ptr->GetObjectNoAddRef()->AssignToBitmap(dest);
-			if(provincename) *provincename = ptr->GetObjectNoAddRef()->ProvinceName;
-			if(metainfo)
-				*metainfo = TVPMetaInfoPairsToDictionary(ptr->GetObjectNoAddRef()->MetaInfo);
-			return;
-		}
-	}
-
 	// not found
 
 	// load into dest
+	KrkrNSSlowOperation slow("image-decode", &nname);
 	tTVPGraphicImageData * data = NULL;
 
 	ttstr pn;
@@ -1976,17 +1996,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 			data->MetaInfo = mi; // now mi is managed under tTVPGraphicImageData
 			mi = NULL;
 
-			// check size limit
-			TVPCheckGraphicCacheLimit();
-
-			// push into hash table
-			tjs_uint datasize = data->GetSize();
-//			if(datasize < TVPGraphicCacheLimit)
-//			{
-				TVPGraphicCacheTotalBytes += datasize;
-				tTVPGraphicImageHolder holder(data);
-				TVPGraphicCache.AddWithHash(searchdata, hash, holder);
-//			}
+			TVPStoreGraphicCache(searchdata, hash, data);
 		}
 	}
 	catch(...)

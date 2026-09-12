@@ -3,6 +3,8 @@
 #include "SevenZipArchive.h"
 
 #include "KrkrNSLog.h"
+#include "KrkrNSSlowOperation.h"
+#include "SharedMemoryStream.h"
 #include "MsgIntf.h"
 #include "StorageIntf.h"
 
@@ -10,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -40,65 +43,26 @@ bool IsSevenZipStream(tTJSBinaryStream *stream)
 		std::memcmp(signature, kSevenZipSignature, sizeof(signature)) == 0;
 }
 
-// tTVPMemoryStream treats a supplied buffer as a non-owning reference.  The
-// LZMA SDK returns an owning malloc allocation, so keep that ownership explicit
-// and expose only the requested file's slice from a possibly solid block.
-class tTVPSevenZipMemoryStream final : public tTJSBinaryStream
+// One most-recent solid block across all open archives, capped at 16 MiB.
+// Streams retain their own shared reference when this slot is replaced. The
+// cache dies with the last archive, including during an engine restart.
+struct SevenZipBlockCache
 {
-	Byte *Allocation;
-	const Byte *Data;
-	size_t Size;
-	size_t Position;
-
-public:
-	tTVPSevenZipMemoryStream(Byte *allocation, const Byte *data, size_t size)
-		: Allocation(allocation), Data(data), Size(size), Position(0) {}
-
-	~tTVPSevenZipMemoryStream() override
-	{
-		ISzAlloc_Free(&SevenZipAllocator, Allocation);
-	}
-
-	tjs_uint64 TJS_INTF_METHOD Seek(tjs_int64 offset, tjs_int whence) override
-	{
-		tjs_int64 base = 0;
-		switch (whence)
-		{
-		case TJS_BS_SEEK_SET: base = 0; break;
-		case TJS_BS_SEEK_CUR:
-			if (Position > static_cast<size_t>(std::numeric_limits<tjs_int64>::max())) return Position;
-			base = static_cast<tjs_int64>(Position);
-			break;
-		case TJS_BS_SEEK_END:
-			if (Size > static_cast<size_t>(std::numeric_limits<tjs_int64>::max())) return Position;
-			base = static_cast<tjs_int64>(Size);
-			break;
-		default:
-			return Position;
-		}
-		if ((offset > 0 && base > std::numeric_limits<tjs_int64>::max() - offset) ||
-			(offset < 0 && base < std::numeric_limits<tjs_int64>::min() - offset))
-			return Position;
-		const tjs_int64 next = base + offset;
-		if (next < 0 || static_cast<tjs_uint64>(next) > static_cast<tjs_uint64>(Size))
-			return Position;
-		Position = static_cast<size_t>(next);
-		return Position;
-	}
-
-	tjs_uint TJS_INTF_METHOD Read(void *buffer, tjs_uint read_size) override
-	{
-		const size_t available = Size - Position;
-		const size_t amount = std::min<size_t>(available, read_size);
-		if (amount != 0)
-			std::memcpy(buffer, Data + Position, amount);
-		Position += amount;
-		return static_cast<tjs_uint>(amount);
-	}
-
-	tjs_uint TJS_INTF_METHOD Write(const void *, tjs_uint) override { return 0; }
-	tjs_uint64 TJS_INTF_METHOD GetSize() override { return Size; }
+	std::mutex Mutex;
+	const void *Archive = nullptr;
+	UInt32 Folder = 0xffffffffU;
+	KrkrSharedBytes Bytes;
 };
+
+static std::shared_ptr<SevenZipBlockCache> GetSevenZipBlockCache()
+{
+	static std::mutex mutex;
+	static std::weak_ptr<SevenZipBlockCache> weak;
+	std::lock_guard<std::mutex> lock(mutex);
+	auto cache = weak.lock();
+	if (!cache) { cache = std::make_shared<SevenZipBlockCache>(); weak = cache; }
+	return cache;
+}
 
 class tTVPSevenZipArchive final : public tTVPArchive
 {
@@ -113,6 +77,7 @@ class tTVPSevenZipArchive final : public tTVPArchive
 	CLookToRead2 LookStream;
 	Byte ReadCache[kSevenZipReadCacheSize];
 	std::vector<std::pair<ttstr, tjs_uint>> Files;
+	std::shared_ptr<SevenZipBlockCache> Cache = GetSevenZipBlockCache();
 
 	SRes Read(void *buffer, size_t *size)
 	{
@@ -170,6 +135,14 @@ public:
 
 	~tTVPSevenZipArchive() override
 	{
+		{
+			std::lock_guard<std::mutex> lock(Cache->Mutex);
+			if (Cache->Archive == this)
+			{
+				Cache->Bytes = {};
+				Cache->Archive = nullptr;
+			}
+		}
 		SzArEx_Free(&Database, &SevenZipAllocator);
 		delete Stream;
 	}
@@ -213,18 +186,40 @@ public:
 		const UInt32 file_index = static_cast<UInt32>(Files[index].second);
 		const UInt64 file_size = SzArEx_GetFileSize(&Database, file_index);
 		if (file_size > static_cast<UInt64>(std::numeric_limits<size_t>::max())) return nullptr;
+		std::lock_guard<std::mutex> lock(Cache->Mutex);
+		const UInt32 folder = Database.FileToFolder[file_index];
+		if (folder != 0xffffffffU && Cache->Archive == this && Cache->Folder == folder)
+		{
+			// Same bounds and per-file CRC checks as SzArEx_Extract's cached
+			// path. Do not pass shared immutable storage to its realloc/free path.
+			const UInt64 offset64 = Database.UnpackPositions[file_index] -
+				Database.UnpackPositions[Database.FolderToFile[folder]];
+			if (offset64 > Cache->Bytes.size || file_size > Cache->Bytes.size - offset64)
+				return nullptr;
+			auto bytes = Cache->Bytes.Slice(static_cast<size_t>(offset64), static_cast<size_t>(file_size));
+			if (SzBitWithVals_Check(&Database.CRCs, file_index) &&
+				CrcCalc(bytes.data, bytes.size) != Database.CRCs.Vals[file_index]) return nullptr;
+			return new tTVPSharedMemoryStream(std::move(bytes));
+		}
+		KrkrNSSlowOperation slow("7z-decode");
 
 		UInt32 block_index = 0xffffffffU;
 		Byte *output = nullptr;
 		size_t output_size = 0;
 		size_t offset = 0;
 		size_t processed = 0;
-		KRKRNS_LOG("[7z] extract begin index=%u size=%llu",
-			static_cast<unsigned>(file_index),
-			static_cast<unsigned long long>(file_size));
-		const SRes result = SzArEx_Extract(
-			&Database, &LookStream.vt, file_index, &block_index, &output,
-			&output_size, &offset, &processed, &SevenZipAllocator, &SevenZipAllocator);
+		SRes result;
+		try
+		{
+			result = SzArEx_Extract(
+				&Database, &LookStream.vt, file_index, &block_index, &output,
+				&output_size, &offset, &processed, &SevenZipAllocator, &SevenZipAllocator);
+		}
+		catch (...)
+		{
+			ISzAlloc_Free(&SevenZipAllocator, output);
+			throw;
+		}
 		if (result != SZ_OK || processed != static_cast<size_t>(file_size) ||
 			offset > output_size || processed > output_size - offset)
 		{
@@ -235,10 +230,18 @@ public:
 			ISzAlloc_Free(&SevenZipAllocator, output);
 			return nullptr;
 		}
-		KRKRNS_LOG("[7z] extract done index=%u processed=%llu",
-			static_cast<unsigned>(file_index),
-			static_cast<unsigned long long>(processed));
-		return new tTVPSevenZipMemoryStream(output, output ? output + offset : nullptr, processed);
+		KrkrSharedBytes bytes{
+			std::shared_ptr<const void>(output, [](const void *p) {
+				ISzAlloc_Free(&SevenZipAllocator, const_cast<void *>(p));
+			}), output, output_size};
+		auto stream = std::make_unique<tTVPSharedMemoryStream>(bytes.Slice(offset, processed));
+		if (folder != 0xffffffffU && output_size <= 16 * 1024 * 1024)
+		{
+			Cache->Bytes = std::move(bytes);
+			Cache->Archive = this;
+			Cache->Folder = folder;
+		}
+		return stream.release();
 	}
 };
 }

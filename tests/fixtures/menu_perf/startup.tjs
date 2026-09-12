@@ -1,0 +1,165 @@
+// Standalone engine regression/benchmark; writes only its own perf-test folder.
+var report = new Array();
+var checks = 0;
+function note(text) { report.add(text); Debug.message("[menu-test] " + text); }
+function check(value, label) {
+    if (!value) throw new Exception("MENU TEST FAIL: " + label);
+    checks++;
+}
+var win = new Window();
+win.setInnerSize(960, 540);
+win.caption = "KRKR menu performance regression";
+var layer = new Layer(win, null);
+layer.setSize(960, 540);
+layer.type = ltOpaque;
+layer.fillRect(0, 0, 960, 540, 0x18232f);
+layer.visible = true;
+win.visible = true;
+var fonts = Font.addFont("notosanssc.ttf");
+check(fonts.count > 0, "test font loaded");
+layer.font.face = fonts[0];
+var text = "保存 Load 菜单 テスト ABC 123";
+var widths = new Array();
+var began = System.getTickCount();
+for (var size = 12; size <= 72; size += 2) {
+    layer.font.height = -size;
+    widths.add(layer.font.getTextWidth(text));
+}
+var cold = System.getTickCount() - began;
+began = System.getTickCount();
+for (var size = 12; size <= 72; size += 2) {
+    layer.font.height = -size;
+    check(layer.font.getTextWidth(text) == widths[(size - 12) / 2], "warm font metrics identical");
+}
+note("font sizes=31 cold_ms=" + cold + " warm_ms=" + (System.getTickCount() - began));
+note("font widths=" + widths.join(","));
+for (var i = 0; i < 4; i++) {
+    layer.font.height = -(18 + i * 6);
+    layer.drawText(20, 20 + i * 55, text, 0xffffff);
+}
+
+var data = new Dictionary();
+for (var i = 0; i < 2000; i++) data["key" + i] = "保存\\\n\"value=" + i;
+data.nested = [1, -2, 3.5, "", "日本語", "a\0b"];
+var modes = ["", "c1", "z", "z0", "z9", "b"];
+for (var i = 0; i < modes.count; i++) {
+    var path = "sdmc:/switch/KRKR-ns/perf-test/save-" + i + ".ksd";
+    began = System.getTickCount();
+    (Dictionary.saveStruct incontextof data)(path, modes[i]);
+    note("save mode=" + modes[i] + " ms=" + (System.getTickCount() - began));
+    var restored = Dictionary.loadStruct(path);
+    for (var k = 0; k < 2000; k++) check(restored["key" + k] == data["key" + k], "save value roundtrip");
+    for (var k = 0; k < data.nested.count; k++) check(restored.nested[k] === data.nested[k], "nested save roundtrip");
+}
+
+Plugins.link("psbfile.dll");
+var expectedStrings = ["", "共用文字 café", ""];
+for (var i = 0; i < 80; i++) expectedStrings[2] += "value";
+var textPsb = new PSBFile();
+began = System.getTickCount();
+check(textPsb.load("text.psb"), "large PSB dictionary loads");
+note("psb dictionary entries=10000 ms=" + (System.getTickCount() - began));
+var textRoot = textPsb.root;
+for (var i = 0; i < 10000; i++) check(textRoot["item" + i] === expectedStrings[i % 3], "large dictionary property content");
+textRoot.item1 += " changed";
+check(textRoot.item4 === expectedStrings[1], "shared string edits are independent");
+check(textPsb.load("text.psb"), "large PSB dictionary reloads");
+check(textPsb.root.item1 === expectedStrings[1], "reload is independent of previous root");
+invalidate textPsb;
+check(textRoot.item1 === expectedStrings[1] + " changed", "retained root survives reload and invalidation");
+invalidate textRoot;
+System.graphicCacheLimit = 0; // Exercise the media stream on every open.
+var psb = new PSBFile();
+began = System.getTickCount();
+for (var i = 0; i < 12; i++) check(psb.load("fixture.pimg"), "PSB loads");
+note("psb loads=12 ms=" + (System.getTickCount() - began));
+invalidate psb;
+var imageLayer = new Layer(win, layer);
+began = System.getTickCount();
+for (var i = 0; i < 32; i++) {
+    imageLayer.loadImages("psb://fixture.pimg/" + (i % 16) + ".bmp");
+    check((imageLayer.getMainPixel(0, 0) & 0xffffff) == 0x30a060 + i % 16, "resource bytes match after PSB invalidation");
+}
+note("psb image opens=32 ms=" + (System.getTickCount() - began));
+imageLayer.setPos(650, 20);
+imageLayer.visible = true;
+var mdf = new PSBFile();
+check(mdf.load("wrapped.pimg"), "MDF wrapped PSB loads");
+invalidate mdf;
+imageLayer.loadImages("psb://wrapped.pimg/0.bmp");
+check((imageLayer.getMainPixel(0, 0) & 0xffffff) == 0x30a060, "MDF media matches raw PSB");
+
+began = System.getTickCount();
+for (var i = 0; i < 32; i++) {
+    var lines = new Array();
+    lines.load("solid.xp3>part" + (i < 10 ? "0" : "") + i + ".txt");
+    check(lines[0] == "part=" + i, "solid archive member content");
+}
+note("solid archive opens=32 ms=" + (System.getTickCount() - began));
+
+Plugins.link("textrender.dll");
+var layout = new TextRenderBase();
+for (var size = 18; size <= 48; size += 6) {
+    layout.setDefault(%["face" => fonts[0], "fontSize" => size, "align" => 0, "valign" => 0]);
+    layout.setRenderSize(600, 100);
+    var rendered = layout.render("选项居中 ABC");
+    var a = layout.getCharacters(0, 0);
+    check(a.count > 0 && a[0].y > 0, "centered option has a vertical inset");
+    layout.setRenderSize(600, 140);
+    rendered = layout.render("选项居中 ABC");
+    var b = layout.getCharacters(0, 0);
+    check(b[0].y - a[0].y == 20, "growing the option moves centered text by half the height change");
+    check(b[0].x == a[0].x && b[0].cw == a[0].cw, "vertical alignment preserves horizontal metrics");
+    layout.setDefault(%["valign" => -1]);
+    layout.setRenderSize(600, 140);
+    rendered = layout.render("选项居中 ABC");
+    check(layout.getCharacters(0, 0)[0].y == 0, "top alignment remains unchanged");
+    layout.setDefault(%["valign" => 1]);
+    layout.setRenderSize(600, 140);
+    rendered = layout.render("选项居中 ABC");
+    check(layout.getCharacters(0, 0)[0].y == 140 - size, "bottom alignment remains unchanged");
+}
+invalidate layout;
+note("text alignment sizes=6 passed");
+
+// Destroying a temporary layout must not invalidate another layout's font or
+// the shared rasterizer used by ordinary Layer text.
+var survivor = new TextRenderBase();
+survivor.setDefault(%["face" => fonts[0], "fontSize" => 24]);
+survivor.setRenderSize(600, 140);
+var rendered = survivor.render("字体生命周期 ABC");
+var originalWidth = survivor.getCharacters(0, 0)[0].cw;
+for (var generation = 0; generation < 16; generation++) {
+    var temporary = new TextRenderBase();
+    temporary.setDefault(%["face" => fonts[0], "fontSize" => 18 + generation]);
+    temporary.setRenderSize(600, 140);
+    rendered = temporary.render("临时选项");
+    invalidate temporary;
+    rendered = survivor.render("字体生命周期 ABC");
+    check(survivor.getCharacters(0, 0)[0].cw == originalWidth, "surviving layout retains its font after another is destroyed");
+    layer.font.height = -24 - generation;
+    check(layer.font.getTextWidth("常规图层文字") > 0, "shared layer font survives temporary layout destruction");
+    layer.drawText(20, 400, "常规图层文字", 0xffffff);
+}
+invalidate survivor;
+note("font lifetime generations=16 passed");
+
+// Exercise the same large copy-on-write buffers used during story progression.
+var source = new Layer(win, layer);
+source.setImageSize(1920, 1440);
+source.fillRect(0, 0, 1920, 1440, 0x345678);
+for (var frame = 0; frame < 300; frame++) {
+    var copy = new Layer(win, layer);
+    copy.assignImages(source);
+    copy.fillRect(0, 0, 1, 1, frame);
+    check((source.getMainPixel(0, 0) & 0xffffff) == 0x345678, "recycled copy preserves shared source pixels");
+    check((copy.getMainPixel(0, 0) & 0xffffff) == frame, "recycled destination receives this frame's pixels");
+    invalidate copy;
+}
+invalidate source;
+note("large bitmap copy-on-write cycles=300 passed");
+note("COMPLETE checks=" + checks);
+layer.font.height = -26;
+layer.drawText(20, 300, "PASS: font / save / PSB / solid archive", 0x55ff88);
+layer.drawText(20, 350, "Checks: " + checks, 0xffffff);
+report.save("sdmc:/switch/KRKR-ns/perf-test/results.txt");

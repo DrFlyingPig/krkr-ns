@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #define _USE_MATH_DEFINES
 #include "tjsCommHead.h"
+#include "KrkrNSSlowOperation.h"
 
 #include <math.h>
 #include <cstdlib>
@@ -2452,6 +2453,7 @@ void tTJSNI_BaseLayer::IndependProvinceImage(bool copy)
 //---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::SaveLayerImage(const ttstr &name, const ttstr &type)
 {
+	KrkrNSSlowOperation slow("image-save", &name);
 	if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
 	
 	iTJSDispatch2 *dic = TJSCreateDictionaryObject();

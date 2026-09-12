@@ -399,6 +399,14 @@ public:
 			CurrentY = std::max<tjs_int>(0, BoxHeight - State.FontSize);
 			RenderTop = RenderBottom = BoxHeight;
 		}
+		else if (State.VAlign == 0)
+		{
+			// TextRender's 0 means centered. Treating it as top-aligned puts
+			// choice captions above their frames. Match the upstream single-line
+			// layout using the ascent of this instance's selected font.
+			CurrentY = (BoxHeight - Ascent()) / 2;
+			RenderTop = RenderBottom = 0;
+		}
 		else
 		{
 			CurrentY = 0;

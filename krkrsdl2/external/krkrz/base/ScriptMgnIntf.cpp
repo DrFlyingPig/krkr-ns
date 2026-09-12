@@ -22,6 +22,7 @@
 
 #include "KrkrNSPaths.h"
 #include "tjsCommHead.h"
+#include "KrkrNSSlowOperation.h"
 #include "KrkrNSLog.h"
 #include <string>
 #include <vector>
@@ -552,6 +553,7 @@ void TVPExecuteStorage(const ttstr &name, tTJSVariant *result, bool isexpression
 void TVPExecuteStorage(const ttstr &name, iTJSDispatch2 *context, tTJSVariant *result, bool isexpression,
 	const tjs_char * modestr)
 {
+	KrkrNSSlowOperation slow("script-load", &name);
 	// execute storage which contains script
 	if(!TVPScriptEngine) TVPThrowInternalError;
 	{ // for bytecode

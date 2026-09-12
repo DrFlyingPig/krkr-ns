@@ -13,7 +13,6 @@
 #include "TVPSysFont.h"
 #endif
 
-extern void TVPUninitializeFreeFont();
 extern FontSystem* TVPFontSystem;
 
 FreeTypeFontRasterizer::FreeTypeFontRasterizer() : RefCount(0), Face(NULL), LastBitmap(NULL) {
@@ -22,7 +21,8 @@ FreeTypeFontRasterizer::FreeTypeFontRasterizer() : RefCount(0), Face(NULL), Last
 FreeTypeFontRasterizer::~FreeTypeFontRasterizer() {
 	if( Face ) delete Face;
 	Face = NULL;
-	TVPUninitializeFreeFont();
+	// Other rasterizers (including TextRender instances) still own FT_Faces.
+	// The shared library is released by the engine's final cleanup hook.
 }
 void FreeTypeFontRasterizer::AddRef() {
 	RefCount++;

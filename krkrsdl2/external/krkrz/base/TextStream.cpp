@@ -24,6 +24,8 @@
 #include "UtilStreams.h"
 #include "tjsError.h"
 #include "CharacterSet.h"
+#include "BufferedWrite.h"
+#include "KrkrNSSlowOperation.h"
 
 /*
 	Text stream is used by TJS's Array.save, Dictionary.saveStruct etc.
@@ -373,6 +375,8 @@ public:
 //---------------------------------------------------------------------------
 class tTVPTextWriteStream : public iTJSTextWriteStream
 {
+	const ttstr StorageName;
+	KrkrNSSlowOperation SaveTimer;
         static const tjs_uint COMPRESSION_BUFFER_SIZE = 1024 * 1024;
 
 	tTJSBinaryStream * Stream;
@@ -387,9 +391,11 @@ class tTVPTextWriteStream : public iTJSTextWriteStream
 	tjs_uint CompressionSizePosition;
 	tjs_nchar *CompressionBuffer;
 	bool CompressionFailed;
+	KrkrBufferedWrite<> PendingText;
 
 public:
 	tTVPTextWriteStream(const ttstr & name, const ttstr &modestr)
+		: StorageName(name), SaveTimer("text-save", &StorageName)
 	{
 		// modestr supports following modes:
 		// dN: deflate(compress) at mode N ( currently not implemented )
@@ -493,6 +499,17 @@ public:
 
 	~tTVPTextWriteStream() noexcept(false)
 	{
+		try
+		{
+			PendingText.Flush([this](const void *p, size_t n) { WriteRawDataUnbuffered(p, n); });
+		}
+		catch (...)
+		{
+			if (ZStream) { deflateEnd(ZStream); delete ZStream; }
+			delete[] CompressionBuffer;
+			delete Stream;
+			throw;
+		}
 		if(CryptMode == 2)
 		{
 
@@ -559,6 +576,16 @@ public:
 	{
 		tjs_uint16 *buf;
 		tjs_int len = targ.GetLen();
+#if TJS_HOST_IS_LITTLE_ENDIAN
+		// TJS strings are already UTF-16LE on Switch. Structured saves emit
+		// many tiny strings; avoid allocating/copying each one before zlib.
+		static_assert(sizeof(tjs_char) == sizeof(tjs_uint16), "Expected UTF-16");
+		if (CryptMode != 1)
+		{
+			WriteRawData(targ.c_str(), static_cast<size_t>(len) * sizeof(tjs_uint16));
+			return;
+		}
+#endif
 		buf = new tjs_uint16 [len + 1];
 		try
 		{
@@ -637,7 +664,13 @@ public:
 		delete [] buf;
 	}
 
-	void WriteRawData(void *ptr, size_t size)
+	void WriteRawData(const void *ptr, size_t size)
+	{
+		PendingText.Append(ptr, size,
+			[this](const void *p, size_t n) { WriteRawDataUnbuffered(p, n); });
+	}
+
+	void WriteRawDataUnbuffered(const void *ptr, size_t size)
 	{
 		if(CryptMode == 2)
 		{
