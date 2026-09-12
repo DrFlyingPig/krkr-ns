@@ -81,13 +81,18 @@ void krkrsdl2_logf_impl(const char *fmt, ...)
 {
 	if (krkrsdl2_log_shutdown) return;
 	static int logfd = -1;
+	static char logname[96];
 	if (logfd < 0)
 	{
-		// Rotate, don't truncate: the previous run's log (krkrsdl2_debug.log.prev)
-		// survives a crash that happens AFTER the next launch, so a post-crash
-		// relaunch can no longer destroy the evidence of the crash itself.
-		rename("sdmc:/krkrsdl2_debug.log", "sdmc:/krkrsdl2_debug.log.prev");
-		logfd = open("sdmc:/krkrsdl2_debug.log", O_WRONLY | O_CREAT | O_TRUNC);
+		// Unique file per boot.  The Switch's MTP server serves stale metadata
+		// for files whose content changed while the session was mounted (a
+		// post-crash pull used to return only the boot-time head of the log),
+		// but BRAND-NEW directory entries show up immediately.  A timestamped
+		// name therefore makes every session's full log - including a crash -
+		// pullable over MTP.  time() comes from the console RTC.
+		const long long ts = (long long)time(nullptr);
+		snprintf(logname, sizeof(logname), "sdmc:/krkrsdl2_debug_%lld.log", ts);
+		logfd = open(logname, O_WRONLY | O_CREAT | O_TRUNC);
 	}
 	if (logfd < 0) return;
 	char buf[4096];
