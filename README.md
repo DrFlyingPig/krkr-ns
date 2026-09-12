@@ -24,7 +24,7 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 
 ## ⬇️ 获取与使用
 
-1. 从 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases/latest) 下载 `vX.Y.Z.nro`，改名为 `krkrsdl2.nro` 放到 SD 卡的 `sdmc:/switch/KRKR-ns/` 目录下。
+1. 从 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases/latest) 下载 `krkrsdl2.nro`，放到 SD 卡的 `sdmc:/switch/KRKR-ns/` 目录下。
 2. **真机**：进入 HBMenu 加载（相册方式需按住 `R` 进入 title-override）；**模拟器**：直接加载该 nro（Ryujinx 系 fork 均可）。
 3. 游戏放到 `sdmc:/switch/KRKR-ns/Game/<游戏目录>/`，启动器会列出其中的 `.xp3`，选择即可开始；同目录的其余 xp3 会自动挂载为资源包。
 4. 存档按游戏隔离存放于 `sdmc:/switch/KRKR-ns/saves/<游戏目录>/`。
