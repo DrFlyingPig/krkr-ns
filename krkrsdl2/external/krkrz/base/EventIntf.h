@@ -239,6 +239,10 @@ public:
 TJS_EXP_FUNC_DEF(void, TVPAddContinuousEventHook, (tTVPContinuousEventCallbackIntf *cb));
 TJS_EXP_FUNC_DEF(void, TVPRemoveContinuousEventHook, (tTVPContinuousEventCallbackIntf *cb));
 
+/* KRKR-ns: drop all script-registered continuous handlers (process-global
+ * state that must not survive an in-process engine rebuild). */
+extern void TVPClearContinuousHandlers();
+
 extern void TVPBeginContinuousEvent();
 	// must be implemented in each platforms
 	// this must begin calling TVPDeliverContinuousEvent

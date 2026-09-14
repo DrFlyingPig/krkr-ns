@@ -71,6 +71,9 @@
 #include "ThreadIntf.h"
 #include "GLCompositeBridge.h"
 #include "GraphicsLoaderIntf.h"
+#ifdef __SWITCH__
+#include "VideoOvlImpl.h" // overlay-mode movie present into the compose surface
+#endif
 
 #ifdef __SWITCH__
 #include <fcntl.h>
@@ -181,6 +184,19 @@ static struct {
 	double surf_copy_ms;    // compose -> SDL surface memcpy
 	double upload_ms;       // SDL_UpdateTexture
 	double present_ms;      // RenderClear + RenderCopy + RenderPresent
+	double emote_prog_ms;   // EmotePlayer::progress
+	double emote_draw_ms;   // EmotePlayer::draw (render + readback + layer update)
+	double emote_rb_ms;     // CopyRenderTargetToLayer inside draw
+	double emote_lock_ms;   // GPU->CPU readback inside it
+	double emote_cvt_ms;    // RGBA->BGRA convert + compare inside it
+	double notify_ms;       // NotifyBitmapCompleted (per-layer presentation)
+	unsigned long long emote_meshes;  // DrawMesh calls
+	unsigned long long notify_calls;
+	unsigned long long blend_hist[8]; // layer blend types, indexed by type & 7
+	unsigned long long blt_n[2];      // [0]=layer dest, [1]=compose dest
+	unsigned long long blt_px[2];
+	double blt_ms[2];
+	unsigned long long blt_method[16];
 	unsigned long long upload_bytes;
 	unsigned long long layer_count;   // NotifyBitmapCompleted calls
 	unsigned long long layer_px;      // sum of layer cliprect pixels
@@ -236,6 +252,52 @@ void krkrsdl2_prof_accum_present(double ms)
 	g_krkrns_prof.present_ms += ms;
 }
 
+void krkrsdl2_prof_emote_progress(double ms)
+{
+	g_krkrns_prof.emote_prog_ms += ms;
+}
+
+void krkrsdl2_prof_emote_draw(double ms)
+{
+	g_krkrns_prof.emote_draw_ms += ms;
+}
+
+void krkrsdl2_prof_emote_readback(double ms)
+{
+	g_krkrns_prof.emote_rb_ms += ms;
+}
+
+void krkrsdl2_prof_emote_lock(double ms)
+{
+	g_krkrns_prof.emote_lock_ms += ms;
+}
+
+void krkrsdl2_prof_emote_convert(double ms)
+{
+	g_krkrns_prof.emote_cvt_ms += ms;
+}
+
+void krkrsdl2_prof_emote_mesh()
+{
+	g_krkrns_prof.emote_meshes++;
+}
+
+void krkrsdl2_prof_notify(double ms, int blend_type)
+{
+	g_krkrns_prof.notify_ms += ms;
+	g_krkrns_prof.notify_calls++;
+	g_krkrns_prof.blend_hist[blend_type & 7]++;
+}
+
+void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px)
+{
+	const int d = compose_dest ? 1 : 0;
+	g_krkrns_prof.blt_n[d]++;
+	g_krkrns_prof.blt_px[d] += px;
+	g_krkrns_prof.blt_ms[d] += ms;
+	g_krkrns_prof.blt_method[method & 15]++;
+}
+
 /* window_ms is the wall time covering the whole reporting window (all
  * update-frames since the previous emit), not a single frame — the caller
  * measures it from a timestamp it resets only when it emits. Dividing by the
@@ -260,6 +322,40 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 		(double)g_krkrns_prof.layer_count / (double)n,
 		(double)g_krkrns_prof.layer_px / (1024.0 * 1024.0 * (double)n),
 		(double)(poolB - prevPoolB) / n, (double)(poolBig - prevPoolBig) / n);
+	// Frame attribution for the "disp" segment: E-mote progress/draw (readback
+	// included) and the per-layer presentation cost.  Blend histogram: how many
+	// layers each blend type contributed, in type order 0,1,2,3 (copy/alpha/
+	// additive/...) — the GPU-composite path only implements a subset, so this
+	// says whether it can take a given title's whole frame.
+	KRKRNS_LOG("[prof] frame: emote prog=%.2f draw=%.2f rb=%.2f lock=%.2f cvt=%.2f meshes=%.0f | notify=%.2f calls=%.1f | blendTypes c0=%.0f c1=%.0f c2=%.0f c3=%.0f c4=%.0f c5=%.0f c6=%.0f c7=%.0f",
+		g_krkrns_prof.emote_prog_ms / n, g_krkrns_prof.emote_draw_ms / n,
+		g_krkrns_prof.emote_rb_ms / n, g_krkrns_prof.emote_lock_ms / n,
+		g_krkrns_prof.emote_cvt_ms / n, (double)g_krkrns_prof.emote_meshes / (double)n,
+		g_krkrns_prof.notify_ms / n, (double)g_krkrns_prof.notify_calls / (double)n,
+		(double)g_krkrns_prof.blend_hist[0] / (double)n,
+		(double)g_krkrns_prof.blend_hist[1] / (double)n,
+		(double)g_krkrns_prof.blend_hist[2] / (double)n,
+		(double)g_krkrns_prof.blend_hist[3] / (double)n,
+		(double)g_krkrns_prof.blend_hist[4] / (double)n,
+		(double)g_krkrns_prof.blend_hist[5] / (double)n,
+		(double)g_krkrns_prof.blend_hist[6] / (double)n,
+		(double)g_krkrns_prof.blend_hist[7] / (double)n);
+	// Layer-tree blends: how much CPU time and how many megapixels go into
+	// the compose buffer (what GPU compositing would take over) vs into other
+	// layer bitmaps.  methods = blt method histogram (bmCopy/bmAlpha/bmAdd…).
+	KRKRNS_LOG("[prof] blt: n=%.1f/%.1f pxM=%.2f/%.2f ms=%.2f/%.2f (layer/compose) | methods m0=%.1f m1=%.1f m2=%.1f m3=%.1f m4=%.1f m5=%.1f m6=%.1f m7=%.1f",
+		(double)g_krkrns_prof.blt_n[0] / n, (double)g_krkrns_prof.blt_n[1] / n,
+		(double)g_krkrns_prof.blt_px[0] / n / 1048576.0,
+		(double)g_krkrns_prof.blt_px[1] / n / 1048576.0,
+		g_krkrns_prof.blt_ms[0] / n, g_krkrns_prof.blt_ms[1] / n,
+		(double)g_krkrns_prof.blt_method[0] / (double)n,
+		(double)g_krkrns_prof.blt_method[1] / (double)n,
+		(double)g_krkrns_prof.blt_method[2] / (double)n,
+		(double)g_krkrns_prof.blt_method[3] / (double)n,
+		(double)g_krkrns_prof.blt_method[4] / (double)n,
+		(double)g_krkrns_prof.blt_method[5] / (double)n,
+		(double)g_krkrns_prof.blt_method[6] / (double)n,
+		(double)g_krkrns_prof.blt_method[7] / (double)n);
 	prevPoolB = poolB;
 	prevPoolBig = poolBig;
 	g_krkrns_prof = ((decltype(g_krkrns_prof)){});
@@ -846,6 +942,13 @@ struct tTVPMessageReceiverRecord
 };
 #endif
 
+// KRKR-ns: every live TVPWindowWindow, so the game-mount path can release the
+// native half of the launcher's window.  Switch SDL has a single native
+// display: a second SDL_Window's renderer is never scanned out, so while the
+// (hidden) launcher window owns the display a game window presents into the
+// void and the screen stays black.
+static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
+
 class TVPWindowWindow : public TTVPWindowForm
 {
 protected:
@@ -1059,6 +1162,10 @@ public:
 	virtual void OnKeyPress(tjs_uint16 vk, int repeat, bool prevkeystate, bool convertkey) override;
 	void UpdateActualZoom(void);
 	void SetDrawDeviceDestRect(void);
+	// KRKR-ns (Switch): destroy this window's SDL texture/surface/renderer/
+	// window and null them, leaving the TJS-side object alive.  See
+	// krkrsdl2_live_windows above for why the game mount needs this.
+	void ReleaseNativeForSwitch(void);
 	/* Called from tTJSNI_Window */
 	virtual void SetZoom(tjs_int numer, tjs_int denom, bool set_logical = true) override;
 	/* Called from tTJSNI_Window */
@@ -1322,6 +1429,7 @@ else
 	::SetWindowLongPtr(this->GetHandle(), GWLP_USERDATA, (LONG_PTR)this);
 #endif
 	Application->AddWindow(this);
+	krkrsdl2_live_windows.push_back(this);
 }
 
 TVPWindowWindow::~TVPWindowWindow()
@@ -1399,11 +1507,14 @@ TVPWindowWindow::~TVPWindowWindow()
 #endif
 
 	Application->RemoveWindow(this);
+	krkrsdl2_live_windows.erase(
+		std::remove(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this),
+		krkrsdl2_live_windows.end());
 }
 
 void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 {
-	KRKRNS_LOG("[win] SetPaintBoxSize w=%d h=%d renderer=%d", w, h, (this->renderer != nullptr));
+	KRKRNS_LOG("[win] SetPaintBoxSize window=%p w=%d h=%d renderer=%d", (void*)this, w, h, (this->renderer != nullptr));
 #ifdef KRKRSDL2_ENABLE_ZOOM
 	this->LayerWidth = w;
 	this->LayerHeight = h;
@@ -1462,6 +1573,40 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 		this->TJSNativeInstance->GetDrawDevice()->SetClipRectangle(r);
 		this->TJSNativeInstance->GetDrawDevice()->SetDestRectangle(r);
 	}
+}
+
+void TVPWindowWindow::ReleaseNativeForSwitch(void)
+{
+	// The TJS object outlives this: TickBeat/SetVisible/UpdateActualZoom all
+	// null-check the pointers below, and the destructor does too.
+	if (this->texture)
+	{
+		SDL_DestroyTexture(this->texture);
+		this->texture = nullptr;
+	}
+	if (this->bitmapCompletion)
+	{
+		this->bitmapCompletion->surface = nullptr;
+	}
+	if (this->surface)
+	{
+		SDL_FreeSurface(this->surface);
+		this->surface = nullptr;
+	}
+	if (this->renderer)
+	{
+		SDL_DestroyRenderer(this->renderer);
+		this->renderer = nullptr;
+	}
+	if (this->window)
+	{
+		SDL_DestroyWindow(this->window);
+		this->window = nullptr;
+	}
+	this->uploadShadow.clear();
+	this->uploadShadowW = 0;
+	this->uploadShadowH = 0;
+	KRKRNS_LOG("[win] released native resources of window=%p", (void*)this);
 }
 
 #ifndef _WIN32
@@ -2456,6 +2601,12 @@ void TVPWindowWindow::krkrsdl2_dump_layer_tree()
 
 void TVPWindowWindow::TickBeat()
 {
+	// KRKR-ns (Switch): native resources were released when a game took over
+	// the single display; this object only survives until the session ends.
+	if (!this->renderer)
+	{
+		return;
+	}
 	if (!this->visibilityHasInitialized)
 	{
 		this->visibilityHasInitialized = true;
@@ -2484,6 +2635,18 @@ void TVPWindowWindow::TickBeat()
 				remove(marker);
 			if (this->surface)
 				SDL_SaveBMP(this->surface, KRKRNS_BASE_A "/render-surface.bmp");
+			// KRKR-ns diagnostic: sample the surface's actual pixels at dump
+			// time -- "the BMP is black" and "the surface holds no content" are
+			// different failures, and only the count separates them.
+			if (this->surface)
+			{
+				const uint32_t* words = static_cast<const uint32_t*>(this->surface->pixels);
+				const size_t count = size_t(this->surface->w) * size_t(this->surface->h);
+				size_t lit = 0;
+				for (size_t i = 0; i < count; i += 997)
+					if (words[i] & 0x00ffffffu) ++lit;
+				KRKRNS_LOG("[render-trace] surface lit samples=%zu/%zu", lit, count / 997 + 1);
+			}
 			KRKRNS_LOG("[render-trace] surface=%dx%d texture=%d update=%d,%d %dx%d",
 				this->surface ? this->surface->w : 0,
 				this->surface ? this->surface->h : 0,
@@ -2515,6 +2678,19 @@ void TVPWindowWindow::TickBeat()
 			this->InvalidateFullSurface();
 			this->traceCapturePending = true;
 		}
+	}
+#endif
+#ifdef __SWITCH__
+	// A movie in overlay/mixer mode has no DirectShow window (nor a layer) on
+	// Switch, so its frame is blitted into the compose surface here -- above
+	// the already-composited scene, i.e. where a win32 overlay video appears.
+	// Doing it before the damage check matters: a movie playing over a static
+	// scene produces no layer notification, and the blit must still be
+	// uploaded and presented even when the layer tree reported no damage.
+	if (this->surface && this->renderer)
+	{
+		if (krkrsdl2_video_overlay_pending())
+			this->needsGraphicUpdate = true;
 	}
 #endif
 	if (this->needsGraphicUpdate)
@@ -2579,6 +2755,17 @@ void TVPWindowWindow::TickBeat()
 					krkrsdl2_maybe_capture_frame(this, this->surface, this->renderer);
 					if (this->surface)
 					{
+						static void* lastPresentSurface = (void*)-1;
+						if (lastPresentSurface != (void*)this->surface)
+						{
+							lastPresentSurface = (void*)this->surface;
+							int tw = 0, th = 0;
+							SDL_QueryTexture(this->texture, nullptr, nullptr, &tw, &th);
+							KRKRNS_LOG("[present] window=%p surface=%p %dx%d texture=%p %dx%d",
+								(void*)this, (void*)this->surface,
+								this->surface->w, this->surface->h,
+								(void*)this->texture, tw, th);
+						}
 #ifdef __SWITCH__
 						// One-shot diagnostic: a texture smaller than the
 						// compose surface clips every upload (scene data loss).
@@ -2666,6 +2853,27 @@ const int sw = this->surface->w;
 								// First frame / size change / forced mode:
 								// upload everything and (re)build the shadow.
 								rect = SDL_Rect{0, 0, sw, sh};
+								if (fFullFrameMode)
+								{
+									// Full-frame mode still only needs the rows the
+									// present path can sample: the window quad shows
+									// the TOP `visibleH` rows (square-screen canvases
+									// are taller than the 16:9 window, e.g. LimeLight
+									// 1920x1440 on 1920x1080). Rows below are never
+									// sampled by any present, so skipping them cannot
+									// produce visible artifacts even on a driver with
+									// broken partial updates — and saves up to 25% of
+									// the per-frame upload.
+									int vtw = sw, vth = sh, vwinW = 0, vwinH = 0;
+									SDL_GetWindowSize(this->window, &vwinW, &vwinH);
+									if (vtw > 0 && vwinW > 0 && vwinH > 0)
+									{
+										int visH = (int)(((int64_t)vwinH * vtw) / vwinW);
+										if (visH > vth) visH = vth;
+										if (visH < 1) visH = 1;
+										rect.h = visH;
+									}
+								}
 								if (!fFullFrameMode)
 								{
 									this->uploadShadow.resize(size_t(sw) * size_t(sh));
@@ -2688,6 +2896,22 @@ const int sw = this->surface->w;
 							gpuPresented = krkrsdl2_glc_readback(this->surface->pixels,
 								this->surface->w, this->surface->h,
 								this->surface->pitch);
+						// Overlay/mixer-mode movie frames go on top of the
+						// composed scene (after the readback, so a GPU-composed
+						// frame cannot overwrite them) and must reach the
+						// texture through the normal upload path.
+						if (this->surface)
+						{
+							SDL_Rect videoDirty;
+							if (krkrsdl2_video_overlay_present(this->surface, &videoDirty) &&
+								videoDirty.w > 0 && videoDirty.h > 0)
+							{
+								gpuPresented = false;
+								SDL_Rect uni;
+								SDL_UnionRect(&rect, &videoDirty, &uni);
+								rect = uni;
+							}
+						}
 #endif
 						const Uint64 uploadStart = SDL_GetPerformanceCounter();
 						if (!gpuPresented && TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect) != 0)
@@ -2756,14 +2980,17 @@ const int sw = this->surface->w;
 						// backbuffer and the queue below is empty -> swap only.)
 						if (!gpuPresented)
 						{
-							// KRKR-ns: KAGEX square-screen stages are TALLER than the
-							// window (LimeLight: 1920x1440 paint box on a 1920x1080
-							// screen; the bottom exHeight-scHeight band is hidden by
-							// the game's own mask layers).  Letterboxing the whole
-							// canvas shrinks the game to 3/4 with a black band.
-							// Present the TOP rows at fit-width scale instead: the
-							// visible height is windowH * textureW / windowW, which
-							// equals the game's scHeight on both docked and handheld.
+							// KRKR-ns: KAGEX square-screen stages extend BELOW the
+							// visible area (LimeLight: 1920x1440 paint box on a
+							// 1920x1080 screen; 魔女的夜宴: 1280x960 on a 1280x720
+							// screen) and the bottom exHeight-scHeight band is hidden
+							// by the game's own mask layers.  Present the TOP rows at
+							// fit-width scale: the visible height is
+							// windowH * textureW / windowW, which equals the game's
+							// scHeight on both docked and handheld.  Stretching the
+							// whole canvas into the window instead would distort it
+							// (4:3 canvas into a 16:9 window) or shrink it with a
+							// black band (taller-than-screen canvas).
 							int tw = 0, th = 0;
 							if (SDL_QueryTexture(this->texture, nullptr, nullptr, &tw, &th) != 0)
 							{
@@ -2776,19 +3003,45 @@ const int sw = this->surface->w;
 								winW = tw;
 								winH = th;
 							}
-							if (tw > 0 && th > 0 && th > winH && winW > 0)
+							if (tw > 0 && th > 0 && winW > 0 && winH > 0)
 							{
 								int visibleH = (int)(((int64_t)winH * tw) / winW);
 								if (visibleH > th) visibleH = th;
 								if (visibleH < 1) visibleH = 1;
-								SDL_Rect src;
-								src.x = 0;
-								src.y = 0;
-								src.w = tw;
-								src.h = visibleH;
-								SDL_RenderSetLogicalSize(this->renderer, tw, visibleH);
-								SDL_RenderClear(this->renderer);
-								SDL_RenderCopy(this->renderer, this->texture, &src, nullptr);
+								bool crop = th > visibleH;
+								static int lastCropState = -1;
+								static int lastLogW = 0, lastLogH = 0;
+								if (crop != (lastCropState == 1) || tw != lastLogW || th != lastLogH)
+								{
+									lastCropState = crop ? 1 : 0;
+									lastLogW = tw;
+									lastLogH = th;
+									KRKRNS_LOG("[win] present: texture=%dx%d window=%dx%d visibleH=%d%s",
+										tw, th, winW, winH, visibleH,
+										crop ? " crop=top" : " stretch");
+								}
+								if (crop)
+								{
+									SDL_Rect src;
+									src.x = 0;
+									src.y = 0;
+									src.w = tw;
+									src.h = visibleH;
+									SDL_RenderSetLogicalSize(this->renderer, tw, visibleH);
+									SDL_RenderClear(this->renderer);
+									SDL_RenderCopy(this->renderer, this->texture, &src, nullptr);
+								}
+								else
+								{
+									// NB: do NOT touch SDL_RenderSetLogicalSize here.
+									// SDL maps mouse/touch coordinates into the
+									// renderer's logical size, and it is kept equal
+									// to the TVP window (paint box) size elsewhere;
+									// pointing it at the fullscreen SDL window made
+									// every touch land at the wrong position.
+									SDL_RenderClear(this->renderer);
+									SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+								}
 							}
 							else
 							{
@@ -2820,7 +3073,15 @@ const int sw = this->surface->w;
 								// SDL reject the readback as "YUV destination".
 								if (SDL_RenderReadPixels(this->renderer, nullptr,
 										shot->format->format, shot->pixels, shot->pitch) == 0)
+								{
 									SDL_SaveBMP(shot, KRKRNS_BASE_A "/render-present.bmp");
+									const uint32_t* words = static_cast<const uint32_t*>(shot->pixels);
+									const size_t count = size_t(shot->w) * size_t(shot->h);
+									size_t lit = 0;
+									for (size_t i = 0; i < count; i += 997)
+										if (words[i] & 0x00ffffffu) ++lit;
+									KRKRNS_LOG("[render-trace] present lit samples=%zu/%zu", lit, count / 997 + 1);
+								}
 								else
 									KRKRNS_LOG("[render-trace] readpixels failed: %s", SDL_GetError());
 								SDL_FreeSurface(shot);
@@ -4740,6 +5001,18 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	if (krkrsdl2_game_mode)
 		throw eTJSError(TJS_W("A KRKR game is already running"));
 
+#ifdef __SWITCH__
+	// The game is about to create its own window.  Switch SDL scans out only
+	// one native window, so the launcher's (hidden) window must give up its
+	// SDL window/renderer first or the game presents into the void and the
+	// screen stays black.  The launcher TJS object survives with null native
+	// pointers; the in-process restart at session end rebuilds it.
+	for (TVPWindowWindow *win : krkrsdl2_live_windows)
+	{
+		win->ReleaseNativeForSwitch();
+	}
+#endif
+
 	// Remember the process' base global set once (before the first game runs).
 	// Ending a session later drops everything the game and the KAG
 	// compatibility layer added on top; without that the next game sees stale
@@ -5279,6 +5552,17 @@ static void krkrsdl2_reinitialize_engine()
 		krkrsdl3::TVPResetRenderBackendForEngineRestart();
 	}
 	KRKRNS_LOG("[reinit] step 5: shutdown script engine");	{
+		// Script-registered continuous handlers live in a process-global
+		// vector (EventIntf.cpp) that only process exit clears.  Left in
+		// place, the rebuilt session's event delivery calls the dead engine's
+		// closures: the device log showed the finished game's k2compat
+		// GFX_Motion tick running in the launcher session and then dying
+		// natively.  Drop them while the old engine can still Release them.
+		extern void TVPClearContinuousHandlers();
+		TVPClearContinuousHandlers();
+		// Same reasoning for the video-overlay registry: it is process-global
+		// and must not hand the next session an overlay the game leaked.
+		TVPClearVideoOverlays();
 		extern void krkrsdl2_reset_script_engine_for_restart();
 		krkrsdl2_reset_script_engine_for_restart();
 	}

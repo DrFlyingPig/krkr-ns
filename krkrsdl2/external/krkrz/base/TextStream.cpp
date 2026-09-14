@@ -24,6 +24,7 @@
 #include "UtilStreams.h"
 #include "tjsError.h"
 #include "CharacterSet.h"
+#include "cp932_uni.h"
 #include "BufferedWrite.h"
 #include "KrkrNSSlowOperation.h"
 
@@ -37,6 +38,70 @@ static ttstr DefaultReadEncoding = TJS_W("Shift_JIS");
 #else
 static ttstr DefaultReadEncoding = TJS_W("UTF-8");
 #endif
+//---------------------------------------------------------------------------
+// Decoding of text assets that carry no BOM.
+//
+// Japanese titles ship Shift-JIS *.tjs/*.ini/*.csv, Chinese localisations
+// re-encode those to GBK, and newer ones write UTF-8; none of them marks the
+// encoding, yet all three look like plain "ansi/mbcs" to the reader below.
+// Kirikiroid2 answers this by probing the codecs it has until one decodes the
+// whole buffer (TextStream_mbstowcs in its src/core/base/TextStream.cpp).
+// Without the probe a Shift-JIS file is handed to the UTF-8 decoder, which
+// aborts the boot with "Cannot convert given narrow string to wide string".
+//
+// One deliberate deviation from upstream: UTF-8 is probed first, not
+// Shift-JIS.  Shift-JIS and GBK accept nearly every byte pair, so probing
+// them first turns BOM-less UTF-8 into mojibake, while UTF-8 rejects their
+// lead bytes outright and so falls through to them correctly either way.
+//---------------------------------------------------------------------------
+enum tTVPMbcsEncoding { mbcsUTF8, mbcsShiftJIS, mbcsGBK };
+
+extern "C" int gbk_mbtowc(unsigned short * wc, const unsigned char * s);
+
+static size_t TVPDecodeGBKString(const char * in, tjs_char * out)
+{
+	size_t count = 0;
+	const unsigned char *p = (const unsigned char *)in;
+	while(*p)
+	{
+		unsigned short wc;
+		int len = gbk_mbtowc(&wc, p);
+		if(len <= 0) return static_cast<size_t>(-1);
+		if(out) *out++ = (tjs_char)wc;
+		p += len;
+		count++;
+	}
+	return count;
+}
+
+static size_t TVPDecodeMbcsAs(const char * in, tjs_char * out, tTVPMbcsEncoding enc)
+{
+	switch(enc)
+	{
+	case mbcsShiftJIS: return SJISToUnicodeString(in, out);
+	case mbcsGBK:      return TVPDecodeGBKString(in, out);
+	default: {
+		tjs_int len = TVPUtf8ToWideCharString(in, out);
+		return len < 0 ? static_cast<size_t>(-1) : static_cast<size_t>(len);
+	}
+	}
+}
+
+static size_t TVPDecodeMbcs(const char * in, tjs_char * out, const ttstr & encoding)
+{
+	tTVPMbcsEncoding order[3] = { mbcsUTF8, mbcsShiftJIS, mbcsGBK };
+	if(encoding == TJS_W("Shift_JIS"))
+	{
+		order[0] = mbcsShiftJIS;
+		order[1] = mbcsUTF8;
+	}
+	for(int i = 0; i < 3; i++)
+	{
+		size_t len = TVPDecodeMbcsAs(in, out, order[i]);
+		if(len != static_cast<size_t>(-1)) return len;
+	}
+	return static_cast<size_t>(-1);
+}
 //---------------------------------------------------------------------------
 // Interface to tTJSTextStream
 //---------------------------------------------------------------------------
@@ -214,19 +279,10 @@ public:
 					{
 						Stream->ReadBuffer(nbuf, size);
 						nbuf[size] = 0; // terminater
-						if( encoding == TJS_W("UTF-8") ) {
-							BufferLen = TVPUtf8ToWideCharString((const char*)nbuf, NULL);
-							if(BufferLen == (size_t)-1) TVPThrowExceptionMessage(TJSNarrowToWideConversionError);
-							Buffer = new tjs_char [ BufferLen +1];
-							TVPUtf8ToWideCharString((const char*)nbuf, Buffer);
-						} else if( encoding == TJS_W("Shift_JIS") ) {
-							BufferLen = TJS_narrowtowidelen((tjs_nchar*)nbuf);
-							if(BufferLen == (size_t)-1) TVPThrowExceptionMessage(TJSNarrowToWideConversionError);
-							Buffer = new tjs_char [ BufferLen +1];
-							TJS_narrowtowide(Buffer, (tjs_nchar*)nbuf, BufferLen);
-						} else {
-							TVPThrowExceptionMessage(TVPUnsupportedEncoding, encoding);
-						}
+						BufferLen = TVPDecodeMbcs((const char*)nbuf, NULL, encoding);
+						if(BufferLen == (size_t)-1) TVPThrowExceptionMessage(TJSNarrowToWideConversionError);
+						Buffer = new tjs_char [ BufferLen +1];
+						TVPDecodeMbcs((const char*)nbuf, Buffer, encoding);
 					}
 					catch(...)
 					{

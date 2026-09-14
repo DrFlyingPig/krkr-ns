@@ -1,4 +1,4 @@
-// KRKR-ns compat: restore the KAG2 compatibility namespace.
+﻿// KRKR-ns compat: restore the KAG2 compatibility namespace.
 //
 // A game's boot sequence loads its own system/k2compat.tjs (KAG ships a desktop
 // copy), and that file REPLACES global.Krkr2CompatUtils with its own object --
@@ -24,3 +24,136 @@ Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
 Krkr2CompatUtils.isLoaded = function(name) { return true; };
 Krkr2CompatUtils.autoLoad = function(name) { return null; };
 Krkr2CompatUtils.Window = function() { return null; };
+
+// ---------------------------------------------------------------------------
+// Plugin availability probe.
+//
+// Kirikiroid2 answers this from a built-in registry of reimplemented Windows
+// plugins.  This port reimplements one so far: layerStwCopy.dll, whose single
+// entry point Layer.stitchWrappedCopy now exists in the engine.  Report it, so
+// titles that gate a feature on the probe take the plugin path.
+//
+// Why this matters: YuzuSoft's main\uisystem.tjs installs kag.sysTransitionEffect
+// only when CanLoadPlugin("layerStwCopy.dll") answers true, while its options
+// screen calls that member unconditionally.  Probing false leaves the member
+// undefined and the screen throws on every frame instead of opening.
+//
+// ONLY this probe is overridden.  Plugins.link is left exactly as the game
+// defined it: titles call it unconditionally and then use the class it is
+// supposed to register -- `Plugins.link("motionplayer.dll")` followed by a read
+// of `Motion`, with no probe in between -- so wrapping it silently breaks
+// plugin-backed features that already worked.
+//
+// This file is re-executed after the game loads its own system/k2compat.tjs
+// (which redefines CanLoadPlugin), so the wrapper here ends up outermost.  The
+// definition it replaced is kept, and every other plugin still gets that
+// original answer.
+//
+// TJS notes that shaped this code: reading an absent global THROWS ("Member X
+// does not exist") so it is probed with typeof() first, and a `var` declared
+// inside a block is invisible to a closure that outlives the block, so the
+// saved definition lives on a global.
+global.__krkrns_emulated_plugins = %[];
+global.__krkrns_emulated_plugins["layerstwcopy.dll"] = true;
+
+global.__krkrns_prev_can_load = null;
+if (typeof(global.CanLoadPlugin) != "void" && typeof(global.CanLoadPlugin) != "undefined") {
+    global.__krkrns_prev_can_load = global.CanLoadPlugin;
+}
+global.CanLoadPlugin = function(name) {
+    var hit = global.__krkrns_emulated_plugins[name.toLowerCase()];
+    if (typeof(hit) != "void" && typeof(hit) != "undefined") {
+        Debug.message("[compat] CanLoadPlugin(" + name + ") -> emulated");
+        return true;
+    }
+    var prev = global.__krkrns_prev_can_load;
+    if (prev != null) return prev(name);
+    return false;
+};
+
+// ---------------------------------------------------------------------------
+// .psb motion handler (sysscn/GFX_Motion.tjs).
+//
+// KAGEX titles draw their animated title background - and every [ev ...] logo /
+// effect - through the flip type GFX_Motion.tjs registers for the "psb"
+// extension.  That script sits in the scenario folder and is normally
+// registered by the game's own scenario-plugin pass; in this engine nothing
+// ever requests it, so GenericFlip.GetType("title_bg.psb") finds no handler,
+// [title_bg show] draws nothing and the title screen stays black while
+// [title_bg waitmovie] returns immediately.
+//
+// Load it ourselves once the KAG layer classes and the Motion plugin exist.
+// Polled through a continuous handler because this file runs during k2compat,
+// long before Initialize.tjs has defined GenericFlip or loaded motion.tjs.
+// TJS notes that shaped this code: an absent global read THROWS so it is probed
+// with typeof() first, and a `var` inside a block is invisible to a closure that
+// outlives the block, so the handler lives on a global.
+if (Storages.isExistentStorage("GFX_Motion.tjs")) {
+    global.__krkrns_gfxm_tries = 0;
+    global.__krkrns_gfxm_tick = function(tick) {
+        // The whole body is wrapped: during the engine rebuild at a game exit
+        // the globals this tick touches can be gone for one frame, and an
+        // exception escaping a continuous handler is logged as a script error
+        // (it used to be the "Accessing to null object" line after every exit).
+        try {
+            // typeof-guard: after an in-process engine rebuild (game exit ->
+            // launcher) this handler can briefly outlive its globals, and an
+            // absent TJS global THROWS on read.
+            if (typeof(global.__krkrns_gfxm_tries) != "number")
+                global.__krkrns_gfxm_tries = 0;
+            global.__krkrns_gfxm_tries = global.__krkrns_gfxm_tries + 1;
+            var ready = false;
+            try {
+                ready = typeof(global.GenericFlip) != "void" && typeof(global.GenericFlip) != "undefined";
+                ready = ready && typeof(global.Motion) != "void" && typeof(global.Motion) != "undefined";
+            } catch (e) {
+                ready = false;
+            }
+            if (!ready) {
+                if (global.__krkrns_gfxm_tries > 900) {
+                    Debug.message("[compat] GFX_Motion.tjs: layer classes never appeared, giving up");
+                    System.removeContinuousHandler(global.__krkrns_gfxm_tick);
+                }
+                return;
+            }
+            System.removeContinuousHandler(global.__krkrns_gfxm_tick);
+            // NOTE: the KAG tag trace used to be enabled here with
+            // `global.kag.debugLevel = 3`.  In this engine that set throws
+            // ("Object kag has no member debugLevel" at this point of the
+            // KAG boot), and every throw inside a try block dumps a full VM
+            // disassembly to the log - 30 of them per game session.  Enable
+            // the trace manually (kag.debugLevel = 3 from a scenario) when it
+            // is actually needed.
+            try {
+                var have = false;
+                try { have = global.GenericFlip.Entries["gfxm_file"] !== void; } catch (e) { have = false; }
+                if (!have) {
+                    Debug.message("[compat] registering .psb motion handler (GFX_Motion.tjs)");
+                    global.KAGLoadScript("GFX_Motion.tjs");
+                    var ok = false;
+                    try { ok = global.GenericFlip.Entries["gfxm_file"] !== void; } catch (e) { ok = false; }
+                    Debug.message("[compat] GFX_Motion.tjs registered=" + ok);
+                }
+            } catch (e) {
+                Debug.message("[compat] GFX_Motion.tjs load failed: " + e.message);
+            }
+        } catch (e) {
+            // A handler that throws here has lost the engine it was written
+            // for (stale closure after an engine rebuild).  Remove it instead
+            // of letting it re-throw every frame.
+            try { System.removeContinuousHandler(global.__krkrns_gfxm_tick); } catch (e2) {}
+        }
+    };
+    System.addContinuousHandler(global.__krkrns_gfxm_tick);
+}
+
+/* KAGEX scene-animation effects: answer "-scanim" with "no".
+
+   Titles read this switch through System.getArgument and, when it is on, drive
+   the title/logo .psb motion through their own MotionController and then block
+   in [title_bg waitmovie] until that motion finishes.  This engine cannot start
+   that controller, so the wait never ends and the title never paints (black
+   screen, no pending damage).  With the switch off the game takes its own
+   still-image branch, which renders normally.
+
+   Only this one argument is answered; every other argument goes to the engine. */

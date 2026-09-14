@@ -734,6 +734,23 @@ void tTJSNI_KAGParser::StoreBoolStackToDic(iTJSDispatch2 *dic, std::vector<bool>
 	dic->PropSet(TJS_MEMBERENSURE, membername, NULL, &val, dic);
 }
 //---------------------------------------------------------------------------
+// store the collected attribute names to the tag dictionary as "taglist"
+// ("tagname" first, then the attributes in parse order)
+void tTJSNI_KAGParser::AttachTagList(iTJSDispatch2 *dic)
+{
+	if(TagListBuffer.empty()) return;
+	iTJSDispatch2 * dsp = TJSCreateArrayObject();
+	for(tjs_uint i = 0; i < TagListBuffer.size(); i++)
+	{
+		tTJSVariant val(TagListBuffer[i]);
+		dsp->PropSetByNum(TJS_MEMBERENSURE, i, &val, dsp);
+	}
+	tTJSVariant tmp(dsp, dsp);
+	dsp->Release();
+	dic->PropSet(TJS_MEMBERENSURE, TJS_W("taglist"), NULL, &tmp, dic);
+	TagListBuffer.clear();
+}
+//---------------------------------------------------------------------------
 void tTJSNI_KAGParser::Restore(iTJSDispatch2 *dic)
 {
 	// restore status from "dic"
@@ -1424,6 +1441,12 @@ parse_start:
 		DicClear->FuncCall(0, NULL, NULL, NULL, 0, NULL, DicObj);
 			// clear dictionary object
 
+		TagListBuffer.clear();
+			// the tag's attribute names are collected for the "taglist"
+			// member; game system scripts (KAGEnvironment.entryEnvObject,
+			// KAGEnvBase._command, LineModeEx._addParseTag) expect it on
+			// every tag dictionary
+
 		if(Interrupted)
 		{
 			// interrupt current parsing
@@ -1579,6 +1602,7 @@ parse_start:
 			tTJSVariant tag_val(tagname);
 			DicObj->PropSetByVS(TJS_MEMBERENSURE,
 				__tag_name.AsVariantStringNoAddRef(), &tag_val, DicObj);
+			TagListBuffer.push_back(ttstr(TJS_W("tagname")));
 		}
 
 		// check special control tags
@@ -1723,6 +1747,7 @@ parse_start:
 
 					if(condition && ExcludeLevel == -1)
 					{
+						AttachTagList(DicObj);
 						DicObj->AddRef();
 						return DicObj;
 					}
@@ -2256,8 +2281,11 @@ parse_start:
 
 			// store value into the dictionary object
 			if(store)
+			{
 				DicObj->PropSetByVS(TJS_MEMBERENSURE,
 					attribname.AsVariantStringNoAddRef(), &ValueVariant, DicObj);
+				TagListBuffer.push_back(attribname);
+			}
 		}
 	}
 

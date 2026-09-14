@@ -245,16 +245,5 @@ Scripts.hasObjectKey = function(object, key) { return Dictionary.contains(object
 // equivalent archive-aware FreeType implementation as Font.addFont.
 System.addFont = function(storage) { return Font.addFont(storage); };
 
-// getSample.dll adds optional waveform look-ahead helpers.  Audio playback is
-// already provided by the SDL mixer; these members only tune lip-sync sample
-// inspection and are safe to retain as state when the plugin is unavailable.
-if (typeof(WaveSoundBuffer.setDefaultAheads) == "undefined") {
-    WaveSoundBuffer.enableGetSample = false;
-    WaveSoundBuffer.defaultAheads = 0;
-    WaveSoundBuffer.setDefaultAheads = function(value) {
-        WaveSoundBuffer.defaultAheads = value;
-        return null;
-    };
-}
 
 } // __krkrns_compat_k2compat (install once per process)

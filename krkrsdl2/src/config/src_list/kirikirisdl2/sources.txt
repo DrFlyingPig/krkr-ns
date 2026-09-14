@@ -77,6 +77,7 @@ external/krkrz/utils/TimerIntf.cpp
 external/krkrz/utils/TimerThread.cpp
 external/krkrz/utils/VelocityTracker.cpp
 external/krkrz/utils/cp932_uni.cpp
+external/krkrz/utils/gbk2unicode.c
 external/krkrz/utils/md5.c
 external/krkrz/utils/uni_cp932.cpp
 external/krkrz/visual/BitmapIntf.cpp

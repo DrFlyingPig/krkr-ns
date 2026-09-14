@@ -1,0 +1,32 @@
+// KRKR-ns compat: layerExImage.dll extension methods on the Layer class.
+//
+// The Yuzusoft-era KAG systems (e.g. CafeStella) link layerExImage.dll and
+// then call Layer#clipAlphaRect from their AffineLayer/world onPaint paths.
+// Without the member the exception is raised inside an immediate onPaint
+// event, which KAG cannot recover from: it aborts the game (and the port's
+// detached heartbeat thread then faults during process teardown).
+//
+// clipAlphaRect(dx, dy, src, sx, sy, sw, sh, opa) is the documented shape of
+// the layerExImage variant: draw the source rectangle (sx, sy, sw, sh) at
+// (dx, dy) using the source's alpha channel, scaled to the destination rect
+// implied by the caller.  The engine already exposes an alpha-preserving
+// rectangular copy through Layer.copyRect, so the shim delegates to it and
+// ignores the optional opacity argument rather than failing the script.
+//
+// This file ships in the compat romfs folder and the SD runtime patch dir
+// (sdmc:/switch/KRKR-ns/patch/system), parsed before the game scripts run.
+class LayerExImageCompat {
+    // Resolve the target layer from the receiver of the extension call.
+    static function clipAlphaRect(dx, dy, src, sx, sy, sw, sh, opa) {
+        if (src === void || src === null) return;
+        // Layer.copyRect(dx, dy, src, left, top, width, height)
+        this.copyRect(dx, dy, src, sx, sy, sw, sh);
+    }
+}
+
+// Register the extension on the native Layer class.  KAG scripts call
+// `global.KAGLayer.clipAlphaRect(...)` where KAGLayer extends Layer, so the
+// method must live on Layer itself.
+if (typeof(Layer.clipAlphaRect) != "Function") {
+    Layer.clipAlphaRect = LayerExImageCompat.clipAlphaRect;
+}

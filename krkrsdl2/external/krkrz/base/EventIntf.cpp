@@ -928,6 +928,28 @@ static void TVPDestroyContinuousHandlerVector()
 static tTVPAtExit TVPDestroyContinuousHandlerVectorAtExit
 	(TVP_ATEXIT_PRI_PREPARE, TVPDestroyContinuousHandlerVector);
 //---------------------------------------------------------------------------
+// KRKR-ns: drop every script-registered continuous handler.  The vector is a
+// process-global static that only process exit clears (or a call that fails
+// with TJS_FAILED), so after the in-process engine rebuild it still holds
+// closures belonging to the destroyed script engine.  The next event delivery
+// then calls into dead script objects: the device log showed the finished
+// game's k2compat GFX_Motion tick executing in the rebuilt launcher session
+// ("An exception occured at k2compat_reinstall.tjs(99)") followed by a native
+// crash and the end of the log.
+//
+// C++ hooks (TVPContinuousEventVector) deliberately survive: they belong to
+// the platform layer, not to the script engine.  Only when nothing is left
+// registered is the continuous-calling mode switched off again, which also
+// stops the main loop's busy spin.
+void TVPClearContinuousHandlers()
+{
+	TVPDestroyContinuousHandlerVector();
+	bool anyCppHook = false;
+	for(size_t i = 0; i < TVPContinuousEventVector.size(); i++)
+		if(TVPContinuousEventVector[i]) { anyCppHook = true; break; }
+	if(!anyCppHook) TVPEndContinuousEvent();
+}
+//---------------------------------------------------------------------------
 void TVPAddContinuousEventHook(tTVPContinuousEventCallbackIntf *cb)
 {
 	TVPBeginContinuousEvent();

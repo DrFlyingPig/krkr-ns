@@ -79,8 +79,7 @@ public:
 		// Loading while holding Mutex would deadlock when Load() commits the
 		// parsed resources, so retry the lookup after the temporary loader exits.
 		const ttstr container(containerKey);
-		KRKRNS_LOG("[psb] lazy loading container=%s for resource=%s",
-			container.AsNarrowStdString().c_str(), name.AsNarrowStdString().c_str());
+		KRKRNS_LOG("[psb] lazy loading container");
 		tTJSNI_PSBFile file;
 		if (!file.Load(container)) return false;
 
@@ -140,8 +139,7 @@ public:
 			normalizedName.ToLowerCase();
 			Resources[prefix + normalizedName.AsStdString()] = entry.second;
 		}
-		KRKRNS_LOG("[psb] registered container=%s resources=%u",
-			container.AsNarrowStdString().c_str(),
+		KRKRNS_LOG("[psb] registered container resources=%u",
 			static_cast<unsigned>(resources.size()));
 	}
 
@@ -626,23 +624,45 @@ bool tTJSNI_PSBFile::Load(const ttstr &storage)
 	KrkrNSSlowOperation slow("psb-load", &storage);
 	try
 	{
+		// Split the measurement per phase.  A single psb-load number says a
+		// scenario file took a second but not whether the cost is decompression,
+		// parsing or resource registration -- and those have completely
+		// different fixes.  This is the hot path for every PSB title, so the
+		// breakdown is worth three clock reads.
 		const ttstr placed = TVPGetPlacedPath(storage);
 		if (placed.IsEmpty()) throw std::runtime_error("PSB storage was not found");
+		const Uint32 t1 = SDL_GetTicks();
 		std::unique_ptr<tTJSBinaryStream> stream(TVPCreateStream(placed, TJS_BS_READ));
-		PsbReader reader(ExpandMdf(ReadAll(stream.get())));
+		const std::vector<tjs_uint8> raw = ReadAll(stream.get());
+		const Uint32 t2 = SDL_GetTicks();
+		const std::vector<tjs_uint8> expanded = ExpandMdf(raw);
+		const Uint32 t3 = SDL_GetTicks();
+		PsbReader reader(expanded);
 		ParsedValue root = reader.Parse();
 		if (root.Value.Type() != tvtObject) throw std::runtime_error("PSB root is not a dictionary");
+		const Uint32 t4 = SDL_GetTicks();
 
 		iTJSDispatch2 *newRoot = root.Value.AsObjectNoAddRef();
 		// The script may use an extension-less auto-path lookup.  psb:// URLs,
 		// however, are keyed by the placed container name (common.pimg, etc.).
 		const ttstr container = TVPExtractStorageName(placed);
 		PsbMedia->Commit(container, reader.NamedResources());
+		const Uint32 t5 = SDL_GetTicks();
+		// No file name here on purpose: AsNarrowStdString() THROWS on a path the
+		// active code page cannot represent, and game directories are routinely
+		// CJK ("【KRKR】LimeLight_lj").  Naming the file in a diagnostic line cost
+		// a title its boot once; the numbers are what matter.
+		KRKRNS_LOG("[psb] phases read=%ums mdf=%ums parse=%ums commit=%ums",
+			(unsigned)(t2 - t1), (unsigned)(t3 - t2),
+			(unsigned)(t4 - t3), (unsigned)(t5 - t4));
 		newRoot->AddRef();
 		Invalidate();
 		Root = newRoot;
-		KRKRNS_LOG("[psb] loaded %s as %s version=%u named-resources=%u",
-			storage.AsNarrowStdString().c_str(), container.AsNarrowStdString().c_str(),
+		// Same reason as above: no names.  This line used to convert both paths
+		// with AsNarrowStdString() on the SUCCESS path, so a PSB file under a CJK
+		// game directory threw after its resources were already committed -- the
+		// load reported failure while half its work had been done.
+		KRKRNS_LOG("[psb] loaded version=%u named-resources=%u",
 			static_cast<unsigned>(reader.Version()),
 			static_cast<unsigned>(reader.ResourceCount()));
 		return true;

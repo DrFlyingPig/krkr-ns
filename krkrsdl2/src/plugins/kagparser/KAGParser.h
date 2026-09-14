@@ -252,6 +252,8 @@ private:
 	std::vector<tjs_int> ExcludeLevelStack;
 	std::vector<bool> IfLevelExecutedStack;
 
+	std::vector<ttstr> TagListBuffer; // attribute names of the tag being parsed
+
 	bool Interrupted;
 
 public:
@@ -263,6 +265,8 @@ public:
 
 private:
 	void ClearBuffer(); // clear internal buffer
+
+	void AttachTagList(iTJSDispatch2 *dic); // store TagListBuffer as "taglist"
 
 	void Rewind(); // set current position to first
 

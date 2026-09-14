@@ -21,6 +21,13 @@ void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 {
 	if (!surface || !manager || !bits || !bmpinfo)
 	{
+		static void* lastNullSurface = (void*)-1;
+		if (lastNullSurface != (void*)surface)
+		{
+			lastNullSurface = (void*)surface;
+			KRKRNS_LOG("[comp] skip null: surface=%p manager=%p bits=%p bmpinfo=%p",
+				(void*)surface, (void*)manager, bits, (void*)bmpinfo);
+		}
 		return;
 	}
 	const TVPBITMAPINFO *bitmapinfo = bmpinfo->GetBITMAPINFO();
@@ -32,7 +39,18 @@ void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 	}
 	if (x < 0 || y < 0 || int64_t(x) + cliprect.get_width() > w ||
 		int64_t(y) + cliprect.get_height() > h || bitmapinfo->bmiHeader.biBitCount != 32)
+	{
+		static void* lastBoundsSurface = (void*)-1;
+		if (lastBoundsSurface != (void*)surface)
+		{
+			lastBoundsSurface = (void*)surface;
+			KRKRNS_LOG("[comp] skip bounds: at %d,%d clip %dx%d primary %dx%d bpp=%d surface=%p %dx%d",
+				x, y, cliprect.get_width(), cliprect.get_height(), w, h,
+				(int)bitmapinfo->bmiHeader.biBitCount, (void*)surface,
+				surface ? surface->w : 0, surface ? surface->h : 0);
+		}
 		return;
+	}
 	const SDL_Rect source = {cliprect.left, cliprect.top,
 		cliprect.get_width(), cliprect.get_height()};
 	SDL_Rect copied;
@@ -42,6 +60,40 @@ void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 	if (TVPCopyBitmapToSurface(surface, bits, bitmapinfo->bmiHeader.biWidth,
 		bitmapinfo->bmiHeader.biHeight, source, x, y, copied))
 	{
+		static void* lastOkSurface = (void*)-1;
+		static unsigned okCount = 0;
+		if (lastOkSurface != (void*)surface)
+		{
+			lastOkSurface = (void*)surface;
+			okCount = 0;
+		}
+		if ((okCount++ % 30u) == 0u)
+		{
+			// KRKR-ns diagnostic: is the composed source black, or did the copy
+			// lose it?  Sample both sides coarsely (raw word scan, flip-agnostic).
+			const uint32_t* srcWords = static_cast<const uint32_t*>(bits);
+			const size_t srcWordsN =
+				size_t(bitmapinfo->bmiHeader.biWidth) *
+				size_t(bitmapinfo->bmiHeader.biHeight < 0 ? -bitmapinfo->bmiHeader.biHeight
+				                                          : bitmapinfo->bmiHeader.biHeight);
+			size_t srcLit = 0;
+			for (size_t i = 0; i < srcWordsN; i += 997)
+			{
+				if (srcWords[i] & 0x00ffffffu) ++srcLit;
+			}
+			const uint32_t* dstWords = static_cast<const uint32_t*>(surface->pixels);
+			const size_t dstWordsN = size_t(surface->w) * size_t(surface->h);
+			size_t dstLit = 0;
+			for (size_t i = 0; i < dstWordsN; i += 997)
+			{
+				if (dstWords[i] & 0x00ffffffu) ++dstLit;
+			}
+			KRKRNS_LOG("[comp] copy ok t=%u: surface=%p %dx%d at %d,%d clip %dx%d -> %dx%d srcLit=%zu/%zu dstLit=%zu/%zu",
+				(unsigned)SDL_GetTicks(),
+				(void*)surface, surface->w, surface->h, x, y,
+				cliprect.get_width(), cliprect.get_height(), copied.w, copied.h,
+				srcLit, srcWordsN / 997 + 1, dstLit, dstWordsN / 997 + 1);
+		}
 #ifdef __SWITCH__
 		krkrsdl2_prof_accum_surface_copy(
 			(double)(SDL_GetPerformanceCounter() - scStart) * 1000.0 /

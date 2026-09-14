@@ -8,6 +8,7 @@
 //---------------------------------------------------------------------------
 // string heap management used by tTJSVariant and tTJSString
 //---------------------------------------------------------------------------
+#include <stdio.h>
 #include "tjsCommHead.h"
 
 #include "tjsVariantString.h"
@@ -34,6 +35,36 @@ void TJSThrowStringAllocError()
 void TJSThrowNarrowToWideConversionError()
 {
 	TJS_eTJSVariantError(TJSNarrowToWideConversionError);
+}
+
+// KRKR-ns diagnostic.  This is the only place the engine reports a narrow ->
+// wide conversion failure, and the message alone ("Cannot convert given narrow
+// string to wide string") does not say WHICH string or which caller produced
+// it -- a retail title booted straight into it.  Print the offending bytes
+// here.  Deliberately dependency-free (no engine headers, no logging macro, no
+// allocation): a diagnostic must never be the reason a build or a boot breaks.
+void TJSLogNarrowToWideFailure(const char *ref)
+{
+	static bool truncated = false;
+	FILE *f = fopen("sdmc:/switch/KRKR-ns/narrowfail.log", truncated ? "ab" : "wb");
+	if (!f) return;
+	truncated = true;
+	if (ref)
+	{
+		fprintf(f, "narrow->wide failed, bytes: ");
+		for (int i = 0; ref[i] && i < 96; ++i)
+			fprintf(f, "%02x ", (unsigned char)ref[i]);
+		fprintf(f, "\n  as text: ");
+		for (int i = 0; ref[i] && i < 96; ++i)
+			fputc((ref[i] >= 0x20 && ref[i] < 0x7f) ? ref[i] : '.', f);
+		fprintf(f, "\n");
+	}
+	else
+	{
+		fprintf(f, "narrow->wide failed, ref is NULL\n");
+	}
+	fflush(f);
+	fclose(f);
 }
 //---------------------------------------------------------------------------
 tjs_int TJSGetShorterStrLen(const tjs_char *str, tjs_int max)

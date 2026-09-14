@@ -1,4 +1,5 @@
 #include "KrkrNSPaths.h"
+#include "KrkrNSProf.h"
 #include "emoterunner.h"
 
 #include <sstream>
@@ -965,6 +966,7 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
                    ic ? ic->texWidth : 0.0, ic ? ic->texHeight : 0.0);
     }
 #endif
+    krkrsdl2_prof_emote_mesh();
     renderer->DrawMesh((const float*)_meshVertices.data(), (int)_meshVertices.size(),
                        _meshIndices.data(), (int)_meshIndices.size(), ic->selftexture, totalOpa);
     return true;

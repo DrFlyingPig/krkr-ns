@@ -168,20 +168,24 @@ public:
 		tjs_uint32 *hint, tTJSVariant *result, tjs_int numparams,
 		tTJSVariant **param, iTJSDispatch2 *objthis) override
 	{
+		// The member hint is a name HASH, not a flag.  Storing a boolean in it
+		// (as this used to) poisons the caller's cache: the next lookup of any
+		// member reuses that bogus hint, dispatch goes to the wrong function,
+		// and TJS reports "Member xor does not exist" for a method that is right
+		// here.  The scripts this serves are the whole decryption path of an
+		// encrypted title, so a failed xor() leaves archive chunks undecrypted
+		// and the game reads garbage.  See how "ptr" is handled below for the
+		// correct pattern.
+		static const tjs_uint32 hash_xor = tTJSHashFunc<tjs_char *>::Make(TJS_W("xor"));
+		static const tjs_uint32 hash_add = tTJSHashFunc<tjs_char *>::Make(TJS_W("add"));
 		if (hint) {
-			if (!*hint) {
-				*hint = !TJS_strcmp(membername, TJS_W("xor"));
-				if (*hint) {
-					return FuncXor(numparams, param);
-				}
-			} else {
-				return FuncXor(numparams, param);
-			}
-		} else if (!TJS_strcmp(membername, TJS_W("xor"))) {
-			return FuncXor(numparams, param);
-		} else if (!TJS_strcmp(membername, TJS_W("add"))) {
-			return FuncAdd(numparams, param);
+			if (!*hint) *hint = tTJSHashFunc<tjs_char *>::Make(membername);
+			if (*hint == hash_xor) return FuncXor(numparams, param);
+			if (*hint == hash_add) return FuncAdd(numparams, param);
+			return TJS_E_NOTIMPL;
 		}
+		if (!TJS_strcmp(membername, TJS_W("xor"))) return FuncXor(numparams, param);
+		if (!TJS_strcmp(membername, TJS_W("add"))) return FuncAdd(numparams, param);
 		return TJS_E_NOTIMPL;
 	}
 
@@ -324,13 +328,71 @@ static XP3FilterDecoder *FetchXP3Decoder()
 	return decoder;
 }
 
+// ---------------------------------------------------------------------------
+// Native fast path for the common filter shape.
+//
+// A filter script is invoked once per 2048-byte chunk through its own TJS
+// engine, which costs milliseconds per call on this target: a single 200 KB
+// script then takes seconds to load, and titles that encrypt everything pay it
+// on every file.  YuzuSoft's filter is a pure function of (hash, offset, size)
+// -- derive a key from the file hash, XOR the chunk with its low byte, with one
+// extra pass over the first byte at offset 0 -- which is trivial to do inline.
+//
+// The switch is EARNED, not assumed: the first few calls run BOTH paths and
+// compare byte for byte, and only an exact match retires the script.  A filter
+// that is not this shape, or that carries state between chunks, simply never
+// verifies and keeps going through the script as before.
+static bool sNativeXorVerified = false;
+static bool sNativeXorDisabled = false;
+static unsigned sNativeXorChecks = 0;
+static const unsigned kNativeXorChecksRequired = 4;
+static const tjs_uint32 kYuzuSoftHashKey = 0xABCD9876u;
+static const unsigned char kYuzuSoftFirstFallback = 0x76;
+static const unsigned char kYuzuSoftChunkFallback = 0xA5;
+
+static unsigned char NativeXorKeyByte(tjs_uint32 k)
+{
+	return (k & 0xFF) ? (unsigned char)(k & 0xFF) : kYuzuSoftChunkFallback;
+}
+
+static void NativeXorDecrypt(unsigned char *buf, unsigned len, tjs_uint64 hash, tjs_uint64 offset)
+{
+	tjs_uint32 k = (tjs_uint32)hash ^ kYuzuSoftHashKey;
+	// The extra first-byte pass belongs to offset 0 only -- the script guards it
+	// with `if(!o && l)`, and applying it to every chunk would corrupt all but
+	// the first one.
+	if (offset == 0 && len > 0)
+	{
+		const unsigned char first = (k & 0xFF) ? (unsigned char)(k & 0xFF) : kYuzuSoftFirstFallback;
+		buf[0] ^= first;
+	}
+	k = (k ^ (k >> 8) ^ (k >> 16) ^ (k >> 24)) & 0xFFFFFFFFu;
+	const unsigned char key = NativeXorKeyByte(k);
+	for (unsigned i = 0; i < len; ++i) buf[i] ^= key;
+}
+
 static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *info)
 {
 	try
 	{
+		if (sNativeXorVerified)
+		{
+			NativeXorDecrypt((unsigned char*)info->Buffer, (unsigned)info->BufferSize, info->FileHash, info->Offset);
+			return;
+		}
+
 		XP3FilterDecoder *decoder = FetchXP3Decoder();
 		if (decoder && decoder->ManagedDecoder.Object)
 		{
+			// Keep the pre-filter bytes so the native path can be checked against
+			// what the script produced.
+			unsigned char *before = nullptr;
+			if (!sNativeXorDisabled && sNativeXorChecks < kNativeXorChecksRequired)
+			{
+				before = new unsigned char[info->BufferSize];
+				memcpy(before, info->Buffer, (size_t)info->BufferSize);
+			}
+
 			tTJSVariant FileHash((tjs_int64)info->FileHash);
 			tTJSVariant Offset((tjs_int64)info->Offset);
 			CBinaryAccessor *buf = new CBinaryAccessor((unsigned char*)info->Buffer, info->BufferSize);
@@ -340,13 +402,45 @@ static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *in
 			tTJSVariant *vars[] = { &FileHash, &Offset, &Buffer, &BufferSize };
 			decoder->ManagedDecoder.FuncCall(0, nullptr, nullptr, nullptr,
 				sizeof(vars) / sizeof(vars[0]), vars, nullptr);
+
+			if (before)
+			{
+				NativeXorDecrypt(before, (unsigned)info->BufferSize, info->FileHash, info->Offset);
+				if (memcmp(before, info->Buffer, (size_t)info->BufferSize) == 0)
+				{
+					delete[] before;
+					if (++sNativeXorChecks >= kNativeXorChecksRequired)
+					{
+						sNativeXorVerified = true;
+						KRKRNS_LOG("[xp3filter] native xor path verified after %u chunks"
+							" -- script call retired", sNativeXorChecks);
+					}
+				}
+				else
+				{
+					delete[] before;
+					sNativeXorDisabled = true;   // not this shape; script stays in charge
+					KRKRNS_LOG("[xp3filter] native xor path rejected: script output differs");
+				}
+			}
 		}
+	}
+	catch(eTJSError &e)
+	{
+		// A throwing filter would surface as an unreadable archive; log the
+		// reason plus the arguments, so an incomplete or mis-ordered parameter
+		// list can be told apart from a damaged archive.  Ours passes four
+		// arguments where Kirikiroid2 passes six (it adds the file name and the
+		// caller context); scripts that only declare four must still receive
+		// them intact.
+		KRKRNS_LOG("[xp3filter] callback threw at offset %lld size %u hash=%lld: %s",
+			(long long)info->Offset, (unsigned)info->BufferSize,
+			(long long)info->FileHash,
+			e.GetMessage().AsNarrowStdString().c_str());
 	}
 	catch(...)
 	{
-		// A throwing filter would surface as an unreadable archive; log it and
-		// leave the chunk as-is so the failure stays diagnosable downstream.
-		KRKRNS_LOG("[xp3filter] callback threw at offset %lld size %u",
+		KRKRNS_LOG("[xp3filter] callback threw (non-script) at offset %lld size %u",
 			(long long)info->Offset, (unsigned)info->BufferSize);
 	}
 }

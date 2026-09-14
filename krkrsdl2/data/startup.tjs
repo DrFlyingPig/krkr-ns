@@ -34,151 +34,1001 @@ Debug.message("[launcher] probe after guard: loadPlugin="
     + (typeof(Krkr2CompatUtils) == "undefined" ? "NO-NAMESPACE"
        : (typeof(Krkr2CompatUtils.loadPlugin) == "undefined" ? "MISSING" : "ok")));
 
+// Boot phase timing.  The launcher's own script shows up as a multi-second
+// "script-load" in the engine log, which is the whole file (window creation,
+// the 13 MB font, the library scan and the first paint) -- five very different
+// costs hiding behind one number.  These markers split it.
+// Local clock, not the nowMs() helper further down: TJS does not hoist
+// function declarations, so calling it here would throw before the launcher
+// ever painted.
+function bootNow() {
+    var d = new Date();
+    return d.getTime();
+}
+var bootT0 = bootNow();
+function bootMark(label) {
+    Debug.message("[boot] " + label + "=" + (bootNow() - bootT0) + "ms");
+}
+
 var launcherWindow = new Window(0, 0, 0, 0);
 launcherWindow.caption = "KRKR-ns 游戏启动器";
 launcherWindow.setInnerSize(1280, 720);
+bootMark("window");
 
 var launcherLayer = new Layer(launcherWindow, null);
 launcherWindow.add(launcherLayer);
 launcherLayer.setSize(1280, 720);
+bootMark("layer");
+
 var launcherFontFaces = Font.addFont("notosanssc.ttf");
 if (launcherFontFaces.count == 0) throw "Unable to load the bundled launcher font";
 Font.defaultFaceName = launcherFontFaces[0];
 launcherLayer.font.face = launcherFontFaces[0];
+bootMark("font");
 
-var gameFolders = Storages.getGameDirectoryList();
-var selectedFolder = gameFolders.count > 0 ? 0 : -1;
-var gameFiles = new Array();
+// ---------------------------------------------------------------------------
+// Palette.  Flat fills only: the Layer has no rounded corners, gradients,
+// strokes or shadows, so a 1px border is four fillRect calls and every shade
+// below is a solid colour.  Anything that looks like a "card" is a rectangle
+// plus a hairline.
+// ---------------------------------------------------------------------------
+var C_BG      = 0x131D21;
+var C_SURFACE = 0x1C272B;
+var C_RAISED  = 0x243033;
+var C_LINE    = 0x2A383C;
+var C_FG      = 0xEDF0E9;
+var C_FG2     = 0xC9D9CE;
+var C_MUTED   = 0x93A5A6;
+var C_DIM     = 0x6F8487;
+var C_ACCENT  = 0xB9E4C9;
+var C_INK     = 0x1B3C31;
+var C_SEL     = 0x213930;
+var C_WARN    = 0xE8C08A;
+var C_BAD     = 0xE0918C;
+var C_BADBG   = 0x3A2B28;
+
+// Generated-cover tones: a = backdrop, b = right block, c = shaded block,
+// g = accent block, t = the initial's colour.  Five sets, picked by the folder
+// name so a given game always looks the same.
+var TONES = [
+    %[a:0x2B4048, b:0x22343B, c:0x354C54, g:0x3F5B63, t:0xCFE2DD],
+    %[a:0x3A3350, b:0x2E2940, c:0x463D5F, g:0x544A70, t:0xDDD6F0],
+    %[a:0x2F4438, b:0x25362C, c:0x3A5444, g:0x456451, t:0xD3E6D8],
+    %[a:0x4A3A34, b:0x3A2E29, c:0x5A4740, g:0x6B544B, t:0xECDCD2],
+    %[a:0x2C4152, b:0x233340, c:0x375065, g:0x415D75, t:0xD3E2EF]
+];
+
+var GAME_DIR_STORAGE = "sdmc:/switch/KRKR-ns/Game/";
+var COVER_ROOT_STORAGE = "sdmc:/switch/KRKR-ns/Covers/";
+var ALIAS_STORAGE = "sdmc:/switch/KRKR-ns/Names.tjs";
+var GAME_ROOT_DISPLAY = "SD:/switch/KRKR-ns/Game/";
+var SAVE_ROOT_DISPLAY = "SD:/switch/KRKR-ns/saves/";
+// Order matters: the first name present wins.  Kirikiroid-style distributions
+// are inconsistent about which archive actually carries the boot script --
+// Riddle Joker ships 运行游戏.xp3 where others use 启动游戏.xp3, and without it
+// the picker would settle on a patch archive.
+var ENTRY_PREFERENCE = ["启动游戏.xp3", "运行游戏.xp3", "data.xp3", "play.xp3", "main.xp3", "startup.xp3"];
+
+var VISIBLE_ROWS = 6;
+var DIALOG_ROWS = 5;
+
+var games = new Array();
+var gameAliases = %[];
+var selectedFolder = -1;
 var selectedFile = -1;
 var listTop = 0;
-var statusText = "选择游戏文件夹和 XP3 启动包";
-var launching = false;
+var dialogTop = 0;
+var mode = "home";
+var memoryOk = true;
+var statusText = "本地游戏库 · SD 卡";
+var footerHits = new Array();
+
+// ---------------------------------------------------------------------------
+// Drawing helpers.  `drawText` places the BASELINE at y + ascent, where the
+// ascent FreeType reports is round(ascender * size / unitsPerEm) = 0.88 * size
+// for the bundled Noto Sans SC (hhea.ascender 880, unitsPerEm 1000).  Every
+// call below therefore takes a baseline, which keeps the numbers comparable
+// with the design sheets.
+// ---------------------------------------------------------------------------
+function ascentOf(size) {
+    return (880 * size) \ 1000;
+}
+
+// TJS has two flavours of "nothing": a missing dictionary member reads back as
+// typeof "void", while an out-of-range array slot reads back as "undefined".
+// Testing only for "undefined" therefore treats every cache miss as a hit, so
+// both have to be checked.
+function isVoid(v) {
+    var t = typeof(v);
+    return t == "void" || t == "undefined";
+}
+
+// Every font change costs a full re-apply of the bundled 13 MB CJK face
+// (rasterizer setup plus prerendered-font release/reacquire), measured at
+// roughly 5 ms.  A redraw used to touch the font ~280 times -- once per label
+// and once per width query -- which is what made the picker take half a
+// second per key press.  Two things fix that:
+//
+//   * widths are cached, so measuring never touches the font;
+//   * text is queued and drawn grouped by size/weight, so the font is applied
+//     once per STYLE instead of once per label.
+//
+// flushText() must also be called before any overlay that has to cover what
+// was drawn before it (the dialog scrims, the memory-mode banner).
+var textQueue = new Array();
+var widthCache = %[];
+
+function text(x, baseline, str, size, color, bold) {
+    textQueue.add(%[
+        x: x,
+        y: baseline - ascentOf(size),
+        s: str,
+        size: size,
+        c: color,
+        b: bold ? 1 : 0,
+        k: size * 2 + (bold ? 1 : 0)
+    ]);
+}
+
+function flushText() {
+    var n = textQueue.count;
+    if (n == 0) return;
+    // Insertion sort by style key: the queue is a couple of hundred entries and
+    // this runs on input, not per frame.
+    for (var i = 1; i < n; i++) {
+        var item = textQueue[i];
+        var j = i - 1;
+        while (j >= 0 && textQueue[j].k > item.k) {
+            textQueue[j + 1] = textQueue[j];
+            j--;
+        }
+        textQueue[j + 1] = item;
+    }
+    var applied = -1;
+    for (var m = 0; m < n; m++) {
+        var t = textQueue[m];
+        if (t.k != applied) {
+            launcherLayer.font.height = t.size;
+            launcherLayer.font.bold = t.b ? true : false;
+            applied = t.k;
+        }
+        launcherLayer.drawText(t.x, t.y, t.s, t.c);
+    }
+    textQueue = new Array();
+}
+
+function widthOf(str, size, bold) {
+    var key = size + "|" + (bold ? 1 : 0) + "|" + str;
+    var hit = widthCache[key];
+    if (!isVoid(hit)) return hit;
+    launcherLayer.font.height = size;
+    launcherLayer.font.bold = bold ? true : false;
+    var w = launcherLayer.font.getTextWidth(str);
+    widthCache[key] = w;
+    return w;
+}
+
+function textRight(xRight, baseline, str, size, color, bold) {
+    text(xRight - widthOf(str, size, bold), baseline, str, size, color, bold);
+}
+
+function textCenter(xCenter, baseline, str, size, color, bold) {
+    text(xCenter - (widthOf(str, size, bold) \ 2), baseline, str, size, color, bold);
+}
+
+// The engine has no letter-spacing, so tracked labels are drawn one glyph at a
+// time.  Only used on short labels; the launcher redraws on input, not per frame.
+function spacedWidth(str, size, bold, spacing) {
+    var w = 0;
+    for (var i = 0; i < str.length; i++) {
+        w += widthOf(str.charAt(i), size, bold) + spacing;
+    }
+    return w > 0 ? w - spacing : 0;
+}
+
+function textSpaced(x, baseline, str, size, color, bold, spacing) {
+    var cx = x;
+    for (var i = 0; i < str.length; i++) {
+        var ch = str.charAt(i);
+        text(cx, baseline, ch, size, color, bold);
+        cx += widthOf(ch, size, bold) + spacing;
+    }
+}
+
+function textSpacedRight(xRight, baseline, str, size, color, bold, spacing) {
+    textSpaced(xRight - spacedWidth(str, size, bold, spacing), baseline, str, size, color, bold, spacing);
+}
+
+function rect(x, y, w, h, color) {
+    launcherLayer.fillRect(x, y, w, h, color);
+}
+
+function plane(x, y, w, h, color, alpha) {
+    launcherLayer.colorRect(x, y, w, h, color, alpha);
+}
+
+function frame(x, y, w, h, color) {
+    rect(x, y, w, 1, color);
+    rect(x, y + h - 1, w, 1, color);
+    rect(x, y, 1, h, color);
+    rect(x + w - 1, y, 1, h, color);
+}
+
+function kbd(x, y, label, color, size) {
+    if (isVoid(size)) size = 24;
+    var wide = label.length > 1;
+    var glyph = (wide || size < 24) ? 11 : 13;
+    var glyphY = y + (wide ? 16 : (size >= 24 ? 17 : 15));
+    if (label == flashKey) {
+        // Lit: filled instead of outlined, so the badge reads as pressed.
+        rect(x, y, size, size, C_ACCENT);
+        textCenter(x + (size \ 2), glyphY, label, glyph, C_INK, true);
+        return;
+    }
+    frame(x, y, size, size, color);
+    textCenter(x + (size \ 2), glyphY, label, glyph, color, false);
+}
+
+function keyHint(x, baseline, key, label, color) {
+    kbd(x, baseline - 17, key, color, 24);
+    text(x + 30, baseline, label, 12, color, false);
+}
+
+function pad2(n) {
+    return n < 10 ? "0" + n : "" + n;
+}
+
+// ---------------------------------------------------------------------------
+// Generated cover art.  The engine knows folder names and an xp3 listing and
+// nothing else -- there is no cover data anywhere -- so the default art is
+// synthesised from the folder name.  Deterministic: the same folder always
+// produces the same tone and block layout, and it costs a handful of fills and
+// one glyph, so nothing has to ship beside the font.
+// drawCover() prefers a cover image when the user drops one next to the game,
+// and falls back to this.
+// ---------------------------------------------------------------------------
+// TJS2 strings expose no character-code accessor: the complete member list is
+// charAt, indexOf, toUpperCase, toLowerCase, substring, substr, sprintf,
+// replace, escape, split, trim, reverse, repeat, startsWith, endsWith and
+// parseNumber (external/krkrz/tjs2/tjsInterCodeExec.cpp:2574).  So the seed is
+// folded out of the parts of a game the API can actually see -- the length and
+// ASCII characters of the folder name, plus the names and counts of the files
+// inside it -- all of which are stable for a given game.
+var SEED_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz-_ .";
+
+function mixSeed(h, str) {
+    for (var i = 0; i < str.length; i++) {
+        var v = SEED_ALPHABET.indexOf(str.charAt(i).toLowerCase());
+        if (v < 0) v = 37 + (i % 11);
+        h = (h * 131 + v) % 1000003;
+    }
+    return h;
+}
+
+function coverSeed(folder, files) {
+    var h = mixSeed(5381, folder);
+    for (var i = 0; i < files.count; i++) h = mixSeed(h, files[i]);
+    return h;
+}
+
+function coverArt(x, y, w, h, seed, initial, folder) {
+    var tone = TONES[seed % TONES.length];
+    var layout = (seed \ TONES.length) % 3;
+    var rw = Math.round(w * 0.38);
+    var rx = x + w - rw;
+    rect(x, y, w, h, tone.a);
+    rect(rx, y, rw, h, tone.b);
+    rect(rx, y + h - Math.round(h * 0.28), rw, Math.round(h * 0.28), tone.c);
+    var pad = Math.round(w * 0.035);
+
+    if (layout == 0) {
+        var q = Math.round(h * 0.62);
+        var qx = rx + pad;
+        if (qx + q > x + w - pad) qx = x + w - pad - q;
+        rect(qx, y + Math.round(h * 0.14), q, q, tone.g);
+        var q2x = qx + Math.round(q * 0.24);
+        if (q2x + q > x + w - pad) q2x = x + w - pad - q;
+        rect(q2x, y + Math.round(h * 0.14) + Math.round(q * 0.26), q, q, tone.c);
+    } else if (layout == 1) {
+        var bw = Math.round((rw - pad * 2) / 6);
+        var walk = seed;
+        for (var i = 0; i < 6; i++) {
+            walk = (walk * 1103 + 12347) % 1000003;
+            var bh = Math.round(h * (0.30 + (walk % 4) * 0.11));
+            rect(rx + pad + i * bw, y + h - Math.round(h * 0.28) - bh, bw - 4, bh,
+                 (i % 3 == 0) ? tone.g : tone.c);
+        }
+    } else {
+        var u = rw - pad * 2;
+        rect(rx + pad, y + Math.round(h * 0.16), u, Math.round(h * 0.2), tone.c);
+        rect(rx + pad, y + Math.round(h * 0.42), Math.round(u * 0.62), Math.round(h * 0.2), tone.g);
+        rect(rx + pad, y + Math.round(h * 0.68), Math.round(u * 0.82), Math.round(h * 0.12), tone.c);
+    }
+
+    textCenter(rx + (rw \ 2), y + Math.round(h * 0.74), initial, Math.round(h * 0.46), tone.t, true);
+    rect(x + 28, y + h - 44, 44, 3, C_ACCENT);
+    if (folder != "") textSpaced(x + 28, y + h - 20, folder, 12, tone.t, false, 1.5);
+    // Part of the generated treatment only: over a real cover image this line
+    // lands on artwork and stops being readable.
+    textSpacedRight(x + w - 20, y + h - 14, "KIRIKIRI · VISUAL NOVEL", 10, C_FG, false, 2);
+}
+
+// Optional cover image.  Held in a plain Bitmap rather than a second Layer:
+// `new Layer(window, null)` would attach the new layer as the primary layer of
+// its own manager registered on the same window, which would put the cover on
+// screen behind/over the UI.  A Bitmap has no window at all and stretchCopy
+// accepts it as a source.  One bitmap is reused, so walking the library never
+// accumulates images, and a missing or unreadable file is not an error --
+// generated art stands in for it.
+var coverBitmap = null;
+var coverLoadedFor = "";
+var coverReady = false;
+
+function loadCoverFor(folder) {
+    if (folder == coverLoadedFor) return;
+    coverLoadedFor = folder;
+    coverReady = false;
+    var candidates = [
+        GAME_DIR_STORAGE + folder + "/cover.png",
+        GAME_DIR_STORAGE + folder + "/cover.jpg",
+        COVER_ROOT_STORAGE + folder + ".png",
+        COVER_ROOT_STORAGE + folder + ".jpg"
+    ];
+    for (var i = 0; i < candidates.length; i++) {
+        var present = false;
+        try {
+            present = Storages.isExistentStorage(candidates[i]);
+        } catch (e) {
+            // The probe itself throws when the path names a media the storage
+            // manager cannot resolve -- a candidate under a directory that does
+            // not exist yet, eg. Covers/ before the user creates it, raises
+            // "Not supported media type" rather than returning false.
+            present = false;
+        }
+        if (!present) continue;
+        try {
+            if (coverBitmap == null) coverBitmap = new Bitmap();
+            coverBitmap.load(candidates[i]);
+            coverReady = coverBitmap.width > 0 && coverBitmap.height > 0;
+            Debug.message("[launcher] cover: " + candidates[i]);
+        } catch (e) {
+            coverReady = false;
+            Debug.message("[launcher] cover unreadable, using generated art: " + e.message);
+        }
+        return;
+    }
+}
+
+function drawCover(x, y, w, h, game) {
+    loadCoverFor(game.folder);
+    if (coverReady) {
+        try {
+            var iw = coverBitmap.width;
+            var ih = coverBitmap.height;
+            // Centre-crop: the panel is far wider than a typical cover, and
+            // squeezing the whole image in would distort it.
+            var sx = 0, sy = 0, sw = iw, sh = ih;
+            if (iw * h > ih * w) {
+                sw = (ih * w) \ h;
+                sx = (iw - sw) \ 2;
+            } else {
+                sh = (iw * h) \ w;
+                sy = (ih - sh) \ 2;
+            }
+            launcherLayer.stretchCopy(x, y, w, h, coverBitmap, sx, sy, sw, sh, 2);
+            return;
+        } catch (e) {
+            Debug.message("[launcher] cover draw failed: " + e.message);
+        }
+    }
+    coverArt(x, y, w, h, game.seed, game.initial, game.folder);
+}
+
+// -------------------------------------------------------------------------
+// Library scan
+// -------------------------------------------------------------------------
+function loadAliases() {
+    gameAliases = %[];
+    if (!Storages.isExistentStorage(ALIAS_STORAGE)) return;
+    try {
+        // Plain `folder = "名称";` assignments in the global namespace; this is
+        // the only file the launcher reads, and it is optional.  A malformed
+        // file throws and is reported, leaving folder names as the titles.
+        Scripts.execStorage(ALIAS_STORAGE);
+    } catch (e) {
+        Debug.message("[launcher] Names.tjs ignored: " + e.message);
+    }
+}
+
+function displayNameFor(folder) {
+    var alias = gameAliases[folder];
+    if (isVoid(alias) || alias == "") return folder;
+    return alias;
+}
+
+// Folder names are commonly wrapped in 【】 or similar, and the rail avatar and
+// the cover both want the first real character rather than the bracket.
+var INITIAL_SKIP = "【】「」『』（）()[]{}<>《》〈〉·・-—_* \u3000";
+
+function initialOf(name) {
+    for (var i = 0; i < name.length; i++) {
+        var ch = name.charAt(i);
+        if (INITIAL_SKIP.indexOf(ch) < 0) return ch;
+    }
+    return name.length > 0 ? name.charAt(0) : "?";
+}
 
 function isXP3(name) {
     return Storages.extractStorageExt(name).toLowerCase() == ".xp3";
 }
 
-function currentFolderName() {
-    return selectedFolder >= 0 ? gameFolders[selectedFolder] : "未找到游戏文件夹";
+function isPackLike(name) {
+    var lower = name.toLowerCase();
+    return lower.indexOf("patch") >= 0 || lower.indexOf("emote") >= 0;
 }
 
-function selectDefaultXP3() {
-    selectedFile = gameFiles.count > 0 ? 0 : -1;
-    for (var i = 0; i < gameFiles.count; i++) {
-        if (gameFiles[i] == "启动游戏.xp3") selectedFile = i;
+function pickDefaultEntry(files) {
+    for (var p = 0; p < ENTRY_PREFERENCE.length; p++) {
+        for (var f = 0; f < files.count; f++) {
+            if (files[f].toLowerCase() == ENTRY_PREFERENCE[p]) return f;
+        }
+    }
+    for (var g = 0; g < files.count; g++) {
+        if (isXP3(files[g])) return g;
+    }
+    return files.count > 0 ? 0 : -1;
+}
+
+function buildGame(folder) {
+    var files = Storages.getGameFileList(folder);
+    var packs = 0;
+    for (var i = 0; i < files.count; i++) {
+        if (isXP3(files[i])) packs++;
+    }
+    var name = displayNameFor(folder);
+    return %[
+        folder: folder,
+        files: files,
+        packs: packs,
+        name: name,
+        initial: initialOf(name),
+        entry: pickDefaultEntry(files),
+        seed: coverSeed(folder, files)
+    ];
+}
+
+function rescanLibrary() {
+    widthCache = %[];   // titles and pack counts may have changed on the card
+    loadAliases();
+    var folders = Storages.getGameDirectoryList();
+    games = new Array();
+    for (var i = 0; i < folders.count; i++) games.add(buildGame(folders[i]));
+    if (selectedFolder >= games.count) selectedFolder = games.count - 1;
+    if (selectedFolder < 0 && games.count > 0) selectedFolder = 0;
+    listTop = 0;
+    dialogTop = 0;
+    loadSelectedFiles();
+    refreshMemoryState();
+    Debug.message("[launcher] scan: folders=" + games.count + " memoryOk=" + memoryOk);
+}
+
+// Applet (album) launches get a much smaller memory budget than a title
+// override, and a game started from there cannot be mounted at all.  Ask the
+// engine up front so the picker can say so instead of failing on the button.
+function refreshMemoryState() {
+    memoryOk = true;
+    try {
+        if (!isVoid(Storages.canLaunchGame)) memoryOk = Storages.canLaunchGame();
+    } catch (e) {
+        memoryOk = true;
     }
 }
 
-function loadSelectedFolder() {
-    listTop = 0;
-    if (selectedFolder < 0) {
-        gameFiles = new Array();
+function currentGame() {
+    return selectedFolder >= 0 ? games[selectedFolder] : null;
+}
+
+function loadSelectedFiles() {
+    if (games.count == 0) {
         selectedFile = -1;
-        statusText = "请在 SD:/switch/KRKR-ns/Game/ 下建立游戏文件夹";
+        statusText = "未找到游戏文件夹";
         return;
     }
-    gameFiles = Storages.getGameFileList(gameFolders[selectedFolder]);
-    selectDefaultXP3();
-    statusText = gameFiles.count > 0 ? "选择一个 XP3 文件直接启动" : "当前文件夹中没有 XP3";
+    if (selectedFolder >= games.count) selectedFolder = 0;
+    var g = games[selectedFolder];
+    selectedFile = g.files.count > 0 ? (g.entry >= 0 ? g.entry : 0) : -1;
+    dialogTop = 0;
+    statusText = "本地游戏库 · SD 卡";
 }
 
-function changeFolder(delta) {
-    if (launching || gameFolders.count == 0) return;
-    selectedFolder += delta;
-    if (selectedFolder < 0) selectedFolder = gameFolders.count - 1;
-    if (selectedFolder >= gameFolders.count) selectedFolder = 0;
-    loadSelectedFolder();
-    redrawLauncher();
+function selectFolder(index) {
+    if (games.count == 0) return;
+    if (index < 0) index = games.count - 1;
+    if (index >= games.count) index = 0;
+    selectedFolder = index;
+    loadSelectedFiles();
+    keepSelectionVisible();
 }
 
 function keepSelectionVisible() {
-    if (selectedFile < listTop) listTop = selectedFile;
-    if (selectedFile >= listTop + 12) listTop = selectedFile - 11;
+    if (selectedFolder < listTop) listTop = selectedFolder;
+    if (selectedFolder >= listTop + VISIBLE_ROWS) listTop = selectedFolder - VISIBLE_ROWS + 1;
+    if (listTop < 0) listTop = 0;
+    if (listTop > games.count - VISIBLE_ROWS) listTop = games.count - VISIBLE_ROWS;
     if (listTop < 0) listTop = 0;
 }
 
-function drawText(x, y, text, size, color, bold) {
-    launcherLayer.font.height = size;
-    launcherLayer.font.bold = bold;
-    launcherLayer.drawText(x, y, text, color);
+function keepDialogVisible() {
+    if (selectedFile < dialogTop) dialogTop = selectedFile;
+    if (selectedFile >= dialogTop + DIALOG_ROWS) dialogTop = selectedFile - DIALOG_ROWS + 1;
+    if (dialogTop < 0) dialogTop = 0;
 }
 
-function redrawLauncher() {
-    launcherLayer.fillRect(0, 0, 1280, 720, 0x11151B);
+// -------------------------------------------------------------------------
+// Screens
+// -------------------------------------------------------------------------
+function drawHeader() {
+    rect(0, 0, 1280, 84, C_SURFACE);
+    rect(0, 84, 1280, 1, C_LINE);
+    var q = 12, g = 3;
+    rect(48, 30, q, q, C_ACCENT);
+    rect(48 + q + g, 30, q, q, C_ACCENT);
+    rect(48, 30 + q + g, q, q, C_ACCENT);
+    rect(48 + q + g, 30 + q + g, q, q, C_ACCENT);
+    text(86, 52, "KRKR", 26, C_FG, true);
+    text(152, 52, "ns", 15, C_ACCENT, false);
+    rect(196, 30, 1, 24, C_LINE);
+    text(214, 51, "游戏库", 15, C_FG2, false);
+    // The chip is measured rather than fixed so the path beside it cannot run
+    // into it, whatever the font metrics turn out to be.
+    var memLabel = memoryOk ? "完整内存模式" : "小程序内存模式";
+    var chipW = 30 + widthOf(memLabel, 12, false) + 14;
+    var chipX = 1232 - chipW;
+    rect(chipX, 29, chipW, 26, memoryOk ? C_RAISED : C_BADBG);
+    rect(chipX + 16, 39, 6, 6, memoryOk ? C_ACCENT : C_BAD);
+    text(chipX + 30, 47, memLabel, 12, memoryOk ? C_FG2 : C_WARN, false);
+    textRight(chipX - 16, 51, GAME_ROOT_DISPLAY, 12, C_DIM, false);
+}
 
-    // Left game card and folder selector.
-    launcherLayer.fillRect(0, 0, 500, 720, 0x171C24);
-    launcherLayer.fillRect(38, 42, 424, 132, 0x0A3769);
-    launcherLayer.fillRect(42, 46, 416, 124, 0x0E2442);
-    launcherLayer.fillRect(42, 46, 6, 124, 0x23B8FF);
-    drawText(72, 66, "KRKR for Nintendo Switch", 23, 0x65D2FF, true);
-    drawText(72, 108, "通用游戏浏览器", 34, 0xFFFFFF, true);
+// The key hints are also buttons: on a touchscreen the physical pad may not be
+// in hand, so every hint that names an action carries one and registers a hit
+// box.  Entries are dictionaries: %[key:, label:, action:].
+//
+// NOTE: no array or dictionary literal in this file may end with a trailing
+// comma.  TJS2 turns that into one extra VOID slot, so the literal's count is
+// one higher than the number of entries written, and an index loop over it
+// dies on the phantom with "Cannot convert the variable type ((void) to
+// Object)".  This is why the literals below close on the last entry.
+function drawFooter(keys, status) {
+    footerHits = new Array();
+    rect(48, 660, 1184, 1, C_LINE);
+    rect(48, 684, 6, 6, C_ACCENT);
+    text(64, 689, status, 12, C_DIM, false);
+    var i, total = 0;
+    for (i = 0; i < keys.count; i++) {
+        var k = keys[i];
+        total += 24 + 6 + widthOf(k.label, 12, false) + 26;
+    }
+    total -= 26;
+    var x = 1232 - total;
+    for (i = 0; i < keys.count; i++) {
+        var e = keys[i];
+        keyHint(x, 689, e.key, e.label, C_MUTED);
+        var w = 24 + 6 + widthOf(e.label, 12, false);
+        if (!isVoid(e.action)) {
+            footerHits.add(%[x: x - 10, w: w + 20, action: e.action]);
+        }
+        x += w + 26;
+    }
+}
 
-    var folderCounter = selectedFolder >= 0 ? (selectedFolder + 1) + " / " + gameFolders.count : "0 / 0";
-    drawText(44, 205, "游戏文件夹  " + folderCounter, 21, 0x8793A3, false);
-    drawText(44, 244, currentFolderName(), 28, 0xFFFFFF, true);
-    drawText(44, 310, "◀", 34, 0x65D2FF, true);
-    drawText(181, 316, "左右切换游戏", 22, 0xAEB7C4, false);
-    drawText(418, 310, "▶", 34, 0x65D2FF, true);
-    launcherLayer.fillRect(44, 365, 412, 2, 0x343B46);
-
-    var currentName = selectedFile >= 0 ? gameFiles[selectedFile] : "未找到启动文件";
-    drawText(44, 388, currentName, 29, 0xFFFFFF, true);
-    launcherLayer.fillRect(44, 436, 412, 102, selectedFile >= 0 && isXP3(currentName) ? 0x176C9E : 0x343A43);
-    launcherLayer.fillRect(49, 441, 402, 92, selectedFile >= 0 && isXP3(currentName) ? 0x0C4E79 : 0x272C34);
-    drawText(82, 456, "▶", 46, 0xFFFFFF, true);
-    drawText(154, 466, "启动游戏", 34, 0xFFFFFF, true);
-
-    drawText(44, 560, statusText, 20, launching ? 0x65D2FF : 0xAEB7C4, false);
-    drawText(44, 630, "左右：游戏文件夹  上下：文件", 18, 0x727E8D, false);
-    drawText(44, 666, "摇杆移动光标  A / Enter 启动", 18, 0x727E8D, false);
-
-    // Right-side files inside the selected game directory.
-    launcherLayer.fillRect(500, 0, 780, 720, 0x20242A);
-    launcherLayer.fillRect(500, 78, 780, 2, 0x444B55);
-    drawText(536, 22, selectedFolder >= 0 ? currentFolderName() : "SD:/switch/KRKR-ns/Game/", 30, 0xF3F5F7, true);
-    drawText(1176, 18, "☰", 42, 0xAAB1BA, true);
-
-    if (gameFolders.count == 0) {
-        drawText(540, 132, "SD:/switch/KRKR-ns/Game/ 下没有游戏文件夹", 25, 0xC7CED8, false);
-    } else if (gameFiles.count == 0) {
-        drawText(540, 132, "该游戏文件夹中没有 XP3/TJS", 25, 0xC7CED8, false);
+function drawGameRow(y, game, index) {
+    var selected = index == selectedFolder;
+    if (selected) {
+        rect(48, y, 356, 66, C_SEL);
+        rect(48, y, 4, 66, C_ACCENT);
     } else {
-        for (var row = 0; row < 12; row++) {
-            var fileIndex = listTop + row;
-            if (fileIndex >= gameFiles.count) break;
-            var y = 82 + row * 49;
-            if (fileIndex == selectedFile) {
-                launcherLayer.fillRect(500, y, 780, 48, 0x304E6D);
-                launcherLayer.fillRect(500, y, 7, 48, 0x28B7FF);
-            } else {
-                launcherLayer.fillRect(500, y, 780, 48, 0x24282E);
-            }
-            launcherLayer.fillRect(500, y + 47, 780, 1, 0x5A6068);
-            drawText(532, y + 6, gameFiles[fileIndex], 29,
-                     isXP3(gameFiles[fileIndex]) ? 0xF5F6F8 : 0xA9B1BB,
-                     fileIndex == selectedFile);
+        plane(48, y, 356, 66, C_SURFACE, 120);
+    }
+    var tone = TONES[game.seed % TONES.length];
+    // The avatar brightens while the d-pad is being used, which is the only
+    // feedback available when the selection itself already moved.
+    var lit = selected && flashKey == "▴▾";
+    rect(66, y + 12, 42, 42, selected ? (lit ? C_FG : C_ACCENT) : tone.c);
+    textCenter(87, y + 40, game.initial, 20, selected ? C_INK : tone.t, true);
+    text(120, y + 30, fitText(game.name, 19, selected, 240), 19, selected ? C_FG : C_FG2, selected);
+    // Without an alias the title already IS the folder name; repeating it here
+    // would just be the same string twice.
+    var sub = game.packs + " 个资源包";
+    if (game.name != game.folder) sub = game.folder + " · " + sub;
+    text(120, y + 51, sub, 12, selected ? C_MUTED : C_DIM, false);
+    if (selected) textRight(390, y + 40, "›", 22, C_ACCENT, false);
+}
+
+function fitText(str, size, bold, maxWidth) {
+    if (widthOf(str, size, bold) <= maxWidth) return str;
+    var out = "";
+    for (var i = 0; i < str.length; i++) {
+        if (widthOf(out + str.charAt(i) + "…", size, bold) > maxWidth) break;
+        out += str.charAt(i);
+    }
+    return out + "…";
+}
+
+function siblingsOf(game) {
+    var out = new Array();
+    for (var i = 0; i < game.files.count; i++) {
+        if (i == game.entry) continue;
+        if (!isXP3(game.files[i])) continue;
+        out.add(game.files[i]);
+    }
+    return out;
+}
+
+function entryIsLaunchable(game) {
+    return game != null && game.entry >= 0 && isXP3(game.files[game.entry]);
+}
+
+function drawLaunchButton(game) {
+    var ready = memoryOk && entryIsLaunchable(game) && !launching;
+    if (ready) {
+        rect(436, 588, 300, 56, flashKey == "B" ? C_FG : C_ACCENT);
+        text(462, 624, "▶", 18, C_INK, false);
+        text(492, 625, "启动游戏", 22, C_INK, true);
+        kbd(688, 604, "B", C_INK, 24);
+    } else {
+        rect(436, 588, 300, 56, C_RAISED);
+        text(462, 624, "▶", 18, C_DIM, false);
+        text(492, 625, "启动游戏", 22, C_DIM, true);
+    }
+    if (!memoryOk) {
+        text(760, 610, "内存不足：完整内存模式下才可启动", 12, C_WARN, false);
+        text(760, 632, "浏览与切换启动文件仍然可用", 12, C_DIM, false);
+    } else if (!entryIsLaunchable(game)) {
+        text(760, 610, "该入口不是 XP3，当前只能浏览", 12, C_WARN, false);
+        text(760, 632, "按 X 换一个启动文件", 12, C_DIM, false);
+    } else {
+        text(760, 610, "存档目录  " + SAVE_ROOT_DISPLAY + game.folder + "/", 12, C_MUTED, false);
+        text(760, 632, "游戏内结束游戏会回到本页，可直接换下一款", 12, C_DIM, false);
+    }
+}
+
+function drawDetail(game) {
+    drawCover(436, 112, 796, 228, game);
+    rect(464, 137, 6, 6, C_ACCENT);
+    text(478, 145, "当前选择", 12, C_FG2, false);
+    rect(546, 142, 24, 1, C_LINE);
+    textSpaced(578, 145, pad2(selectedFolder + 1) + " / " + pad2(games.count), 12, C_MUTED, false, 1.5);
+
+    text(436, 386, fitText(game.name, 38, true, 796), 38, C_FG, true);
+    textSpaced(436, 412, game.folder, 13, C_MUTED, false, 2);
+    textRight(1232, 412, GAME_ROOT_DISPLAY + game.folder + "/", 12, C_DIM, false);
+    rect(436, 432, 796, 1, C_LINE);
+
+    // Entry archive.  Picking one is the only reason the X dialog exists.
+    rect(436, 450, 796, 58, C_SURFACE);
+    textSpaced(436 + 20, 471, "启动文件", 11, C_DIM, false, 1);
+    var entryName = game.entry >= 0 ? game.files[game.entry] : "该文件夹中没有可启动文件";
+    text(456, 496, fitText(entryName, 19, false, 560), 19, C_FG, false);
+    textRight(1186, 484, "切换启动文件", 12, C_MUTED, false);
+    kbd(1196, 467, "X", C_MUTED, 24);
+
+    // Sibling archives are mounted automatically; listing them keeps the
+    // "one entry, many packages" model visible instead of surprising.
+    var sib = siblingsOf(game);
+    textSpaced(436, 538, "自动挂载", 11, C_DIM, false, 1);
+    if (game.files.count == 0) {
+        text(500, 538, "该文件夹为空", 13, C_MUTED, false);
+    } else if (sib.count == 0) {
+        text(500, 538, "该目录只有这一个资源包", 13, C_MUTED, false);
+    } else {
+        text(500, 538, "同目录其余 " + sib.count + " 个资源包将一并载入", 13, C_MUTED, false);
+    }
+    var cx = 436;
+    var room = 796;
+    var shown = 0;
+    for (var i = 0; i < sib.count && shown < 3; i++) {
+        var w = 20 + widthOf(sib[i], 12, false);
+        if (cx + w + 8 + 60 > 436 + room) break;
+        rect(cx, 548, w, 24, C_RAISED);
+        text(cx + 10, 565, sib[i], 12, C_FG2, false);
+        cx += w + 8;
+        shown++;
+    }
+    if (sib.count > shown) {
+        var more = "+" + (sib.count - shown);
+        var mw = 20 + widthOf(more, 12, false);
+        rect(cx, 548, mw, 24, C_RAISED);
+        text(cx + 10, 565, more, 12, C_FG2, false);
+    }
+
+    drawLaunchButton(game);
+}
+
+function drawHome(withFooter) {
+    rect(0, 0, 1280, 720, C_BG);
+    drawHeader();
+
+    // Page controls double as the touch affordance for a rail too long to fit.
+    if (listTop > 0) {
+        text(48, 118, "▴ 上翻", 13, C_MUTED, false);
+    } else {
+        text(48, 118, "游戏", 13, C_DIM, false);
+    }
+    textRight(404, 118, pad2(games.count), 18, C_FG, false);
+    var i;
+    for (i = 0; i < VISIBLE_ROWS; i++) {
+        var index = listTop + i;
+        if (index >= games.count) break;
+        drawGameRow(132 + i * 74, games[index], index);
+    }
+    if (games.count > listTop + VISIBLE_ROWS) {
+        textRight(404, 590, "▾ 下翻", 12, C_MUTED, false);
+    }
+    rect(48, 596, 356, 1, C_LINE);
+    text(48, 620, "共 " + games.count + " 款", 12, C_MUTED, false);
+    textRight(404, 620, "Y 重新扫描", 12, C_MUTED, false);
+
+    var game = currentGame();
+    if (game != null) drawDetail(game);
+    if (!memoryOk) drawMemoryBanner();
+    if (withFooter) {
+        drawFooter([
+            %[key: "▴▾", label: "选择游戏"],
+            %[key: "B", label: "启动", action: "launch"],
+            %[key: "X", label: "启动文件", action: "entry"],
+            %[key: "Y", label: "重新扫描", action: "rescan"],
+            %[key: "A", label: "退出", action: "exit"]
+        ], statusText);
+    }
+    flushText();
+}
+
+function drawMemoryBanner() {
+    // The dim plate has to cover the cover art AND its captions, which the
+    // deferred queue has not drawn yet.
+    flushText();
+    plane(436, 112, 796, 228, C_BG, 165);
+    rect(436, 112, 796, 68, C_BADBG);
+    rect(436, 112, 4, 68, C_BAD);
+    text(462, 145, "⚠", 20, C_BAD, false);
+    text(494, 143, "当前为小程序内存模式，无法启动游戏", 19, C_FG, true);
+    text(494, 166, "结束游戏后按住 R 进入 HBMenu，再选择 KRKR-ns 以完整内存模式启动", 13, C_WARN, false);
+    rect(1076, 130, 140, 32, C_RAISED);
+    frame(1076, 130, 140, 32, C_FG2);
+    textCenter(1146, 151, "重试", 14, C_FG2, false);
+}
+
+function drawEmpty() {
+    rect(0, 0, 1280, 720, C_BG);
+    drawHeader();
+    text(48, 118, "游戏", 13, C_DIM, false);
+    textRight(404, 118, "00", 18, C_DIM, false);
+    plane(48, 132, 356, 66, C_SURFACE, 120);
+    text(66, 172, "+", 22, C_DIM, false);
+    text(96, 170, "还没有游戏", 15, C_MUTED, false);
+
+    rect(436, 132, 796, 1, C_LINE);
+    text(436, 200, "游戏库是空的", 38, C_FG, true);
+    text(436, 236, "把游戏文件夹放进 SD 卡，再按 Y 重新扫描即可。", 15, C_MUTED, false);
+    rect(436, 266, 796, 52, C_RAISED);
+    text(456, 298, GAME_ROOT_DISPLAY, 20, C_ACCENT, false);
+    textRight(1212, 298, "← 游戏放在这一层", 12, C_DIM, false);
+    textSpaced(436, 352, "目录结构示例", 11, C_DIM, false, 1.5);
+    var tree = [
+        "Game/",
+        "├─ CafeStella/",
+        "│   ├─ 启动游戏.xp3   ← 入口",
+        "│   ├─ data.xp3         ← 自动挂载",
+        "│   └─ patch.xp3        ← 自动挂载",
+        "└─ SummerLetter/",
+        "    └─ data.xp3"
+    ];
+    for (var i = 0; i < tree.length; i++) {
+        text(436, 380 + i * 24, tree[i], 14, i == 0 ? C_FG2 : C_MUTED, false);
+    }
+    rect(436, 560, 796, 44, 0x2A2620);
+    rect(436, 560, 4, 44, C_WARN);
+    text(462, 588, "⚠ 真机目录名与文件名必须使用英文或数字，中文路径无法识别", 13, C_WARN, false);
+    rect(436, 612, 200, 40, C_ACCENT);
+    text(456, 638, "▶", 14, C_INK, false);
+    text(480, 639, "重新扫描", 17, C_INK, true);
+    kbd(600, 622, "Y", C_INK, 20);
+    drawFooter([
+        %[key: "Y", label: "重新扫描", action: "rescan"],
+        %[key: "A", label: "退出", action: "exit"]
+    ], "未找到游戏文件夹");
+    flushText();
+}
+
+function drawEntryDialog() {
+    drawHome(false);
+    flushText();
+    var game = currentGame();
+    plane(0, 0, 1280, 720, 0x071114, 215);
+    rect(360, 120, 560, 470, C_SURFACE);
+    frame(360, 120, 560, 470, C_LINE);
+    textSpaced(392, 158, "LAUNCH ENTRY", 10, C_MUTED, false, 2);
+    text(392, 188, "选择启动文件", 24, C_FG, true);
+    textRight(884, 166, "✕", 16, C_MUTED, false);
+    text(392, 214, "默认已选中 启动游戏.xp3，仅在此文件无法启动时才需要更换。", 12, C_MUTED, false);
+    rect(392, 236, 496, 1, C_LINE);
+    rect(392, 250, 496, 26, C_RAISED);
+    text(404, 268, game != null ? game.folder : "", 12, C_MUTED, false);
+    text(448, 268, "/", 12, C_DIM, false);
+    textSpaced(458, 268, "XP3 · TJS", 12, C_DIM, false, 1);
+
+    var count = game != null ? game.files.count : 0;
+    var rows = count - dialogTop;
+    if (rows > DIALOG_ROWS) rows = DIALOG_ROWS;
+    for (var i = 0; i < rows; i++) {
+        var index = dialogTop + i;
+        var y = 290 + i * 44;
+        var selected = index == selectedFile;
+        var name = game.files[index];
+        if (selected) {
+            rect(392, y, 496, 38, C_SEL);
+            rect(392, y, 3, 38, C_ACCENT);
+        } else {
+            plane(392, y, 496, 38, C_SURFACE, 90);
+        }
+        text(412, y + 25, fitText(name, 15, selected, 300), 15, selected ? C_FG : C_FG2, selected);
+        if (selected) {
+            textRight(872, y + 25, "当前入口 ✓", 12, C_ACCENT, false);
+        } else if (!isXP3(name)) {
+            textRight(872, y + 25, "非 XP3，当前不能作为入口", 11, C_WARN, false);
+        } else if (isPackLike(name)) {
+            textRight(872, y + 25, "通常作为资源包自动挂载", 11, C_DIM, false);
         }
     }
+    if (count - dialogTop - rows > 0) {
+        text(392, 528, "▾  同目录还有 " + (count - dialogTop - rows) + " 个文件", 12, C_DIM, false);
+    }
+    rect(392, 546, 496, 1, C_LINE);
+    text(392, 574, "选择只影响本次启动，不写入游戏目录", 11, C_DIM, false);
+    rect(744, 552, 144, 34, C_ACCENT);
+    text(760, 575, "确认", 14, C_INK, true);
+    kbd(856, 559, "B", C_INK, 20);
+    drawFooter([
+        %[key: "▴▾", label: "选择文件"],
+        %[key: "B", label: "确认", action: "dialogClose"],
+        %[key: "A", label: "返回", action: "dialogClose"]
+    ], "启动文件 · " + (game != null ? game.folder : ""));
+    flushText();
 }
 
-function launchSelectedGame() {
-    if (launching || selectedFolder < 0 || selectedFile < 0) return;
-    var name = gameFiles[selectedFile];
-    if (!isXP3(name)) {
-        statusText = "该文件不是 XP3 启动包";
-        redrawLauncher();
+// Deliberately static.  launchXP3 runs the whole mount synchronously, so
+// nothing here can animate; a moving bar would be a lie.  The four segments
+// show how far the boot is expected to get, not measured progress.
+function drawLaunching() {
+    var game = currentGame();
+    rect(0, 0, 1280, 720, C_BG);
+    drawHeader();
+    text(48, 118, "游戏", 13, C_DIM, false);
+    for (var i = 0; i < VISIBLE_ROWS; i++) {
+        var index = listTop + i;
+        if (index >= games.count) break;
+        drawGameRow(132 + i * 74, games[index], index);
+    }
+    plane(48, 132, 356, 464, C_BG, 150);
+
+    if (game != null) {
+        drawCover(436, 112, 796, 228, game);
+        flushText();   // the dim plate must also cover the cover's captions
+        plane(436, 112, 796, 228, C_BG, 120);
+        rect(464, 137, 6, 6, C_ACCENT);
+        text(478, 145, "正在启动", 12, C_FG2, false);
+        textSpaced(578, 145, pad2(selectedFolder + 1) + " / " + pad2(games.count), 12, C_MUTED, false, 1.5);
+        text(436, 386, fitText(game.name, 38, true, 796), 38, C_FG, true);
+        var entryName = game.entry >= 0 ? game.files[game.entry] : "";
+        text(436, 412, "入口 " + entryName + " · " + game.packs + " 个资源包", 13, C_MUTED, false);
+    }
+    rect(436, 432, 796, 1, C_LINE);
+
+    var stages = [
+        %[label: "挂载资源包", state: "done"],
+        %[label: "加载解密过滤器", state: "done"],
+        %[label: "初始化引擎与脚本", state: "now"],
+        %[label: "进入游戏", state: "wait"]
+    ];
+    for (var s = 0; s < stages.length; s++) {
+        var st = stages[s];
+        var y = 466 + s * 40;
+        var state = st.state;
+        var color = state == "done" ? C_ACCENT : (state == "now" ? C_FG : C_DIM);
+        text(440, y + 5, state == "done" ? "✓" : (state == "now" ? "●" : "○"), 14, color, false);
+        text(468, y + 5, st.label, 15, state == "wait" ? C_DIM : C_FG2, false);
+        rect(436 + s * 202, 622, 190, 4, state == "wait" ? C_RAISED : (state == "now" ? C_FG : C_ACCENT));
+    }
+    text(436, 648, "阶段 3 / 4 · 首次启动需要 10 秒到 2 分钟，取决于游戏大小与 SD 卡速度", 12, C_MUTED, false);
+    textRight(1232, 648, "请勿退出程序", 12, C_WARN, false);
+
+    rect(48, 660, 1184, 1, C_LINE);
+    rect(48, 684, 6, 6, C_ACCENT);
+    text(64, 689, "正在启动 · " + (game != null ? game.folder : ""), 12, C_DIM, false);
+    textRight(1232, 689, "此阶段引擎正在同步挂载，按键不会被处理", 12, C_DIM, false);
+    flushText();
+}
+
+function drawExitConfirm() {
+    if (games.count == 0) drawEmpty(); else drawHome(false);
+    flushText();
+    plane(0, 0, 1280, 720, 0x071114, 215);
+    rect(450, 264, 380, 176, C_SURFACE);
+    frame(450, 264, 380, 176, C_LINE);
+    text(482, 308, "退出 KRKR-ns？", 22, C_FG, true);
+    text(482, 340, "存档已经写入 SD 卡，退出不会影响进度。", 13, C_MUTED, false);
+    text(482, 362, "下次需要从 HBMenu 重新进入。", 12, C_DIM, false);
+    rect(482, 384, 140, 38, C_ACCENT);
+    text(506, 409, "退出", 16, C_INK, true);
+    kbd(586, 391, "B", C_INK, 24);
+    rect(638, 384, 140, 38, C_RAISED);
+    frame(638, 384, 140, 38, C_LINE);
+    text(662, 409, "取消", 16, C_FG2, true);
+    kbd(742, 391, "A", C_FG2, 24);
+    drawFooter([
+        %[key: "B", label: "确认退出", action: "doExit"],
+        %[key: "A", label: "取消", action: "dialogClose"]
+    ], "退出确认");
+    flushText();
+}
+
+function redraw() {
+    // Cleared here rather than in drawFooter so the launching page -- which
+    // deliberately has no live controls -- leaves no stale hit boxes behind.
+    footerHits = new Array();
+    if (launching) {
+        drawLaunching();
         return;
     }
-    launching = true;
-    statusText = "正在启动 " + name + " …";
-    redrawLauncher();
-    Debug.message("[launcher] click: " + currentFolderName() + "/" + name);
+    if (mode == "entry") {
+        drawEntryDialog();
+        return;
+    }
+    if (mode == "exit") {
+        drawExitConfirm();
+        return;
+    }
+    if (games.count == 0) {
+        drawEmpty();
+        return;
+    }
+    drawHome(true);
+}
+
+// -------------------------------------------------------------------------
+// Launching
+//
+// launchXP3 does the whole game mount synchronously and the engine presents
+// only after the input handler returns, so calling it directly from a key
+// handler means the launching page never reaches the screen -- the frozen
+// frame would still be the library.  The continuous handler runs once per
+// event pass, so the request is handed to it and the launch waits for the
+// second pass: the first one is still inside the key press frame, and by the
+// second the launching page has been presented.
+// -------------------------------------------------------------------------
+var launching = false;
+var launchArmed = false;
+var launchPasses = 0;
+var launchArmedTick = 0;
+var launchHandler = null;
+
+function performLaunch() {
+    var game = currentGame();
+    if (game == null || selectedFile < 0) {
+        launching = false;
+        redraw();
+        return;
+    }
+    var name = game.files[selectedFile];
+    Debug.message("[launcher] click: " + game.folder + "/" + name);
     try {
-        if (!Storages.launchXP3(currentFolderName(), name, launcherWindow)) {
+        if (!Storages.launchXP3(game.folder, name, launcherWindow)) {
+            // The only non-throwing failure is the applet-memory gate.
+            memoryOk = false;
             launching = false;
             statusText = "请按住 R 从游戏进入 hbmenu";
-            redrawLauncher();
+            redraw();
         }
     } catch (e) {
         // A launch that throws must not leave the launcher latched: `launching`
@@ -188,52 +1038,326 @@ function launchSelectedGame() {
         Debug.message("[launcher] failed: " + e.message);
         throw e;
     }
+    // Reaching here means launchXP3 returned.  Do NOT redraw: by then the
+    // engine has invalidated the launcher window on its way into the game, so
+    // touching the layer throws "The object is already invalidated".  Ending a
+    // session hands control back through the engine's in-process restart,
+    // which re-runs this script from the top anyway.
+    Debug.message("[launcher] launchXP3 returned");
+}
+
+function launcherTick(tick) {
+    if (!launchArmed) return;
+    if (launchPasses == 0) {
+        launchPasses = 1;
+        launchArmedTick = tick;
+        return;
+    }
+    if (tick - launchArmedTick < 16) return;
+    launchArmed = false;
+    if (launchHandler != null) {
+        System.removeContinuousHandler(launchHandler);
+        launchHandler = null;
+    }
+    // Both handlers must be gone before the game starts: a stale one keeps
+    // firing inside the game session and redraws the launcher window the engine
+    // has already invalidated ("The object is already invalidated"), and it
+    // keeps the engine in continuous-event mode for nothing.
+    stopFlash();
+    performLaunch();
+}
+
+function requestLaunch() {
+    var game = currentGame();
+    if (launching || game == null || selectedFile < 0) return;
+    if (!entryIsLaunchable(game)) {
+        statusText = "该文件不是 XP3 启动包";
+        redraw();
+        return;
+    }
+    launching = true;
+    launchArmed = true;
+    launchPasses = 0;
+    // Arm the deferred launch before drawing: if the launching page ever fails
+    // to render, the game still starts instead of the picker wedging with
+    // `launching` stuck true and every input path returning early.
+    if (launchHandler == null) {
+        launchHandler = function(tick) { launcherTick(tick); };
+        System.addContinuousHandler(launchHandler);
+    }
+    redraw();
+}
+
+function rescanLibraryAndRedraw() {
+    var keep = selectedFolder >= 0 && selectedFolder < games.count ? games[selectedFolder].folder : "";
+    rescanLibrary();
+    if (keep != "") {
+        for (var i = 0; i < games.count; i++) {
+            if (games[i].folder == keep) selectedFolder = i;
+        }
+    }
+    keepSelectionVisible();
+    redraw();
+}
+
+// -------------------------------------------------------------------------
+// Input
+// -------------------------------------------------------------------------
+// -------------------------------------------------------------------------
+// Press feedback.  The engine presents a frame only when the layer is damaged,
+// so an animation would mean redrawing every frame -- and a full present costs
+// far more than the redraw itself.  Instead a press lights the matching key
+// badge (and the control it fires) for a beat, then clears: two frames per
+// press, which is what makes the picker feel like it heard you.
+// -------------------------------------------------------------------------
+var flashKey = "";
+var flashUntil = 0;
+var flashHandler = null;
+
+function nowMs() {
+    var d = new Date();
+    return d.getTime();
+}
+
+function stopFlash() {
+    flashKey = "";
+    if (flashHandler != null) {
+        System.removeContinuousHandler(flashHandler);
+        flashHandler = null;
+    }
+}
+
+function flashTick(tick) {
+    if (nowMs() < flashUntil) return;
+    stopFlash();
+    redraw();
+}
+
+function beginFlash(legend) {
+    if (legend == "") return;
+    flashKey = legend;
+    flashUntil = nowMs() + 160;
+    if (flashHandler == null) {
+        flashHandler = function(tick) { flashTick(tick); };
+        System.addContinuousHandler(flashHandler);
+    }
+}
+
+// Physical key -> the legend shown in the footer, so the badge that lights up
+// is the one the user just pressed.
+function legendForKey(key) {
+    if (key == 0x1C0 || key == 0x0D || key == 0x20) return "B";
+    if (key == 0x1C1 || key == 0x1B) return "A";
+    if (key == 0x1C2) return "Y";
+    if (key == 0x1C3) return "X";
+    if (key == 0x1B5 || key == 0x1B7 || key == 0x1B6 || key == 0x1B8) return "▴▾";
+    if (key == 0x25 || key == 0x27 || key == 0x26 || key == 0x28) return "▴▾";
+    return "";
+}
+
+// One entry point for every on-screen control, so a tap and the matching key
+// cannot drift apart.
+function runAction(action) {
+    if (launching) return;
+    if (action == "launch") {
+        requestLaunch();
+    } else if (action == "entry") {
+        if (games.count > 0) {
+            mode = "entry";
+            keepDialogVisible();
+            redraw();
+        }
+    } else if (action == "rescan") {
+        rescanLibraryAndRedraw();
+    } else if (action == "exit") {
+        mode = "exit";
+        redraw();
+    } else if (action == "doExit") {
+        System.exit(0);
+    } else if (action == "dialogClose") {
+        mode = "home";
+        redraw();
+    } else if (action == "pageUp") {
+        pageRail(-1);
+    } else if (action == "pageDown") {
+        pageRail(1);
+    }
+}
+
+function pageRail(delta) {
+    if (games.count == 0) return;
+    selectFolder(selectedFolder + delta * VISIBLE_ROWS);
+    redraw();
+}
+
+function moveRail(delta) {
+    if (games.count == 0) return;
+    selectFolder(selectedFolder + delta);
+    redraw();
+}
+
+function moveEntry(delta) {
+    var game = currentGame();
+    if (game == null || game.files.count == 0) return;
+    selectedFile += delta;
+    if (selectedFile < 0) selectedFile = game.files.count - 1;
+    if (selectedFile >= game.files.count) selectedFile = 0;
+    keepDialogVisible();
+    redraw();
 }
 
 launcherWindow.onMouseDown = function(x, y, button, shift) {
     if (launching) return;
-    if (x >= 500 && y >= 82 && y < 670) {
-        var index = listTop + ((y - 82) \ 49);
-        if (index >= 0 && index < gameFiles.count) {
-            selectedFile = index;
-            redrawLauncher();
-            launchSelectedGame();
+
+    // The footer band belongs to the key hints and nothing else, so a tap that
+    // lands between two hints is swallowed instead of hitting the pane behind.
+    if (y >= 664 && y < 714) {
+        for (var h = 0; h < footerHits.count; h++) {
+            if (x >= footerHits[h].x && x < footerHits[h].x + footerHits[h].w) {
+                runAction(footerHits[h].action);
+                return;
+            }
         }
-    } else if (x >= 44 && x < 456 && y >= 436 && y < 538) {
-        launchSelectedGame();
-    } else if (x >= 44 && x < 120 && y >= 292 && y < 360) {
-        changeFolder(-1);
-    } else if (x >= 385 && x < 456 && y >= 292 && y < 360) {
-        changeFolder(1);
+        return;
+    }
+
+    if (mode == "entry") {
+        if (x >= 744 && x < 888 && y >= 552 && y < 586) {
+            mode = "home";
+            redraw();
+            return;
+        }
+        if (x >= 856 && x < 900 && y >= 148 && y < 184) {
+            mode = "home";
+            redraw();
+            return;
+        }
+        if (x >= 392 && x < 888 && y >= 290 && y < 290 + DIALOG_ROWS * 44) {
+            var hit = dialogTop + ((y - 290) \ 44);
+            var game = currentGame();
+            if (game != null && hit >= 0 && hit < game.files.count) {
+                selectedFile = hit;
+                mode = "home";
+                redraw();
+            }
+            return;
+        }
+        if (x < 360 || x >= 920 || y < 120 || y >= 590) {
+            mode = "home";
+            redraw();
+        }
+        return;
+    }
+    if (mode == "exit") {
+        if (x >= 482 && x < 622 && y >= 384 && y < 422) {
+            System.exit(0);
+            return;
+        }
+        if (x >= 638 && x < 778 && y >= 384 && y < 422) {
+            mode = "home";
+            redraw();
+        }
+        return;
+    }
+    if (games.count == 0) {
+        if (x >= 436 && x < 636 && y >= 612 && y < 652) rescanLibraryAndRedraw();
+        return;
+    }
+    if (listTop > 0 && x >= 48 && x < 140 && y >= 98 && y < 130) {
+        runAction("pageUp");
+        return;
+    }
+    if (games.count > listTop + VISIBLE_ROWS && x >= 300 && x < 412 && y >= 576 && y < 604) {
+        runAction("pageDown");
+        return;
+    }
+    if (x >= 300 && x < 412 && y >= 606 && y < 636) {
+        runAction("rescan");
+        return;
+    }
+    if (x >= 48 && x < 404 && y >= 132 && y < 132 + VISIBLE_ROWS * 74) {
+        var index = listTop + ((y - 132) \ 74);
+        if (index >= 0 && index < games.count && index != selectedFolder) {
+            beginFlash("▴▾");
+            selectFolder(index);
+            redraw();
+        }
+        return;
+    }
+    if (!memoryOk && x >= 1076 && x < 1216 && y >= 130 && y < 162) {
+        refreshMemoryState();
+        redraw();
+        return;
+    }
+    if (x >= 436 && x < 736 && y >= 588 && y < 644) {
+        beginFlash("B");
+        requestLaunch();
+        return;
+    }
+    if (x >= 1040 && x < 1232 && y >= 450 && y < 508) {
+        beginFlash("X");
+        mode = "entry";
+        keepDialogVisible();
+        redraw();
     }
 };
 
 launcherWindow.onKeyDown = function(key, shift) {
     if (launching) return;
-    if (key == 0x25 || key == 0x1B5) {
-        changeFolder(-1);
-    } else if (key == 0x27 || key == 0x1B7) {
-        changeFolder(1);
-    } else if (gameFiles.count > 0 && (key == 0x26 || key == 0x1B6)) {
-        selectedFile--;
-        if (selectedFile < 0) selectedFile = gameFiles.count - 1;
-        keepSelectionVisible();
-        redrawLauncher();
-    } else if (gameFiles.count > 0 && (key == 0x28 || key == 0x1B8)) {
-        selectedFile++;
-        if (selectedFile >= gameFiles.count) selectedFile = 0;
-        keepSelectionVisible();
-        redrawLauncher();
-    } else if (key == 0x0D || key == 0x20 || key == 0x1C0) {
-        launchSelectedGame();
+    beginFlash(legendForKey(key));
+
+    if (mode == "exit") {
+        if (key == 0x1C0 || key == 0x0D || key == 0x20) {
+            runAction("doExit");
+        } else if (key == 0x1C1 || key == 0x1B) {
+            runAction("dialogClose");
+        }
+        return;
+    }
+
+    if (mode == "entry") {
+        if (key == 0x1B6 || key == 0x26) {
+            moveEntry(-1);
+        } else if (key == 0x1B8 || key == 0x28) {
+            moveEntry(1);
+        } else if (key == 0x1C0 || key == 0x0D || key == 0x20) {
+            runAction("dialogClose");
+        } else if (key == 0x1C1 || key == 0x1B) {
+            runAction("dialogClose");
+        }
+        return;
+    }
+
+    if (key == 0x1B5 || key == 0x25) {
+        runAction("pageUp");
+    } else if (key == 0x1B7 || key == 0x27) {
+        runAction("pageDown");
+    } else if (games.count > 0 && (key == 0x1B6 || key == 0x26)) {
+        moveRail(-1);
+    } else if (games.count > 0 && (key == 0x1B8 || key == 0x28)) {
+        moveRail(1);
+    } else if (key == 0x1C3) {
+        runAction("entry");
+    } else if (key == 0x1C2) {
+        runAction("rescan");
+    } else if (key == 0x1C1) {
+        runAction("exit");
+    } else if (key == 0x1C0 || key == 0x0D || key == 0x20) {
+        runAction("launch");
     }
 };
 
-loadSelectedFolder();
+// -------------------------------------------------------------------------
+// Boot
+// -------------------------------------------------------------------------
+rescanLibrary();
+bootMark("scan");
 keepSelectionVisible();
-redrawLauncher();
+redraw();
+bootMark("firstpaint");
 launcherWindow.visible = true;
-Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gameFiles.count);
+Debug.message("[launcher] ready, folders=" + games.count
+    + " files=" + (currentGame() != null ? currentGame().files.count : 0));
 
 // Test harness, inert unless the marker exists: rotate through the game
 // folders, booting one archive each pass, so the session hand-over (end game ->
@@ -243,27 +1367,20 @@ Debug.message("[launcher] ready, folders=" + gameFolders.count + " files=" + gam
 // rebuilds the script engine, so a TJS-side counter would reset to 0 and the
 // first folder would launch forever, never reaching a second game.
 if (Storages.isExistentStorage("sdmc:/switch/KRKR-ns/autocycle.txt")) {
-    var cycleIndex = Storages.getAutocycleRound();
-    if (gameFolders.count > 0) {
-        selectedFolder = cycleIndex % gameFolders.count;
-        loadSelectedFolder();
-        var preferred = new Array();
-        preferred.add("启动游戏.xp3");
-        preferred.add("data.xp3");
-        preferred.add("play.xp3");
-        preferred.add("main.xp3");
-        preferred.add("startup.xp3");
+    if (games.count > 0) {
+        selectedFolder = Storages.getAutocycleRound() % games.count;
+        loadSelectedFiles();
+        var game = currentGame();
         var found = -1;
-        for (var p = 0; p < preferred.count; p++) {
-            for (var f = 0; f < gameFiles.count; f++) {
-                if (gameFiles[f].toLowerCase() == preferred[p]) found = f;
+        for (var p = 0; p < ENTRY_PREFERENCE.length; p++) {
+            for (var f = 0; f < game.files.count; f++) {
+                if (game.files[f].toLowerCase() == ENTRY_PREFERENCE[p]) found = f;
             }
         }
         if (found >= 0) selectedFile = found;
-        if (selectedFile >= 0) {
-            Debug.message("[autocycle] launching " + currentFolderName() + "/" + gameFiles[selectedFile]);
-            launchSelectedGame();
+        if (selectedFile >= 0 && entryIsLaunchable(game)) {
+            Debug.message("[autocycle] launching " + game.folder + "/" + game.files[selectedFile]);
+            requestLaunch();
         }
     }
 }
-

@@ -61,6 +61,16 @@ extern "C" void krkrsdl2_link_emoteplayer_plugin();
 #endif
 // Static-archive anchor for the layerExBTOA built-in (see layerexbtoa).
 extern "C" void krkrsdl2_link_layerexbtoa_plugin();
+// Static-archive anchors for the Kirikiroid2-compatible built-ins.
+extern "C" void krkrsdl2_link_dirlist_plugin();
+extern "C" void krkrsdl2_link_getabout_plugin();
+extern "C" void krkrsdl2_link_addfont_plugin();
+extern "C" void krkrsdl2_link_fftgraph_plugin();
+extern "C" void krkrsdl2_link_win32dialog_plugin();
+extern "C" void krkrsdl2_link_varfile_plugin();
+extern "C" void krkrsdl2_link_savestruct_plugin();
+extern "C" void krkrsdl2_link_getsample_plugin();
+extern "C" void krkrsdl2_link_wutcwf_plugin();
 
 
 //---------------------------------------------------------------------------
@@ -532,6 +542,18 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 #ifdef TVP_OPUS_DECODER_IMPLEMENT
 	if (name == TJS_W("wuopus.dll")) return true;
 #endif
+	// Plugins that attach members instead of registering a class (or that only
+	// register a storage media) cannot be detected through the global object;
+	// their registration is static, so the name alone means "available".
+	if (name == TJS_W("varfile.dll") ||   // var:// storage media
+		name == TJS_W("getabout.dll") ||  // System.getAboutString
+		name == TJS_W("addfont.dll") ||   // System.addFont
+		name == TJS_W("fftgraph.dll") ||  // drawFFTGraph (stub)
+		name == TJS_W("dirlist.dll") ||  // getDirList
+		name == TJS_W("getsample.dll") || // WaveSoundBuffer.sampleValue (lip-sync)
+		name == TJS_W("wutcwf.dll") ||    // .tcwf wave decoder
+		name == TJS_W("savestruct.dll")) // Dictionary/Array struct serialisation
+		return true;
 	return false;
 }
 
@@ -544,7 +566,16 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 	if (short_name == TJS_W("emoteplayer.dll") ||
 		short_name == TJS_W("motionplayer.dll") ||
 		short_name == TJS_W("emotedriver.dll") ||
-		short_name == TJS_W("layerexbtoa.dll"))
+		short_name == TJS_W("layerexbtoa.dll") ||
+		short_name == TJS_W("varfile.dll") ||
+		short_name == TJS_W("getabout.dll") ||
+		short_name == TJS_W("addfont.dll") ||
+		short_name == TJS_W("fftgraph.dll") ||
+		short_name == TJS_W("dirlist.dll") ||
+		short_name == TJS_W("getsample.dll") ||
+		short_name == TJS_W("wutcwf.dll") ||
+		short_name == TJS_W("win32dialog.dll") ||
+		short_name == TJS_W("savestruct.dll"))
 		return true;
 	return TVPHasSwitchBuiltin(short_name);
 }
@@ -592,6 +623,39 @@ void TVPLoadPlugin(const ttstr & name)
 		if (ns_builtin_plugins.insert(short_name).second)
 			TVPAddLog(ttstr(TJS_W("(info) loaded built-in plugin: ")) + short_name);
 		return;
+	}
+	// Kirikiroid2-compatible built-ins that register through ncbind (member
+	// attachments, a global function or a storage media) instead of a class the
+	// global object could be probed for.  Force the translation units out of
+	// the static archive, then run whatever the module table holds.
+	{
+		krkrsdl2_link_dirlist_plugin();
+		krkrsdl2_link_getabout_plugin();
+		krkrsdl2_link_addfont_plugin();
+		krkrsdl2_link_fftgraph_plugin();
+		krkrsdl2_link_win32dialog_plugin();
+		krkrsdl2_link_varfile_plugin();
+		krkrsdl2_link_savestruct_plugin();
+		krkrsdl2_link_getsample_plugin();
+		krkrsdl2_link_wutcwf_plugin();
+		if (short_name == TJS_W("dirlist.dll") ||
+			short_name == TJS_W("getabout.dll") ||
+			short_name == TJS_W("addfont.dll") ||
+			short_name == TJS_W("fftgraph.dll") ||
+			short_name == TJS_W("win32dialog.dll") ||
+			short_name == TJS_W("varfile.dll") ||
+			short_name == TJS_W("savestruct.dll") ||
+			short_name == TJS_W("getsample.dll") ||
+			short_name == TJS_W("wutcwf.dll"))
+		{
+			ncbAutoRegister::LoadModule(short_name);
+			if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())
+			{
+				if (ns_builtin_plugins.insert(short_name).second)
+					TVPAddLog(ttstr(TJS_W("(info) loaded built-in plugin: ")) + short_name);
+				return;
+			}
+		}
 	}
 	// layerExBTOA attaches extension functions directly to the Layer class
 	// (clipAlphaRect and friends) rather than registering a new class, so it

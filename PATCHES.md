@@ -549,6 +549,106 @@ KRKR-ns/
 - **编译坑**：tjs2 无 `TJS_E_BOUNDS`（用 `TJS_E_FAIL`）；同签名成员函数类内声明+定义重复报错。
 - **发布**：本批 P62–P66 随 GitHub Release v0.3.1（替换附件，md5 `c5ec1038`）发布。
 
+### P71: 启动器整体重写 + 9 个插件移植 + 编码/引擎 API 补齐（2026-09-13/14，随 v0.3.2 发布）
+本批为 v0.3.1 之后陆续落地、此前未单独成节的工作（与 P67–P70 同批发布）：
+
+**内置启动器（`krkrsdl2/data/startup.tjs` 重写，+1264/-147）**
+- 游戏库界面：左侧列表（选中高亮、资源包计数）+ 右侧详情（封面 / 入口卡片 / 自动挂载提示 / 存档目录）；空库显示目录结构示例页。
+- 封面：`Game/<目录>/cover.png|jpg` → `Covers/<目录>.png|jpg` → 按目录名确定性生成（5 套色调 × 3 种版式，同游戏恒定）；Bitmap 复用 + 中心裁剪。
+- 名称别名：可选 `sdmc:/switch/KRKR-ns/Names.tjs`（`目录名 = "标题";`，`Scripts.execStorage` 执行），失败只记日志回落目录名。
+- 入口优先级：`启动游戏.xp3` > `运行游戏.xp3` > `data.xp3` > `play.xp3` > `main.xp3` > `startup.xp3`（Riddle Joker 依赖「运行游戏.xp3」）；patch/emote 类归档在 UI 上标注为资源包。
+- 交互：X 启动文件选择弹窗、A 退出确认、Y 重扫（保留选中）、左右整页翻动；列表行 / 上下翻页 / 弹窗条目 / 按钮均有触摸命中区，footer 空白点击被吞；按键按下时键位徽章高亮 160ms。
+- 绘制性能：文本宽度缓存 + 文本按「字号/字重」分组排队绘制（字体重设从 ~280 次/重绘降到按样式次数），无按键零重绘；按键重绘从 ~0.5s 变为即时。
+- 内存模式：新增 `Storages.canLaunchGame()`（applet 模式无法挂载）→ 顶部模式 chip；非完整内存模式额外显示遮罩 + 「重试」+ HBMenu 启动指引。
+- 启动改为延迟到第二次事件循环执行（`launchXP3` 同步，否则启动页绘不出来），新增「正在启动」四阶段静态页与 `[boot] window/layer/font/scan/firstpaint` 分阶段计时。
+
+**插件移植（`src/plugins/`，静态库 + `PluginImpl.cpp` 锚点与内置名单，`CMakeLists.txt`/`sources.txt` 注册）**
+- `dirlist`（`getDirList`，经 storage 枚举，xp3 内目录同样可列）、`getabout`（`System.getAboutString`）、`getsample`（`WaveSoundBuffer.getSample/sampleValue/sampleCount/sampleAhead` + `setDefaultCounts/setDefaultAheads`，唇同步/波形）、`savestruct`（`Array/Dictionary` 的 `save2/saveStruct2/toStructString`）、`varfile`（`var://` 内存存储）、`win32dialog`（`WIN32Dialog.messageBox`）、`addfont`（`System.addFont`）、`fftgraph`（`drawFFTGraph` 哑元）、`wutcwf`（TCWF/ADPCM 波形解码器）。
+- `compat-patches/system/k2compat.tjs`：删除 `WaveSoundBuffer.setDefaultAheads` 等 getSample 脚本垫片（改用原生插件）。
+- 新增 `compat-patches/system/LayerExImageCompat.tjs`：`Layer.clipAlphaRect` 兜底垫片，仅当成员缺失时安装（原生 `layerexbtoa.dll` 正常加载时惰性；真机与模拟器均确认已加载）。
+
+**文本编码与 TJS 层**
+- `base/TextStream.cpp` + 新增 `utils/gbk2unicode.c`（GBK 表 + `gbk_mbtowc`）：无 BOM 文本按 UTF-8 → Shift_JIS → GBK 依次探测（显式 `"Shift_JIS"` 时 SJIS 优先），全部失败才抛原错误；未知 encoding 不再抛 `UnsupportedEncoding`。中文重编码的 tjs/ini/csv 不再以 `Cannot convert given narrow string to wide string` 中断启动。
+- `tjs2/tjsInterCodeGen.cpp`：裸全局名（如 `typeof GdiPlus`）编译为非抛出的 typeof 指令，缺插件时与 `typeof global.X` 行为一致（此前整个 boot 停在 `Member "GdiPlus" does not exist`）。
+- `visual/LayerIntf.{cpp,h}`：`Layer.affinePile`（矩阵/三点两模式，源矩形越界裁剪）、`Layer.stitchWrappedCopy`（layerStwCopy.dll 唯一导出，YuzuSoft 用其门控选项页；保守实现=裁剪后普通 Blt + 真值）、`Font.doUserSelect` 哑元。
+- `visual/TransIntf.cpp`：缺失转场 handler 回落 crossfade 并只记一次 `[trans]`（extrans/extNagano 的 rotatezoom 等）。
+- `plugins/kagparser/KAGParser.{cpp,h}`：标签字典补齐 `taglist` 成员（`KAGEnvironment.entryEnvObject` / `KAGEnvBase._command` 依赖；缺它则标题背景/立绘层不出）。
+
+**修复**
+- `sound/QueueSoundBufferImpl.cpp`：`getVisBuffer` 的缓冲区地址原经 32 位 `tjs_int` 转换（64 位下非法内存写）→ 第一句带语音的台词崩溃；改 64 位整型。
+- `sound/SoundPlayer.cpp`：`aheadsamples` 偏移先归一再切片（原实现越界读），无 vis buffer 的队列项跳过、count<=0 直接返回。
+- `plugins/psbfile/PsbFilePlugin.cpp`：成功路径上的窄串文件名打印在 CJK 目录（`【KRKR】…`）抛异常，表现为「加载失败但资源已提交」；移除该打印，`psb-load` 拆 read/mdf/parse/commit 四段计时。
+- `src/core/base/sdl2/XP3ExtractionFilter.cpp`：`hint` 实为成员名哈希而非布尔，旧写法污染 TJS 成员缓存 → `Member "xor" does not exist`、加密包读到未解密数据；另加原生 XOR 快路径（前 4 块与脚本输出逐字节一致后转内联，形状不符立即永久回退）。
+- `src/core/sdl2/SDLApplication.cpp`：新增 `ReleaseNativeForSwitch()`——Switch 只有单一原生窗口，游戏挂载前释放启动器窗口的 SDL window/renderer/surface/texture（修「启动器→游戏」交接黑屏）；画布 ≤ 窗口时不再调用 `SDL_RenderSetLogicalSize`（会连带改 SDL 的鼠标/触摸坐标映射，是「触摸位置总落错」的根因）；`TickBeat` 在 renderer 为空时提前返回。
+- `src/core/base/sdl2/SysInitImpl.cpp`：图像缓存上限 40 → 96 MiB（E-mote 标题的解码工作集放不下时每帧重解码 `[slow] image-decode`，表现为约 1 秒停顿且 draw 几乎为 0）。
+
+### P70: overlay/mixer 模式影片只有声音、画面黑屏 — Switch 上的「覆盖层呈现」(2026-09-14)
+- **现象**：真机 tzxm 游戏内播 opmovie.wmv：`[movie] published frame=1..600`（解码/音频都正常）但画面全黑；同一文件在开机 OP 里走 layer 模式则正常（`[video] applied frame=1 slot=0 layers=1/0`）。同一会话可先后出现两种模式。
+- **根因 1（黑屏本体）**：`tTJSNI_VideoOverlay::WndProc` 的 `EC_UPDATE` 只处理 `vomLayer`（把帧赋给脚本层）与 `vomMixer`（`PresentVideoImage`）；`vomOverlay` 在 win32 上由 **DirectShow 自己的视频窗口**显示（`SetWindow/SetRect/SetVisible`），而本移植的 `SwitchMovieOverlay` 把这些全部实现为空操作 → 解码出的帧**没有任何显示路径**。游戏侧 `sysmovie`（KAGEX 系统影片标签）在无 `-vomstyle` 参数时按 `currentWindowsVersion` 回落到 `vomOverlay`（日志 `video mode:overlay`、`mode=0`），于是进入这个死路。
+- **根因 2（找到根因 1 后仍黑屏）**：`TVPAddVideOverlay`/`TVPRemoveVideoOverlay` 在**整棵树里从未被调用**（上游 krkrz win32 同样是死代码），`TVPVideoOverlayVector` 恒空 → 第一版呈现钩子遍历空表，什么都没画（用户实测仍黑屏）。
+- **实现**：
+  1. **注册**（`VideoOvlImpl.cpp`，`__SWITCH__` 内）：构造函数 `TVPAddVideOverlay(this)`、`Invalidate()` 与新增析构函数 `TVPRemoveVideoOverlay(this)`（析构兜底，防「泄漏的对象未 Invalidated」留下野指针）。新增 `TVPClearVideoOverlays()`，在引擎重建 step 5 与 `TVPClearContinuousHandlers()` 并列调用（同 P68 的跨会话残留问题）。
+  2. **呈现**：新增 `tTJSNI_VideoOverlay::PresentFrameToSurface()`——非 layer 模式且 `visible` 且 `Play/Pause` 时，取 `GetFrontBuffer()` 对应帧位图，按脚本设定的 `Rect` 拷进窗口合成 surface（尺寸相同走 `TVPCopyBitmapToSurface` 1:1，尺寸不同走本文件最近邻缩放；整像素覆盖、不做混合，按 `GetFrame()` 计数**每解码帧只画一次**）。绘制点在**层树合成之后、上传之前**——即叠在场景上方，与 win32 硬件覆盖层语义一致；暂停时保留最后一帧。
+  3. **接入**（`SDLApplication.cpp::TickBeat`）：`krkrsdl2_video_overlay_pending()` 在损伤判定**之前**决定是否强制进入上传分支（影片叠在静止场景上不产生层通知，否则永远不会上传）；实际 blit 放在 `krkrsdl2_glc_readback()` **之后**（GPU 合成模式会整幅回写 surface，先画会被盖掉），成功后 `gpuPresented=false` 并把视频矩形并入上传 `rect`。
+  4. **诊断**：影片打开后每秒一行 `[video] overlay state: visible/status/player/frame/last/bmp/rect`（本次就是靠它定位根因 2），每 120 帧一行 `[video] overlay frame=N ... rect=... vid=..x.. surface=..x..`。
+- **验证（模拟器 tzxm）**：开机 OP 走 layer 模式不受影响（`[video] applied frame=1`）；标题界面确认进入 sysmovie 路径后 `video mode:overlay` → `[video] overlay frame=1/120/240/... mode=0 rect=(0,0)-(1280,720) vid=1280x720 surface=1280x720`，画面正常；用户真机确认「现在正常了」。NRO md5 `7a82fdc8`。
+- **附注**：复现路径——tzxm 启动后 OP 默认走 layer 模式；在标题界面按确认进入游戏，sysmovie 才会以 overlay 模式重播 OP（这也是真机日志里同一影片两种 mode 的由来）。
+
+### P69: tzxm 真机「动态立绘局部抽动/眼睛闪烁」— 已按用户要求整体回退（2026-09-14）
+> **状态：本节的诊断脚手架与修补尝试已全部回退**（用户决定暂时搁置该 bug）。工作区已还原到 P68 构建态（NRO md5 与 P68 完全一致 `6a6e0859`，字节级验证）。以下保留结论，供后续接手时省去重复劳动。
+- **现象**：真机打开 tzxm（`D3DAdaptor::captureCanvas` 路径的 E-mote 游戏，画布 1280×720，**两个 E-mote 角色**）时部分动态立绘抽动、人物眼睛一闪一闪；用户截图对比："发淡"帧 = 暗部整体抬升 ≈ +13、高光不变（低透明度白/加算薄层覆盖）。**模拟器同款同场景无此现象**。
+- **已排除（有 A/B 或像素证据，勿重复验证）**：
+  1. **回读策略**：真机自检取 `full=1280`、模拟器取 `tile=512`；强制真机走 `tile=512`（标记 `emote-tileread.txt`）后现象不变 → 排除。
+  2. **拷贝语义**：把 `captureCanvas` 切回上游语义（整幅拷贝 + 全量 `ths->Update()`，标记 `emote-fullcopy.txt`）后现象不变 → 排除。
+  3. **拷贝保真度**：抓帧比对 `emote-layer-0N.bmp` 与同时刻 `emote-fbo-0N.bmp` **逐像素一致**（155,039 个不透明像素、同包围盒、RGB 差 0.0、alpha 差 0.0、同朝向）→ E-mote 输出到图层无任何改动。
+  4. **E-mote 绘制输出**：同一玩家两次采样统计完全一致（但注意：两次采样可能同相位，此项证据较弱）。
+  5. **游戏侧驱动**：游戏对 E-mote 层是**稀疏更新**（探针窗口内 77 秒仅 12 次 captureCanvas，约 6.5 秒一次；由游戏自身的变更检测驱动）→ 帧间闪烁不可能来自图层内容，指向其后的**合成/呈现**或**设备侧 GL 行为**。
+- **尝试过的修补（已回退）**：按上游 `krkrsdl3` 补了帧颜色调制 `colorModulation`/`hasColor`（上游注释明确说缺它会"把虹膜乘成黑/灰"）——移植后用户反馈**眼睛颜色仍不对**，且该改动未经完整验证，故连同脚手架一并回退。
+- **回退内容**：`emoteplayerclass.cpp`（抓帧块 / fullcopy A/B / `[emote-trace]` 统计）、`SDLApplication.cpp`（surface 抓帧）、`emoterunner.cpp`（`[emote-anim]` 采样追踪 + 颜色调制）、`EmoteGLRenderBackend`（`emote-tileread` 覆盖 + 颜色调制 uniform/着色器）、`EmoteSWRenderBackend`、`emotefile.{h,cpp}`、`TVPCompositor.h`；一次性补丁脚本已删除。
+- **保留的成果（不属于本次实验脚手架）**：P68 闪退修复（连续处理器清理 + compat 脚本加固）、P67 的上传可见行带、`glc_layer` 脏区上传、`[prof] frame:`/`[prof] blt:` 归因埋点。
+- **后续接手建议**：既然图层内容被证明干净、且回读/拷贝均已排除，"设备侧合成/呈现或 GL 驱动差异"是唯一未排除方向；下一步值得做的是**在模拟器上把帧率降到真机水平（~20fps）复现**，而不是继续在真机上抓帧。
+- **以下为按时间顺序的历史排查记录**（含已被上方结论覆盖、且脚手架均已回退的中间尝试，仅作复盘参考；文中的 `emote-*.txt` 标记与抓帧代码当前并不存在）：
+- **现象**：真机打开 tzxm（`D3DAdaptor::captureCanvas` 路径的 E-mote 游戏，画布 1280×720）时部分动态立绘抽动，人物眼睛一闪一闪；**模拟器同款同场景无此现象**。
+- **已知差异**：模拟器读回走 `tile=512` 分块路径、真机走 `readback=full=1280` 单次路径（探针结果不同），且该游戏走的是与 LimeLight（`EmotePlayer.draw`/`withoutAdaptor`）**不同的入口**：`D3DAdaptor.captureCanvas`。
+- **上游对比（`.zcode/upstream-krkrsdl3/plugins/emoteplayer/emoteplayerclass.cpp:333`）**：上游 `captureCanvas` = `LockTarget` → **整幅 memcpy 进层** → `ths->Update()`（无比较、无脏区收缩）。本移植换成 `CopyRenderTargetToLayer`：**逐像素变化比较 + 只写变化像素 + 只 Update 变化矩形**（为省整幅合成而做的优化），并新增半分辨率 2× 上采样分支（本游戏 `capture upscaled` 计数为 0，未走）。→ 该收缩路径是本轮的首要嫌疑。
+- **本轮改动（诊断 + A/B，均不改默认行为）**：
+  1. `[emote-trace] calls=%u nothing=%u small(<4kpx)=%u avgRectPx=%llu`（每 120 次 captureCanvas 一次）：眼睛级小区域是"每次都被更新"还是"更新/空交替"——后者指向比较/镜像（mirror）不同步。真机实测：游戏内稳态每帧只有 ~200–270px 真正变化（引擎 `[layer] update-region pixels=`），且**每帧都在眼睛处出现 200–1600px 的更新** → 眼睛区域逐帧都在变。
+  2. 标记 `sdmc:/switch/KRKR-ns/emote-fullcopy.txt`：把 `captureCanvas` 切回**上游语义**（整幅 R/B 转换拷贝 + 全量 `ths->Update()`），用于一次运行判定"收缩是否肇因"。
+  3. 标记 `sdmc:/switch/KRKR-ns/emote-animtrace.txt`：时间线动画采样追踪（`[emote-anim] tick/start/loop/rel/v0=`），看动画值是否平滑推进还是逐帧在两端跳（混叠）。注意：本作可能不走 timeline 控制路径（模拟器 0 行），需以 `[emote-trace]` 与画面为准。
+  4. 标记 `sdmc:/switch/KRKR-ns/emote-tileread.txt`：把 E-mote 回读强制切到 **tile=512**（模拟器自检后采用的路径）。真机自检采用 `full=1280` 单次读回，模拟器采用 `tile=512`——这是该游戏路径上**唯一已确认**的真机/模拟器代码差异（自检只验证过整幅读回，从未验证过"带 y 偏移的子矩形读回"，而实际读回全是子矩形）。
+- **截图数值分析（用户提供两张眼睛特写）**："发淡"状态 = 暗部整体抬升 ≈ +13、高光不变（p01 29→37，暗部均值 36→50）→ 特征为**低透明度白/加算薄层覆盖眼睛区域**，而非单纯换了一帧动画。我们的"比较 + 窄化"拷贝是**整像素替换**、不做混合，因此不可能产生加算薄层——嫌疑落在 E-mote 内容（遮罩/高光部件）或回读路径。
+- **验证**：模拟器跑 tzxm（GL 后端）确认两条路径都能正常出画；NRO md5 `0ccae6d5`。
+- **真机待验证**：① 默认构建 + 玩到闪烁场景，读 `[emote-trace]` 判断更新模式；② 加 `emote-fullcopy.txt` 再跑——闪烁消失即坐实"收缩"路径；③ 加 `emote-tileread.txt` 再跑——闪烁消失即坐实真机"整幅回读"路径（随后改为恒定分块或修该路径）。
+- **A/B 判定结果（两轮均确认标记生效）**：`captureCanvas: full-copy mode` ✓ 与 `readback override: tile=512` ✓ 都出现，但**现象均无变化** → 回读策略与窄化拷贝**双双排除**。
+- **抓帧证据（emote-fbodump）**：6 张 `emote-fbo-*.bmp` 实测显示 —— 游戏有**两个 E-mote 角色**（日志 `D3DAdaptor created` ×2；我按"每次拷贝"抓帧，实际拿到 A/B/A/B/A/B 两个玩家的输出，两张不同图是**两个不同角色**，不是同一目标的两帧）；**同一玩家两次采样逐统计完全一致**（frame2==frame4、frame3==frame5）→ **E-mote 绘制输出稳定干净**，发淡不在绘制环节。上一版图层转储未产出的原因：图层 pitch 为负（-5120，Kirikiri 底向上），SDL 不接受负 pitch；本版改为按行拷入紧凑缓冲后再存。
+- **新抓帧（surface-dump）**：标记 `surface-dump.txt` 让引擎在 TickBeat 里把**最终合成表面**（=上屏画面）连续 6 **帧**写成 `surface-00..05.bmp`，与 `emote-fbodump` 的 E-mote 输出/图层位图同一时刻配对，用来定位发淡进入的环节（合成/呈现）。NRO md5 `bc61b7fa`。
+- **首次抓帧失败的教训**：标记检查原来是"每会话一次"（首个拷贝/首帧时判定），而用户是在**游戏运行中**才放标记 → 完全没被看到；同时那一轮真机跑的仍是旧 NRO（日志文本是旧版的 `(6 frames)`、无 `[surface]` 行），抓帧落在了游戏刚启动时。**两处标记检查都改为每秒轮询**，NRO md5 `b14786d8`。
+- **图层转储校验（关键）**：`emote-layer-02.bmp` 与同一时刻的 `emote-fbo-02.bmp` **逐像素完全一致**——同为 155,039 个不透明像素、同一包围盒 (396,140)-(893,719)、同朝向（同向 RGB 差 **0.0**，翻转后 117.9）、alpha 差 0.0 → **拷贝环节零差异**，与 `emote-fullcopy` A/B 互相印证；同时证明图层转储（负 pitch 修正后）朝向与内容正确。
+- **上一轮 surface 抓帧**落点仍在开机/换场段（六帧亮度 43→43→42→34.5→34.5→0，最后一帧全黑 = 淡入淡出过程），说明 surface 转储本身工作正常，只是**触发时刻**没对上现象。
+- **流程收敛为单标记**：`artifact-dump.txt` 同时触发 surface（**30 帧**）与 emote（12 份）两组抓帧；每秒轮询、**不自动删除**（避免先到的一方消费掉）、每会话只 armed 一次；用户看到现象时放入、抓完自行删除。NRO md5 `d34a41bb`。
+
+### P68: 真机闪退根因 — 引擎重建未清「脚本连续处理器」（2026-09-14，P67 之后）
+- **现象**：真机（新构建）闪退。日志（1789386987，4208 行）最后一行是 `==== An exception occured at k2compat_reinstall.tjs(99) ====` 的 VM dump，其后无任何输出（心跳线程也停 → 属硬崩溃，不是正常退出）。
+- **时间线**：游戏内玩过一轮 → 「结束游戏」→ `[launcher] engine restart requested; main loop will rebuild`（同进程整引擎重建）→ 启动器会话正常起来（firstpaint/ready）→ 一次 `[stall] active=514.3ms dispatch=507.5` → gfxm tick 在**新会话**里执行旧脚本（line 99 `global.__krkrns_gfxm_tries = ... + 1`，全局已被重建清空，TJS 读缺失全局会抛）→ dump → 进程死亡。
+- **根因**：`System.addContinuousHandler` 注册的脚本闭包存放在 **进程级静态** `TVPContinuousHandlerVector`（`base/EventIntf.cpp:913`），只在**进程退出**（`tTVPAtExit`）或某次调用 `TJS_FAILED` 时释放；`krkrsdl2_reinitialize_engine()` 不清理它 → 重建后的新引擎的事件派发仍在调用**旧引擎**的闭包，触碰已销毁/复用的脚本对象 → 原生崩溃。这解释了「结束游戏→回启动器」路线偶发闪退，且与游戏无关（任何注册连续处理器的脚本都可能触发）。
+- **修复**：
+  1. `EventIntf.cpp` 新增 `TVPClearContinuousHandlers()`：释放并清空脚本处理器向量；仅当没有任何 C++ 钩子（`TVPContinuousEventVector` 保留，属平台层）时顺带 `TVPEndContinuousEvent()`（也顺带停掉主循环忙转）。`SDLApplication.cpp` 重建 step 5 在脚本引擎关闭**之前**调用（旧引擎仍存活时才能安全 Release）。
+  2. `compat-patches/system/k2compat_reinstall.tjs` 防御：gfxm tick 的计数器加 `typeof` 守卫；外层 catch 里自摘除（`System.removeContinuousHandler`），使其在失去引擎时不再每帧重抛。
+  3. 删除 tick 内 `global.kag.debugLevel = 3` 试探：它在每次运行时都抛（此刻 `kag` 还没有该成员），而 try 块内的每次抛出都会 dump 整段 VM 反汇编——每局 30 次纯噪音，一并清掉。
+- **验证**：模拟器跑 LimeLight（同一次会话内 `exceptions=0`，此前为 30+；游戏自身遗留的 4 条无关异常仍在），E-mote 正常绘制；NRO md5 `6a6e0859`。**真机待验证：游戏内「结束游戏」→ 回启动器→ 再进游戏，不再闪退。**
+- **注**：真机日志确认加载的是 romfs 内的 `k2compat_reinstall.tjs`（`file://?/romfs:/compat/...`），因此只需替换 NRO，无需动 SD 补丁目录。
+
+### P67: 真机帧内归因埋点 + GPU 合成层路径提速（LimeLight 卡顿的通用诊断，2026-09-14）
+- **背景**：真机 MTP 只读拉取 LimeLight 日志（两份会话，共 ~400s 播放窗口）。数据：平均 fps 7.5–10.5；`compose` 17–35ms/f（峰值 85ms）、`upload` 9–15ms/f（`upMB/f≈10.5`＝每帧整幅 1920×1440 surface）、`present` 3.4ms/f；`disp` 段占墙钟 73%（其中 compose 约 26%，其余 47% 为 KAG/TJS/E-mote 每帧工作，此前无法细分）。结论：这是**通用**问题——画布越大、动画层越大越慢；LimeLight 因 1920×1440 方屏画布 + 全屏 E-mote 动画（title_bg.mtn 29.6MB）落在最坏情况，与游戏逻辑无关。
+- **改动 1（归因）**：`[prof]` 新增两行——`frame:`（`emote prog/draw/rb/lock/cvt`、`meshes`、`notify`、`blendTypes` 直方图；`rb` 再拆 `lock`=glReadPixels 回读、`cvt`=RGBA→BGRA 转换+变化比较）与 `blt:`（引擎层树混合原语 `tTVPBaseBitmap::Blt` 的每帧次数/百万像素/耗时，拆"写入合成缓冲"vs"写入其它层位图"，附方法直方图）。埋点全部 `__SWITCH__` 下 RAII 计时，非 Switch 为空操作，不改变任何渲染行为。
+- **改动 2（glc_layer 提速）**：原先每帧对每个层做**整层**底向上行重排 + 整层 `TexSubImage2D`；现改为按 `bits` 指针缓存纹理（指针+尺寸不变即复用），只重排并上传**cliprect 区域**，上传字节数/耗时进 `[glc] layer-frame` 行（60 帧均值）。UI 层从整层上传降到脏区上传；全屏动画层重排量不变但不再重复建纹理。
+- **改动 3（上传统一只传可见行带）**：full-frame 模式下整幅上传改为只上传 present 会采样的顶部 `visibleH = winH*texW/winW` 行（方屏画布如 LimeLight 1920×1440/窗口 1920×1080 → 只传 1080 行）。被跳过的行**不会被任何 present 采样**，因此即使驱动部分更新异常也不会产生可见瑕疵——这是唯一"零残留风险"的上传裁剪。模拟器实测 `upMB/f` 10.5 → 7.9（=75%），画面正常。
+- **改动 4（归因补全）**：`[prof] blt:` 增加 `m7`（`CopyRect` 纯拷贝，与混合分开计数），补齐合成账目。
+- **真机实测细分（第二轮日志，游戏内 18 个窗口）**：一帧 ≈ 89ms（6.6fps）：`compose` 69.5ms（内含 `rb` 18.8 = `lock` 13.4 回读 + `cvt` 5.4 转换；`blt` 合计 25 = compose 目标 18.2 + 层目标 6.8；`notify` 3.3）+ `upload` 8.7 + `surfcopy` 3.3 + present/overhead。**关键结论（修正方向判断）**：写入合成缓冲的混合量恒定在 **8–9 Mpx/帧**（约 3 个画布）且已跑在 SIMD 上（≈2.2ns/px，不再是瓶颈），**成本来自"体积"而非"效率"**——全屏 E-mote 动画使整画布每帧真实变化，三层全屏叠加即 ~8Mpx。因此：分块/脏区类取巧对这类内容无效，真正的大头只有两条——(a) E-mote 回读往返 18.8ms（直通/不回读），(b) 合成整体搬到 GPU（Kirikiroid2 式层管线）。
+- **真机日志的关键发现（结论修正）**：稳态游戏内一帧 83ms = `compose` 72ms（内含 E-mote 回读+转换 ~33ms，其余 ~36ms 为写合成缓冲的 CPU 混合）+ `upload` 9.8ms + present/overhead ~4ms。**mode1/5 的 `krkrsdl2_glc_try_blt` 目前在开头直接 `return false`，即 GPU 模式并不认领这些合成 blit——所以现有 mode5 只省"最终通知拷贝 + 整幅上传"（~13ms），省不掉那 36ms CPU 混合**。要让 mode5 真正提速，必须让它认领"目标=合成缓冲"的 blit（GPU quad + 回退区域 fold），这是下一步。
+- **验证**：模拟器（Nextendo）运行 LimeLight 标题：新埋点输出正常（含 E-mote 帧 `prog/draw/rb`、blendTypes c1=1 即 ltAlpha），画面与改动前一致（render-surface.bmp 实拍确认标题动画、菜单、方屏裁剪正常）。
+- **真机待验证**：① 默认构建读 `[prof] frame`/`[prof] blt`（决定下一步：读回直通 vs 合成 GPU 化）；② `diffrows-upload.txt` A/B 看部分上传是否无横纹残留（可省 ~9ms/帧）；③ `gpu-composite-gpuonly.txt` 在认领 blit 实现前**不必测**（预计收益 ~8ms，已由数据判定）。
+
 ### P60-R2: 同进程路径重写为「整引擎重建」+ P60b–g 跨会话残留六连修 (2026-09-12，当前版本)
 P60 提交后，同进程回退路径由 DeepSeek 重写，随后围绕「第二个游戏异常」累计六处修复。**本节描述的即当前工作区状态**；上一节 P60 的"原地修补活引擎"方案已被取代。
 

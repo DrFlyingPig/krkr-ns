@@ -23,6 +23,10 @@
 
 #include "tjsCommHead.h"
 #include "GLCompositeBridge.h"
+#include "KrkrNSProf.h"
+#ifdef __SWITCH__
+#include <SDL_timer.h>
+#endif
 
 
 #include "DebugIntf.h"
@@ -701,6 +705,29 @@ void tTVPBaseBitmap::PartialFillMask(const PartialFillMaskParam *param)
 bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tjs_int plane)
 {
+#ifdef __SWITCH__
+	// KRKR-ns profiler: plain (unblended) copies are the other half of the
+	// layer-tree compose work; counted with method 7 so the [prof] blt line
+	// separates blends from copies.  See Blt() above for the timer rationale.
+	struct ScopedCopyProf
+	{
+		Uint64 start;
+		bool composeDest;
+		unsigned px;
+		ScopedCopyProf(const void* dest, const tTVPRect& r)
+			: start(SDL_GetPerformanceCounter()),
+			  composeDest(krkrsdl2_glc_is_compose_dest(dest)),
+			  px((unsigned)((r.right - r.left > 0 && r.bottom - r.top > 0)
+				? (r.right - r.left) * (r.bottom - r.top) : 0)) {}
+		~ScopedCopyProf()
+		{
+			const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+				(double)SDL_GetPerformanceFrequency();
+			krkrsdl2_prof_blt(composeDest ? 1 : 0, 7, ms, px);
+		}
+	} copyProf(this, refrect);
+	(void)copyProf;
+#endif
 	// KRKR-ns Phase 3: GPU composite interception (32bpp main copies only)
 	if(Is32BPP() && plane != TVP_BB_COPY_MASK &&
 		krkrsdl2_glc_try_copy(this, x, y, ref, &refrect))
@@ -1150,6 +1177,30 @@ bool tTVPBaseBitmap::Copy9Patch( const tTVPBaseBitmap *ref, tTVPRect& margin )
 bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tTVPBBBltMethod method, tjs_int opa, bool hda)
 {
+#ifdef __SWITCH__
+	// KRKR-ns profiler: Blt is the layer-tree blend primitive; time it and
+	// split by destination (the compose buffer = what GPU compositing takes
+	// over, any other bitmap = per-layer content building).
+	struct ScopedBltProf
+	{
+		Uint64 start;
+		bool composeDest;
+		int method;
+		unsigned px;
+		ScopedBltProf(const void* dest, tjs_int m, const tTVPRect& r)
+			: start(SDL_GetPerformanceCounter()),
+			  composeDest(krkrsdl2_glc_is_compose_dest(dest)), method(m),
+			  px((unsigned)((r.right - r.left > 0 && r.bottom - r.top > 0)
+				? (r.right - r.left) * (r.bottom - r.top) : 0)) {}
+		~ScopedBltProf()
+		{
+			const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+				(double)SDL_GetPerformanceFrequency();
+			krkrsdl2_prof_blt(composeDest ? 1 : 0, method, ms, px);
+		}
+	} bltProf(this, (int)method, refrect);
+	(void)bltProf;
+#endif
 	// KRKR-ns Phase 3: GPU composite — direct-to-compose blits become
 	// textured quads; everything else keeps the proven CPU path.
 	if(krkrsdl2_glc_try_blt(this, x, y, ref, &refrect, (tjs_int)method, opa, hda))

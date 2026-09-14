@@ -32,6 +32,23 @@ extern void krkrsdl2_prof_accum_surface_copy(double ms);
 extern void krkrsdl2_prof_accum_layer(unsigned w, unsigned h);
 extern void krkrsdl2_prof_accum_upload(double ms, unsigned bytes);
 extern void krkrsdl2_prof_accum_present(double ms);
+/* E-mote frame path (EmotePlayer::progress/draw and the target->layer
+ * readback+convert).  On E-mote titles this work sits in the "disp" segment,
+ * so without these fields a slow frame cannot be attributed between script,
+ * E-mote and composition. */
+extern void krkrsdl2_prof_emote_progress(double ms);
+extern void krkrsdl2_prof_emote_draw(double ms);
+extern void krkrsdl2_prof_emote_readback(double ms);
+extern void krkrsdl2_prof_emote_lock(double ms);    // GPU->CPU readback (glReadPixels)
+extern void krkrsdl2_prof_emote_convert(double ms); // RGBA->BGRA convert + change compare
+extern void krkrsdl2_prof_emote_mesh();
+/* One NotifyBitmapCompleted call: the engine's per-layer presentation, inside
+ * the compose segment on the CPU path and the glc quad path on the GPU one. */
+extern void krkrsdl2_prof_notify(double ms, int blend_type);
+/* One tTVPBaseBitmap::Blt: the layer-tree blend primitive.  Split by whether
+ * the destination is the layer manager's compose buffer — that subset is what
+ * a GPU-compositing switch would remove from the CPU. */
+extern void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px);
 extern void krkrsdl2_prof_emit_and_reset(double interval_ms);
 /* pool-driven task batches (ThreadIntf.cpp); deltas per emit window */
 #ifdef __cplusplus
@@ -55,6 +72,14 @@ static inline void krkrsdl2_prof_accum_surface_copy(double ms) {}
 static inline void krkrsdl2_prof_accum_layer(unsigned w, unsigned h) {}
 static inline void krkrsdl2_prof_accum_upload(double ms, unsigned bytes) {}
 static inline void krkrsdl2_prof_accum_present(double ms) {}
+static inline void krkrsdl2_prof_emote_progress(double ms) {}
+static inline void krkrsdl2_prof_emote_draw(double ms) {}
+static inline void krkrsdl2_prof_emote_readback(double ms) {}
+static inline void krkrsdl2_prof_emote_lock(double ms) {}
+static inline void krkrsdl2_prof_emote_convert(double ms) {}
+static inline void krkrsdl2_prof_emote_mesh() {}
+static inline void krkrsdl2_prof_notify(double ms, int blend_type) {}
+static inline void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px) {}
 static inline void krkrsdl2_prof_emit_and_reset(double interval_ms) {}
 static inline unsigned krkrsdl2_pool_begins() { return 0; }
 static inline unsigned krkrsdl2_pool_bigbegins() { return 0; }

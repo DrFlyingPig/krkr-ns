@@ -131,15 +131,22 @@ tjs_int tTVPSoundPlayer::GetVisBuffer(tjs_int16 *dest, tjs_int numsamples, tjs_i
 			if( (*itr)->GetSegmentQueue().GetFilteredLength() == 0 ) return 0;
 			tTVPSoundSamplesBuffer* sample = *itr;
 			tjs_int count = static_cast<tjs_int>(sample->GetSamplesCount());
-			tjs_int offset = (tjs_int)( pos % count ) + aheadsamples;
+			if( count <= 0 ) return 0;
+			// KRKR-ns: normalise the read offset BEFORE slicing.  The original
+			// loop only subtracted one buffer length per iteration, which is
+			// only correct while aheadsamples < count; getSample titles ask for
+			// ~8800 samples ahead and short buffers could leave the offset out
+			// of range.  A missing visualization buffer (a queued buffer created
+			// before useVisBuffer was enabled) is skipped instead of read.
+			tjs_int offset = (tjs_int)( pos % (tjs_uint64)count ) + aheadsamples;
+			while( offset >= count ) offset -= count;
+			if( offset < 0 ) offset = 0;
 			for( auto i = Samples.begin(); i != Samples.end(); i++ ) {
-				if( offset >= count ) {
-					offset -= count;
-					continue;
-				}
+				const tjs_uint8* vis = (*i)->GetVisBuffer();
+				if( !vis ) continue;
 				tjs_int bufrest = count - offset;
 				tjs_int copysamples = (bufrest > numsamples ? numsamples : bufrest);
-				CopyVisBuffer(dest, (*i)->GetVisBuffer() + offset * blockAlign, copysamples, channels);
+				CopyVisBuffer(dest, vis + offset * blockAlign, copysamples, channels);
 				numsamples -= copysamples;
 				writtensamples += copysamples;
 				if(numsamples <= 0) break;

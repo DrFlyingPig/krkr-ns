@@ -1,6 +1,7 @@
 #include "KrkrNSPaths.h"
 #include "EmoteGLRenderBackend.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSProf.h"
 #include <SDL.h>
 #include <SDL_opengles2.h>
 #include <algorithm>
@@ -601,7 +602,17 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
     if (!target || !target->target) return nullptr;
     impl->bind(target);
     pitch = target->width * 4;
-    impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+    {
+        // GPU->CPU readback is the E-mote frame's biggest single cost; timed
+        // separately from the RGBA->BGRA convert that follows in the layer
+        // bridge so the next optimization (direct/format readback vs
+        // passthrough) can be chosen from data.
+        const Uint64 t0 = SDL_GetPerformanceCounter();
+        impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+        krkrsdl2_prof_emote_lock(
+            (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 /
+            (double)SDL_GetPerformanceFrequency());
+    }
     target->clearDirty();
     // Preserve the upstream framebuffer's RGBA/alpha equations exactly.
     // Row 0 maps to logical row 0 of E-mote's clip-space mesh at the Layer bridge.

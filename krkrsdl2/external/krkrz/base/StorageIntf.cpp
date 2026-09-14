@@ -552,6 +552,11 @@ void tTVPStorageMediaManager::GetListAt(const ttstr &name, iTVPStorageLister * l
 	/*return */rec->MediaIntf.GetObjectNoAddRef()->GetListAt(rec->GetDomainAndPath(name), lister);
 }
 //---------------------------------------------------------------------------
+void TVPGetStorageListAt(const ttstr & name, iTVPStorageLister * lister)
+{
+	if(lister) TVPStorageMediaManager.GetListAt(TVPNormalizeStorageName(name), lister);
+}
+//---------------------------------------------------------------------------
 ttstr tTVPStorageMediaManager::GetLocallyAccessibleName(const ttstr &name)
 {
 	// gateway for GetLocallyAccessibleName
@@ -2069,6 +2074,17 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getAutocycleRound)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getAutocycleRound)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/canLaunchGame)
+{
+	// launchXP3 already refuses to start in applet (album) mode and returns
+	// false, but the launcher cannot tell "not enough memory" apart from any
+	// other false without asking first.  Expose the same predicate so the
+	// picker can say so up front instead of after a dead button press.
+	if(result) *result = krkrsdl2_can_launch_game();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/canLaunchGame)
 //----------------------------------------------------------------------
 #endif
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)

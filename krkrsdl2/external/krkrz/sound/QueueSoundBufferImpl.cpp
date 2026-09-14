@@ -804,7 +804,12 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getVisBuffer)
 		/*var. type*/tTJSNI_QueueSoundBuffer);
 
 	if(numparams < 3) return TJS_E_BADPARAMCOUNT;
-	tjs_int16 *dest = (tjs_int16*)(tjs_int)(*param[0]);
+	// KRKR-ns: the buffer address arrives as a 64-bit tTVInteger; casting it
+	// through the 32-bit tjs_int truncated the pointer on this (64-bit) port
+	// and the engine then wrote to a garbage address -- the lip-sync path
+	// (getSample's sampleValue -> getVisBuffer) crashed on the first voiced
+	// line with an invalid-memory-region fault.
+	tjs_int16 *dest = (tjs_int16*)(tjs_int64)(*param[0]);
 
 	tjs_int ahead = 0;
 	if(numparams >= 4) ahead = (tjs_int)*param[3];

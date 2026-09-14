@@ -37,6 +37,9 @@ extern bool krkrsdl2_glc_pure_frame();
 extern bool krkrsdl2_glc_gpuonly();
 /* pixel-version bump for tracked source bitmaps */
 extern void krkrsdl2_glc_bump_version(const void* bitmap);
+/* diagnostics: is this bitmap the layer manager's compose DrawBuffer?  Used by
+ * the per-frame blt attribution to split layer-tree blends by destination. */
+extern bool krkrsdl2_glc_is_compose_dest(const void* bitmap);
 /* engine-side raster accessor (implemented in LayerBitmapIntf.cpp where the
  * full bitmap type exists); returns row-0 pixels or nullptr */
 extern const void* krkrsdl2_glc_get_bitmap_raster(const void* bitmap,
@@ -66,6 +69,7 @@ static inline bool krkrsdl2_glc_readback(void*, int, int, int) { return false; }
 static inline bool krkrsdl2_glc_pure_frame() { return false; }
 static inline bool krkrsdl2_glc_gpuonly() { return false; }
 static inline void krkrsdl2_glc_bump_version(const void*) {}
+static inline bool krkrsdl2_glc_is_compose_dest(const void*) { return false; }
 static inline const void* krkrsdl2_glc_get_bitmap_raster(const void*, int*, int*, int*, int*) { return nullptr; }
 static inline void krkrsdl2_glc_layer(tjs_int, tjs_int, const void*, tjs_int,
                                       tjs_int, tjs_int, const tTVPRect&,

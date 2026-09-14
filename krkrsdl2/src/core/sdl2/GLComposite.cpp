@@ -229,6 +229,7 @@ static bool gFrameActive = false;               // begin_frame completed for thi
 static unsigned gReadbackCount = 0;
 static unsigned gLayerCount = 0;   // layers recorded this frame
 static Uint32 gLayerMs = 0;        // glc_layer upload+quad time this frame
+static unsigned long long gLayerUpBytes = 0; // bytes uploaded by glc_layer
 static unsigned gBlitChecks = 0;   // window-present probes this run (<=3)
 static bool gBlitBroken = false;   // probe found the FBO empty -> SDL chain
 static unsigned gFrameHandled = 0;              // handled blts in the current frame
@@ -591,6 +592,11 @@ void krkrsdl2_glc_set_compose_target(void* bitmap)
     gComposeBitmap = bitmap;
 }
 
+bool krkrsdl2_glc_is_compose_dest(const void* bitmap)
+{
+    return bitmap != nullptr && bitmap == gComposeBitmap;
+}
+
 static Twin* FindOrCreateTwin(const void* bmp, int w, int h)
 {
     auto it = gTwins.find(bmp);
@@ -680,6 +686,29 @@ void krkrsdl2_glc_end_frame()
             KRKRNS_LOG("[glc] compose-stats: frames=%u handled=%u/%u pure=%d drew=%d readback=%u",
                        frames, gHandledBlts, gTotalBlts, gPureFrame ? 1 : 0,
                        gFrameDrew ? 1 : 0, gReadbackCount);
+    }
+    // GPU-path frame cost: layer quads + their texture uploads, averaged over
+    // 60 frames.  Comparable against the CPU path's compose/upload [prof]
+    // fields.
+    {
+        static unsigned frames = 0;
+        static unsigned long long bytes = 0;
+        static unsigned long long layers = 0;
+        static unsigned long long msTotal = 0;
+        ++frames;
+        bytes += gLayerUpBytes;
+        layers += gLayerCount;
+        msTotal += gLayerMs;
+        gLayerUpBytes = 0;
+        gLayerMs = 0;
+        if (frames % 60 == 0)
+        {
+            KRKRNS_LOG("[glc] layer-frame: frames=%u layers/f=%.1f upMB/f=%.2f layerMs/f=%.2f",
+                       frames, (double)layers / 60.0,
+                       (double)bytes / (1024.0 * 1024.0) / 60.0,
+                       (double)msTotal / 60.0);
+            bytes = layers = msTotal = 0;
+        }
     }
     EndContext();
 }
@@ -965,33 +994,31 @@ void krkrsdl2_glc_layer(tjs_int x, tjs_int y,
         }
     }
 
-    // Layer rasters are usually fresh pointers every frame; cap the texture
-    // cache so a long session doesn't accumulate unbounded textures.
+    // Layer rasters are addressed by their bitmap pointer; the texture is
+    // reused across frames as long as the pointer and size stay the same.
+    // Only the cliprect region is re-uploaded (the engine only reports the
+    // dirty region), so a small UI layer no longer pays a full-layer
+    // repack+upload every frame.
     if (gTextures.size() > 256)
     {
         for (auto& kv : gTextures)
             if (kv.second.tex) gl.DeleteTextures(1, &kv.second.tex);
         gTextures.clear();
     }
-    // Upload the layer pixels into a transient texture (key = bits+size;
-    // layers are usually unique per frame, so keep it cheap and correct).
     TextureEntry& e = gTextures[bits];
-    const bool needSize = (e.tex == 0 || e.w != w || e.h != h);
-    if (needSize)
+    if (e.tex == 0 || e.w != w || e.h != h)
     {
-        if (e.tex == 0)
+        if (e.tex)
         {
-            gl.GenTextures(1, &e.tex);
-            gl.BindTexture(GL_TEXTURE_2D, e.tex);
-            gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            gl.DeleteTextures(1, &e.tex);
+            e.tex = 0;
         }
-        else
-        {
-            gl.BindTexture(GL_TEXTURE_2D, e.tex);
-        }
+        gl.GenTextures(1, &e.tex);
+        gl.BindTexture(GL_TEXTURE_2D, e.tex);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
         gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA,
                       GL_UNSIGNED_BYTE, nullptr);
@@ -1002,20 +1029,26 @@ void krkrsdl2_glc_layer(tjs_int x, tjs_int y,
         gl.BindTexture(GL_TEXTURE_2D, e.tex);
     }
     // bottom-up layer memory: logical row 0 sits at the END of the buffer.
-    // Upload top-down (texture row 0 = logical top) so v=0 is the top.
-    // Row-by-row repack is mandatory for bottomup buffers: a whole-buffer
-    // upload from the logical top reads past the bitmap (each 8-row strip
-    // then sampled the SAME neighbouring memory -> the 8-row moire).
+    // Upload texture row N = logical row N (top-down), which needs a row
+    // repack for bottom-up buffers; GLES2 has no UNPACK_ROW_LENGTH.  Only the
+    // cliprect's rows/columns are packed — the rest of the texture keeps the
+    // previous frame's pixels and is never sampled (the quad draws only the
+    // cliprect).
     {
-        std::vector<unsigned char> tight((size_t)w * h * 4);
-        for (int r = 0; r < h; ++r)
+        static std::vector<unsigned char> tight;
+        tight.resize((size_t)sw * sh * 4);
+        for (int r = 0; r < sh; ++r)
         {
+            const int logicalRow = cliprect.top + r;
             const unsigned char* srcrow = static_cast<const unsigned char*>(bits) +
-                (size_t)(bottomup ? (h - 1 - r) : r) * pitch;
-            std::memcpy(tight.data() + (size_t)r * w * 4, srcrow, (size_t)w * 4);
+                (size_t)(bottomup ? (h - 1 - logicalRow) : logicalRow) * (size_t)pitch +
+                (size_t)cliprect.left * 4;
+            std::memcpy(tight.data() + (size_t)r * sw * 4, srcrow, (size_t)sw * 4);
         }
-        gl.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA,
-                         GL_UNSIGNED_BYTE, tight.data());
+        gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.TexSubImage2D(GL_TEXTURE_2D, 0, cliprect.left, cliprect.top, sw, sh,
+                         GL_RGBA, GL_UNSIGNED_BYTE, tight.data());
+        gLayerUpBytes += (unsigned long long)sw * (unsigned long long)sh * 4ull;
     }
 
     // Blit onto the compose FBO with the layer's blend type.
@@ -1106,11 +1139,21 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
                 // texture-sampled scaling is the proven path (E-mote GL).
                 // The FBO texture rows are bottom-up (row 0 = engine bottom),
                 // so the source height is negated to flip v.
+                //
+                // KRKR-ns: apply the same square-screen rule as the CPU
+                // present (SDLApplication.cpp) — only the TOP `visH` rows
+                // at fit-width scale, where visH equals the game's scHeight
+                // on both docked and handheld.  Presenting the whole canvas
+                // stretched it (4:3 canvas into a 16:9 window becomes a
+                // distorted picture; taller-than-screen canvases 0.75-shrink).
+                int visH = (int)(((int64_t)dh * gComposeW) / dw);
+                if (visH > gComposeH) visH = gComposeH;
+                if (visH < 1) visH = 1;
                 gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
                 gl.ActiveTexture(GL_TEXTURE0);
                 gl.BindTexture(GL_TEXTURE_2D, gComposeTex);
                 DrawQuad(0, 0, dw, dh,
-                         0, gComposeH, gComposeW, -gComposeH,
+                         0, gComposeH, gComposeW, -visH,
                          gComposeW, gComposeH, 255, false, dw, dh, false);
                 gl.Flush();
                 // First frames after (re)start or a window switch: probe the real

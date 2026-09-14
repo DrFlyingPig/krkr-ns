@@ -17,10 +17,28 @@
 
 #include "tjsCommHead.h"
 #include "LayerIntf.h"
+#include "KrkrNSProf.h"
 #include <SDL.h>
 
 namespace emoteplayer
 {
+// Scoped per-call timer for the [prof] frame attribution (KrkrNSProf.h).
+// E-mote progress/draw run inside the KAG continuous handler, so their cost
+// previously hid inside the "disp" segment with no way to separate it from
+// script execution.
+struct EmoteProfTimer
+{
+    Uint64 start;
+    void (*sink)(double);
+    explicit EmoteProfTimer(void (*s)(double))
+        : start(SDL_GetPerformanceCounter()), sink(s) {}
+    ~EmoteProfTimer()
+    {
+        const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+            (double)SDL_GetPerformanceFrequency();
+        sink(ms);
+    }
+};
 
 static std::string EmoteToUtf8(const tTJSString& value)
 {
@@ -48,6 +66,8 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                                     int sourceHeight,
                                     tTVPRect* dirtyRect)
 {
+    EmoteProfTimer profTimer(krkrsdl2_prof_emote_readback);
+    (void)profTimer;
     if (dirtyRect)
         dirtyRect->clear();
     if (!renderer || !target || !layer || sourceWidth <= 0 || sourceHeight <= 0)
@@ -124,6 +144,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         int dirtyTop = copyHeight;
         int dirtyRight = 0;
         int dirtyBottom = 0;
+        const Uint64 cvtStart = SDL_GetPerformanceCounter();
         for (int y = 0; y < copyHeight; ++y)
         {
             uint8_t* destinationRow =
@@ -193,6 +214,9 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         }
         if (dirtyRect && dirtyLeft < dirtyRight && dirtyTop < dirtyBottom)
             *dirtyRect = tTVPRect(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
+        krkrsdl2_prof_emote_convert(
+            (double)(SDL_GetPerformanceCounter() - cvtStart) * 1000.0 /
+            (double)SDL_GetPerformanceFrequency());
     }
     else if (!loggedFailure)
     {
@@ -1114,6 +1138,8 @@ void EmotePlayer::clear(iTJSDispatch2* layer, tjs_uint32 neutralColor)
 }
 void EmotePlayer::progress(tjs_real mstime)
 {
+    EmoteProfTimer profTimer(krkrsdl2_prof_emote_progress);
+    (void)profTimer;
     if (_isStop)
         return;
     if (emtEngine._mainfile != nullptr && emtEngine._mainmotion != nullptr && clockPassed > -1.0 &&
@@ -1181,6 +1207,8 @@ void EmotePlayer::progress(tjs_real mstime)
 }
 void EmotePlayer::draw(iTJSDispatch2* objthis)
 {
+    EmoteProfTimer profTimer(krkrsdl2_prof_emote_draw);
+    (void)profTimer;
     auto* self = ncbInstanceAdaptor<SeparateLayerAdaptor>::GetNativeInstance(objthis);
     tTJSNI_BaseLayer* ths = NULL;
     D3DAdaptor* d3dAdaptor = NULL;

@@ -41,6 +41,13 @@
 #define TVPDSAttenuateToVolume(x) x
 #endif
 
+#ifdef __SWITCH__
+#include <SDL.h>
+#include <algorithm>
+#include <cstdint>
+#include "SDLBitmapBridge.h"
+#endif
+
 //---------------------------------------------------------------------------
 static std::vector<tTJSNI_VideoOverlay *> TVPVideoOverlayVector;
 //---------------------------------------------------------------------------
@@ -108,6 +115,26 @@ tTJSNI_VideoOverlay::tTJSNI_VideoOverlay()
 #endif
 #ifdef __SWITCH__
 	VideoFramesApplied = 0;
+	// 0 = "no decoded frame yet": the player's frame counter starts at 0 and
+	// only becomes 1 after the first frame is published, so an uninitialized
+	// frame buffer is never blitted.
+	LastPresentedFrame = 0;
+#endif
+
+	// Register for the overlay-mode present (the vector also feeds the
+	// at-exit shutdown).  The win32 source declares these helpers but never
+	// calls them -- on Switch the present pump is what needs the live list.
+#ifdef __SWITCH__
+	TVPAddVideOverlay(this);
+#endif
+}
+//---------------------------------------------------------------------------
+tTJSNI_VideoOverlay::~tTJSNI_VideoOverlay()
+{
+#ifdef __SWITCH__
+	// Invalidate() unregisters too, but the registry must never keep a pointer
+	// to a freed instance if a session leaked the object without invalidating.
+	TVPRemoveVideoOverlay(this);
 #endif
 }
 //---------------------------------------------------------------------------
@@ -123,6 +150,10 @@ tTJSNI_VideoOverlay::Construct(tjs_int numparams, tTJSVariant **param,
 //---------------------------------------------------------------------------
 void TJS_INTF_METHOD tTJSNI_VideoOverlay::Invalidate()
 {
+#ifdef __SWITCH__
+	TVPRemoveVideoOverlay(this);
+#endif
+
 	inherited::Invalidate();
 
 	Close();
@@ -306,6 +337,7 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 			Bitmap[1]->GetBitmap()->GetHeight() - 1));
 		player->SetVideoBuffer(BmpBits[0], BmpBits[1], bmpsize);
 		VideoFramesApplied = 0;
+		LastPresentedFrame = 0;
 
 		TVPAddLog(TJS_W("[video] player ready ") +
 			ttstr(static_cast<tjs_int>(width)) + TJS_W("x") +
@@ -357,6 +389,9 @@ void tTJSNI_VideoOverlay::Close()
 		delete Bitmap[1];
 	Bitmap[0] = Bitmap[1] = NULL;
 	BmpBits[0] = BmpBits[1] = NULL;
+	// the frame buffers are gone; nothing may be presented until the next
+	// open publishes its first decoded frame
+	LastPresentedFrame = 0;
 	ClearWndProcMessages();
 	SetStatus(tTVPVideoOverlayStatus::Unload);
 #endif
@@ -479,6 +514,9 @@ void tTJSNI_VideoOverlay::Rewind()
 		VideoOverlay->Stop();
 		ClearWndProcMessages();
 		VideoOverlay->Rewind();
+		// the player resets its frame counter on rewind; do not blit the
+		// previous pass' last frame while the new decode starts
+		LastPresentedFrame = 0;
 	}
 #endif
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
@@ -1574,4 +1612,215 @@ tTJSNativeClass * TVPCreateNativeClass_VideoOverlay()
 	return new tTJSNC_VideoOverlay();
 }
 //---------------------------------------------------------------------------
+
+#ifdef __SWITCH__
+//---------------------------------------------------------------------------
+// Overlay / mixer mode presentation.
+//
+// The win32 implementation leaves these modes to DirectShow's own video
+// window (SetWindow/SetRect on the overlay object); Kirikiroid2 draws them as
+// a sprite above the scene.  Neither exists on the Switch, so TickBeat blits
+// the decoded front buffer into the window's compose surface after the layer
+// tree has been composited and before the texture upload -- above the scene,
+// which is where a win32 overlay video appears.  Layer-mode movies return
+// false here: they reach the screen through the layer tree as before.
+//---------------------------------------------------------------------------
+static bool TVPVideoBlitScaled(SDL_Surface *surface, const void *bits,
+	int bitmapWidth, int bitmapHeight, int srcW, int srcH,
+	int dx, int dy, int dw, int dh, SDL_Rect &copied)
+{
+	copied = SDL_Rect{0, 0, 0, 0};
+	if(!surface || !surface->format || surface->format->BytesPerPixel != 4)
+		return false;
+	const int bmpH = bitmapHeight < 0 ? -bitmapHeight : bitmapHeight;
+	if(!bits || bitmapWidth <= 0 || bmpH <= 0 ||
+		srcW <= 0 || srcH <= 0 || dw <= 0 || dh <= 0 ||
+		srcW > bitmapWidth || srcH > bmpH)
+		return false;
+
+	const SDL_Rect requested = {dx, dy, dw, dh};
+	const SDL_Rect bounds = {0, 0, surface->w, surface->h};
+	if(!SDL_IntersectRect(&requested, &bounds, &copied) || copied.w <= 0 || copied.h <= 0)
+		return false;
+
+	// same DIB layout convention as TVPCopyBitmapToSurface: positive height
+	// means bottom-up memory, so the logical top row sits at the end.
+	const std::ptrdiff_t stride = std::ptrdiff_t(bitmapWidth) * 4;
+	const std::ptrdiff_t pitch = bitmapHeight < 0 ? stride : -stride;
+	const uint8_t *top = static_cast<const uint8_t *>(bits);
+	if(bitmapHeight > 0) top += std::ptrdiff_t(bmpH - 1) * stride;
+
+	const bool locked = SDL_MUSTLOCK(surface);
+	if(locked && SDL_LockSurface(surface) != 0)
+		return false;
+	for(int row = 0; row < copied.h; ++row)
+	{
+		const int sy = (int)((int64_t)(copied.y + row - dy) * srcH / dh);
+		const uint8_t *src = top + std::ptrdiff_t(sy) * pitch;
+		uint8_t *dst = static_cast<uint8_t *>(surface->pixels) +
+			std::ptrdiff_t(copied.y + row) * surface->pitch +
+			std::ptrdiff_t(copied.x) * 4;
+		for(int col = 0; col < copied.w; ++col)
+		{
+			const int sx = (int)((int64_t)(copied.x + col - dx) * srcW / dw);
+			SDL_memcpy(dst + col * 4, src + std::ptrdiff_t(sx) * 4, 4);
+		}
+	}
+	if(locked)
+		SDL_UnlockSurface(surface);
+	return true;
+}
+//---------------------------------------------------------------------------
+static bool TVPOverlayIsPresentable(tTJSNI_VideoOverlay *ovl)
+{
+	return ovl && ovl->IsPresentable();
+}
+//---------------------------------------------------------------------------
+bool tTJSNI_VideoOverlay::IsPresentable() const
+{
+	// mirrors PresentFrameToSurface's gates minus the pixel work
+	if(!VideoOverlay || Mode == vomLayer)
+		return false;
+	int frame = 0;
+	VideoOverlay->GetFrame(&frame);
+	tTVPVideoStatus playerStatus = vsStopped;
+	VideoOverlay->GetStatus(&playerStatus);
+	// Throttled diagnostic: an overlay-mode movie that never presents is a
+	// black screen with sound, and only this line says which gate held it
+	// back (visible / status / frame counter / missing buffers / rect).
+	static Uint32 lastProbe = 0;
+	const Uint32 nowTick = SDL_GetTicks();
+	if(nowTick - lastProbe >= 1000)
+	{
+		lastProbe = nowTick;
+		KRKRNS_LOG("[video] overlay state: visible=%d status=%d player=%d frame=%d last=%d bmp=%d/%d rect=(%d,%d)-(%d,%d)",
+			(int)Visible, (int)Status, (int)playerStatus, frame,
+			(int)LastPresentedFrame, Bitmap[0] ? 1 : 0, Bitmap[1] ? 1 : 0,
+			Rect.left, Rect.top, Rect.right, Rect.bottom);
+	}
+	if(!Visible)
+		return false;
+	if(Status != tTVPVideoOverlayStatus::Play &&
+		Status != tTVPVideoOverlayStatus::Pause)
+		return false;
+	if(!Bitmap[0] || !Bitmap[1])
+		return false;
+	return frame != LastPresentedFrame;
+}
+//---------------------------------------------------------------------------
+bool tTJSNI_VideoOverlay::PresentFrameToSurface(SDL_Surface *surface, SDL_Rect &dirty)
+{
+	dirty = SDL_Rect{0, 0, 0, 0};
+	if(!surface || !VideoOverlay)
+		return false;
+	if(Mode == vomLayer) // composited by the layer tree
+		return false;
+	if(!Visible)
+		return false;
+	if(Status != tTVPVideoOverlayStatus::Play &&
+		Status != tTVPVideoOverlayStatus::Pause) // keeps the last frame on pause
+		return false;
+	if(!Bitmap[0] || !Bitmap[1])
+		return false;
+
+	int movieFrame = 0;
+	VideoOverlay->GetFrame(&movieFrame);
+	if(movieFrame == LastPresentedFrame)
+		return false; // no new decoded frame since the last blit
+
+	BYTE *buff = NULL;
+	VideoOverlay->GetFrontBuffer(&buff);
+	tTVPBaseBitmap *frame = NULL;
+	if(buff && buff == BmpBits[0]) frame = Bitmap[0];
+	else if(buff && buff == BmpBits[1]) frame = Bitmap[1];
+	if(!frame)
+		return false;
+	tTVPBitmap *bmp = frame->GetBitmap();
+	if(!bmp || !bmp->Is32bit())
+		return false;
+
+	long vw = 0, vh = 0;
+	VideoOverlay->GetVideoSize(&vw, &vh);
+	const BitmapInfomation *info = bmp->GetBitmapInfomation();
+	if(vw <= 0 || vh <= 0 || !info || !info->GetBITMAPINFO())
+		return false;
+
+	const int dw = Rect.get_width();
+	const int dh = Rect.get_height();
+	SDL_Rect copied;
+	bool drawn;
+	if(dw == (int)vw && dh == (int)vh)
+		drawn = TVPCopyBitmapToSurface(surface, bmp->GetBits(),
+			(int)vw, info->GetBITMAPINFO()->bmiHeader.biHeight,
+			SDL_Rect{0, 0, (int)vw, (int)vh}, Rect.left, Rect.top, copied);
+	else
+		drawn = TVPVideoBlitScaled(surface, bmp->GetBits(),
+			(int)vw, info->GetBITMAPINFO()->bmiHeader.biHeight,
+			(int)vw, (int)vh, Rect.left, Rect.top, dw, dh, copied);
+
+	if(drawn)
+	{
+		dirty = copied;
+		LastPresentedFrame = movieFrame;
+		++VideoFramesApplied;
+		if(VideoFramesApplied == 1 || (VideoFramesApplied % 120) == 0)
+			KRKRNS_LOG("[video] overlay frame=%u mode=%d rect=(%d,%d)-(%d,%d) vid=%ldx%ld surface=%dx%d",
+				(unsigned)VideoFramesApplied, (int)Mode,
+				Rect.left, Rect.top, Rect.right, Rect.bottom,
+				vw, vh, surface->w, surface->h);
+	}
+	return drawn;
+}
+//---------------------------------------------------------------------------
+bool krkrsdl2_video_overlay_present(SDL_Surface *surface, SDL_Rect *dirty)
+{
+	if(dirty)
+		*dirty = SDL_Rect{0, 0, 0, 0};
+	if(!surface)
+		return false;
+	bool any = false;
+	SDL_Rect acc = {0, 0, 0, 0};
+	for(size_t i = 0; i < TVPVideoOverlayVector.size(); ++i)
+	{
+		SDL_Rect r;
+		if(!TVPVideoOverlayVector[i]->PresentFrameToSurface(surface, r))
+			continue;
+		if(!any)
+		{
+			acc = r;
+			any = true;
+		}
+		else
+		{
+			const int l = std::min(acc.x, r.x);
+			const int t = std::min(acc.y, r.y);
+			const int rr = std::max(acc.x + acc.w, r.x + r.w);
+			const int bb = std::max(acc.y + acc.h, r.y + r.h);
+			acc = SDL_Rect{l, t, rr - l, bb - t};
+		}
+	}
+	if(any && dirty)
+		*dirty = acc;
+	return any;
+}
+//---------------------------------------------------------------------------
+bool krkrsdl2_video_overlay_pending()
+{
+	for(size_t i = 0; i < TVPVideoOverlayVector.size(); ++i)
+	{
+		if(TVPOverlayIsPresentable(TVPVideoOverlayVector[i]))
+			return true;
+	}
+	return false;
+}
+//---------------------------------------------------------------------------
+void TVPClearVideoOverlays()
+{
+	// Engine-restart path: the script engine is rebuilt inside this process,
+	// so a video overlay the old session leaked must not stay in the registry
+	// (the present pump would dereference it through the next session).
+	TVPVideoOverlayVector.clear();
+}
+//---------------------------------------------------------------------------
+#endif // __SWITCH__
 

@@ -751,6 +751,24 @@ public:
 	void StretchCopy(const tTVPRect &destrect, tTVPBaseBitmap *src,
 		const tTVPRect &rect, tTVPBBStretchType mode = stNearest, tjs_real typeopt = 0.0);
 
+	// KRKR-ns: ported from Kirikiroid2/krkrz — KAGEX titles call
+	// Layer.affinePile for their effect/UI drawing (obsoleted upstream in
+	// favor of OperateAffine, but still bound there and still called).
+	void AffinePile(const t2DAffineMatrix &matrix, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
+
+	void AffinePile(const tTVPPointD *points, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
+
+	// KRKR-ns: layerStwCopy.dll emulation (its only export is
+	// Layer.stitchWrappedCopy).  Conservative on purpose: the caller runs this
+	// inside its transition loop, so it must always make progress and must never
+	// blit outside either bitmap.
+	void StitchWrappedCopy(const tTVPRect &destrect, const tTVPRect &srcrect,
+		tTVPBaseBitmap *src);
+
 	void AffineCopy(const t2DAffineMatrix &matrix, tTVPBaseBitmap *src,
 		const tTVPRect &srcrect, tTVPBBStretchType mode = stNearest, bool clear = false);
 

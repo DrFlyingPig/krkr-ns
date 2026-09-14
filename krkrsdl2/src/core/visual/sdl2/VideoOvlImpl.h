@@ -22,6 +22,11 @@
 
 #include "NativeEventQueue.h"
 
+#ifdef __SWITCH__
+struct SDL_Surface;
+struct SDL_Rect;
+#endif
+
 //---------------------------------------------------------------------------
 // tTJSNI_VideoOverlay : VideoOverlay Native Instance
 //---------------------------------------------------------------------------
@@ -56,6 +61,10 @@ class tTJSNI_VideoOverlay : public tTJSNI_BaseVideoOverlay
 	class tTVPBaseBitmap	*Bitmap[2];
 	unsigned char		*BmpBits[2];
 	tjs_uint		VideoFramesApplied;
+	// Movie frame number already blitted into the compose surface, so a
+	// present only happens when the decoder actually published a new frame
+	// (the pump runs at display rate, the movie at its own fps).
+	tjs_int			LastPresentedFrame;
 #endif
 
 	bool	IsPrepare;			//!< 準備モードかどうか
@@ -70,6 +79,7 @@ class tTJSNI_VideoOverlay : public tTJSNI_BaseVideoOverlay
 
 public:
 	tTJSNI_VideoOverlay();
+	~tTJSNI_VideoOverlay();
 	tjs_error TJS_INTF_METHOD Construct(tjs_int numparams, tTJSVariant **param,
 		iTJSDispatch2 *tjs_obj);
 	void TJS_INTF_METHOD Invalidate();
@@ -199,6 +209,18 @@ public:
 	void SetRectOffset(tjs_int ofsx, tjs_int ofsy);
 	void DetachVideoOverlay();
 
+#ifdef __SWITCH__
+	// Overlay/mixer modes have no DirectShow video window on Switch: TickBeat
+	// draws the current front buffer into the compose surface instead (see
+	// the comment on the implementation).  Layer-mode movies return false --
+	// they reach the screen through the layer tree.  `dirty` receives the
+	// touched surface rect.
+	bool PresentFrameToSurface(SDL_Surface *surface, SDL_Rect &dirty);
+	// Would PresentFrameToSurface draw right now?  Cheap probe (no pixel
+	// work), used to decide whether the frame needs an upload at all.
+	bool IsPresentable() const;
+#endif
+
 private:
 	void WndProc( NativeEvent& ev );
 		// UtilWindow's window procedure
@@ -206,5 +228,22 @@ private:
 
 };
 //---------------------------------------------------------------------------
+
+#ifdef __SWITCH__
+// Draws every visible overlay-mode movie above the composed scene, in the
+// order the game created them.  Called from TVPWindowWindow::TickBeat with
+// the window's compose surface.  Returns true when anything was drawn and
+// fills `dirty` (when non-null) with the touched surface rect, so the caller
+// can force the frame to be uploaded even when the layer tree reported no
+// damage (a movie over a static scene produces no layer notification).
+bool krkrsdl2_video_overlay_present(SDL_Surface *surface, SDL_Rect *dirty);
+// Cheap probe for the same condition (no pixel work): lets TickBeat decide
+// whether to enter its upload branch before doing the actual blit.
+bool krkrsdl2_video_overlay_pending();
+// Engine restart: forget every registered overlay.  The registry is
+// process-global while the script engine is rebuilt in place, so a game's
+// overlay must not survive into the next (launcher) session.
+void TVPClearVideoOverlays();
+#endif
 
 #endif

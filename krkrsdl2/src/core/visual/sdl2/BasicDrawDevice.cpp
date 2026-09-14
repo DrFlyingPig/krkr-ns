@@ -18,6 +18,9 @@
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
 #include "GLCompositeBridge.h"
+#ifdef __SWITCH__
+#include <SDL_timer.h>
+#endif
 
 #if 0
 #include <d3d9.h>
@@ -694,6 +697,26 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::NotifyBitmapCompleted(iTVPLayerManager
 	tjs_int x, tjs_int y, const void * bits, const class BitmapInfomation * bmpinfo,
 	const tTVPRect &cliprect, tTVPLayerType type, tjs_int opacity)
 {
+#ifdef __SWITCH__
+	// KRKR-ns profiler: this call IS the per-layer presentation (compose's
+	// blend on the CPU path, the glc quad on the GPU path).  Timed here so a
+	// frame can be attributed between E-mote, layer presentation and the rest
+	// of the compose segment.  RAII so every early return is timed too.
+	struct ScopedNotifyProf
+	{
+		Uint64 start;
+		int blendType;
+		explicit ScopedNotifyProf(int t)
+			: start(SDL_GetPerformanceCounter()), blendType(t) {}
+		~ScopedNotifyProf()
+		{
+			const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+				(double)SDL_GetPerformanceFrequency();
+			krkrsdl2_prof_notify(ms, blendType);
+		}
+	} notifyProf((int)type);
+	(void)notifyProf;
+#endif
 	// KRKR-ns Phase 3 v2.6: this is the single presentation path where the
 	// engine hands over each finished layer (bits + position + clip + blend).
 	// Feed it to the GPU compositor on the *full-screen* FBO (the old

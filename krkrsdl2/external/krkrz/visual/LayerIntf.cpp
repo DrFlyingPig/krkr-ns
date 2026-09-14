@@ -4329,6 +4329,59 @@ void tTJSNI_BaseLayer::StretchCopy(const tTVPRect &destrect, tTVPBaseBitmap *src
 	}
 }
 //---------------------------------------------------------------------------
+void tTJSNI_BaseLayer::StitchWrappedCopy(const tTVPRect &destrect,
+		const tTVPRect &srcrect, tTVPBaseBitmap *src)
+{
+	// KRKR-ns: emulation of layerStwCopy.dll, whose single export is
+	// Layer.stitchWrappedCopy.  Titles gate features on whether that plugin can
+	// load -- YuzuSoft's main\uisystem.tjs installs kag.sysTransitionEffect only
+	// when CanLoadPlugin("layerStwCopy.dll") answers true, while its options
+	// screen calls the member unconditionally.
+	//
+	// Deliberately conservative.  This runs inside the caller's transition loop,
+	// where two things matter far more than pixel-perfect wrapping:
+	//
+	//   * it must always make progress, otherwise the transition never finishes
+	//     and the title waits forever with the main loop still running;
+	//   * it must never touch a pixel outside either bitmap, otherwise the blit
+	//     path is handed a rectangle it cannot honour.
+	//
+	// So the source rectangle is clamped into the image and copied verbatim with
+	// a plain Blt.  The wrap and the scale are what the original plugin adds;
+	// they can be layered on once the transition is known to complete.
+	if(!MainImage || !src) return;
+
+	const tjs_int srcw = src->GetWidth();
+	const tjs_int srch = src->GetHeight();
+	if(srcw <= 0 || srch <= 0) return;
+
+	tTVPRect source = srcrect;
+	if(source.left < 0) source.left = 0;
+	if(source.top < 0) source.top = 0;
+	if(source.right > srcw) source.right = srcw;
+	if(source.bottom > srch) source.bottom = srch;
+	if(source.right <= source.left || source.bottom <= source.top) return;
+
+	tTVPRect ur = destrect;
+	if(ur.right < ur.left) std::swap(ur.right, ur.left);
+	if(ur.bottom < ur.top) std::swap(ur.bottom, ur.top);
+	if(!TVPIntersectRect(&ur, ur, ClipRect)) return; // out of the clipping rectangle
+
+	ImageModified =
+		MainImage->Blt(destrect.left, destrect.top, src, source,
+			bmCopy, 255, false) || ImageModified;
+
+	if(ImageLeft != 0 || ImageTop != 0)
+	{
+		ur.add_offsets(ImageLeft, ImageTop);
+		Update(ur);
+	}
+	else
+	{
+		Update(ur);
+	}
+}
+//---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::AffineCopy(const t2DAffineMatrix &matrix, tTVPBaseBitmap *src,
 		const tTVPRect &srcrect, tTVPBBStretchType type, bool clear)
 {
@@ -4400,6 +4453,118 @@ void tTJSNI_BaseLayer::AffineCopy(const tTVPPointD *points, tTVPBaseBitmap *src,
 
 	default:
 		TVPThrowExceptionMessage(TVPNotDrawableFaceType, TJS_W("affineCopy"));
+	}
+
+	ImageModified = updated || ImageModified;
+
+	if(updated)
+	{
+		updaterect.add_offsets(ImageLeft, ImageTop);
+		Update(updaterect);
+	}
+}
+//---------------------------------------------------------------------------
+// KRKR-ns: ported from Kirikiroid2/krkrz (obsoleted upstream in favor of
+// OperateAffine, but KAGEX titles still call Layer.affinePile).  The source
+// rectangle is clamped into the source image first: the upstream relies on
+// sane rects from the caller and this engine must not be drivable out of
+// bounds by a degraded or modded title.
+static tTVPRect KrkrClampAffinePileSrc(const tTVPRect &srcrect, const tTVPBaseBitmap *ref)
+{
+	tTVPRect r = srcrect;
+	if(ref)
+	{
+		if(r.left   < 0) r.left = 0;
+		if(r.top    < 0) r.top = 0;
+		if(r.right  > ref->GetWidth())  r.right  = ref->GetWidth();
+		if(r.bottom > ref->GetHeight()) r.bottom = ref->GetHeight();
+	}
+	return r;
+}
+
+void tTJSNI_BaseLayer::AffinePile(const t2DAffineMatrix &matrix, tTJSNI_BaseLayer *src,
+	const tTVPRect &srcrect, tjs_int opacity,
+	tTVPBBStretchType type)
+{
+	tTVPRect updaterect;
+	bool updated;
+
+	if(DrawFace != dfAlpha && DrawFace != dfOpaque)
+	{
+		TVPThrowExceptionMessage(TVPNotDrawableFaceType, TJS_W("affinePile"));
+	}
+
+	const tTVPRect srclamped = KrkrClampAffinePileSrc(srcrect, src ? src->MainImage : nullptr);
+	if(srclamped.right <= srclamped.left || srclamped.bottom <= srclamped.top) return;
+
+	switch(DrawFace)
+	{
+	case dfAlpha:
+	  {
+		if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+		if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+		updated = MainImage->AffineBlt(ClipRect, src->MainImage, srclamped, matrix,
+			bmAlphaOnAlpha, opacity, &updaterect, HoldAlpha, type);
+		break;
+	  }
+
+	case dfOpaque:
+	  {
+		if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+		if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+		updated = MainImage->AffineBlt(ClipRect, src->MainImage, srclamped, matrix,
+			bmAlpha, opacity, &updaterect, HoldAlpha, type);
+		break;
+	  }
+	default:
+		break;
+	}
+
+	ImageModified = updated || ImageModified;
+
+	if(updated)
+	{
+		updaterect.add_offsets(ImageLeft, ImageTop);
+		Update(updaterect);
+	}
+}
+//---------------------------------------------------------------------------
+void tTJSNI_BaseLayer::AffinePile(const tTVPPointD *points, tTJSNI_BaseLayer *src,
+	const tTVPRect &srcrect, tjs_int opacity,
+	tTVPBBStretchType type)
+{
+	tTVPRect updaterect;
+	bool updated;
+
+	if(DrawFace != dfAlpha && DrawFace != dfOpaque)
+	{
+		TVPThrowExceptionMessage(TVPNotDrawableFaceType, TJS_W("affinePile"));
+	}
+
+	const tTVPRect srclamped = KrkrClampAffinePileSrc(srcrect, src ? src->MainImage : nullptr);
+	if(srclamped.right <= srclamped.left || srclamped.bottom <= srclamped.top) return;
+
+	switch(DrawFace)
+	{
+	case dfAlpha:
+	  {
+		if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+		if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+		updated = MainImage->AffineBlt(ClipRect, src->MainImage, srclamped, points,
+			bmAlphaOnAlpha, opacity, &updaterect, HoldAlpha, type);
+		break;
+	  }
+
+	case dfOpaque:
+	  {
+		if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+		if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+		updated = MainImage->AffineBlt(ClipRect, src->MainImage, srclamped, points,
+			bmAlpha, opacity, &updaterect, HoldAlpha, type);
+		break;
+	  }
+	default:
+		break;
 	}
 
 	ImageModified = updated || ImageModified;
@@ -7368,6 +7533,147 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/stretchCopy)
 }
 TJS_END_NATIVE_METHOD_DECL(/*func. name*/stretchCopy)
 //----------------------------------------------------------------------
+// KRKR-ns: ported from Kirikiroid2/krkrz.  KAGEX titles call
+// Layer.affinePile for their effect/UI drawing.
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/affinePile)
+{
+	// src, sx, sy, sw, sh, affine, x0/a, y0/b, x1/c, y1/d, x2/tx, y2/ty, opa=255, type=0
+	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Layer);
+	if(numparams < 12) return TJS_E_BADPARAMCOUNT;
+
+	tTJSNI_BaseLayer * src = NULL;
+	tTJSVariantClosure clo = param[0]->AsObjectClosureNoAddRef();
+	if(clo.Object)
+	{
+		if(TJS_FAILED(clo.Object->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+			tTJSNC_Layer::ClassID, (iTJSNativeInstance**)&src)))
+			TVPThrowExceptionMessage(TVPSpecifyLayer);
+	}
+	if(!src) TVPThrowExceptionMessage(TVPSpecifyLayer);
+
+	tTVPRect srcrect(*param[1], *param[2], *param[3], *param[4]);
+	srcrect.right += srcrect.left;
+	srcrect.bottom += srcrect.top;
+
+	tjs_int opa = 255;
+	tTVPBBStretchType type = stNearest;
+
+	if(numparams >= 13 && param[12]->Type() != tvtVoid)
+		opa = (tjs_int)*param[12];
+	if(numparams >= 14 && param[13]->Type() != tvtVoid)
+		type = (tTVPBBStretchType)(tjs_int)*param[13];
+	if(numparams >= 15 && param[14]->Type() != tvtVoid)
+	{
+		TVPAddLog(TVPFormatMessage(TVPHoldDestinationAlphaParameterIsNowDeprecated,
+			TJS_W("Layer.affinePile"), TJS_W("15")));
+	}
+
+	{
+		// one-shot: confirms a title actually reaches this path (crash triage)
+		static bool logged = false;
+		if(!logged)
+		{
+			logged = true;
+			KRKRNS_LOG("[layer] affinePile first call srcrect=(%d,%d,%d,%d) mode=%s",
+				srcrect.left, srcrect.top, srcrect.right, srcrect.bottom,
+				param[5]->operator bool() ? "matrix" : "points");
+		}
+	}
+
+	if(param[5]->operator bool())
+	{
+		// affine matrix mode
+		t2DAffineMatrix mat;
+		mat.a = *param[6];
+		mat.b = *param[7];
+		mat.c = *param[8];
+		mat.d = *param[9];
+		mat.tx = *param[10];
+		mat.ty = *param[11];
+		_this->AffinePile(mat, src, srcrect, opa, type);
+	}
+	else
+	{
+		// points mode
+		tTVPPointD points[3];
+		points[0].x = *param[6];
+		points[0].y = *param[7];
+		points[1].x = *param[8];
+		points[1].y = *param[9];
+		points[2].x = *param[10];
+		points[2].y = *param[11];
+		_this->AffinePile(points, src, srcrect, opa, type);
+	}
+
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_METHOD_DECL(/*func. name*/affinePile)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/stitchWrappedCopy)
+{
+	// KRKR-ns: emulation of layerStwCopy.dll.  Arguments as observed on
+	// hardware (10 params, same shape as stretchCopy):
+	//   [0..3] int  destination x, y, w, h
+	//   [4]    obj  source Layer or Bitmap
+	//   [5..8] int  source x, y, w, h
+	//   [9]    obj  unused here
+	// Missing source or degenerate geometry is ignored rather than thrown: the
+	// callers run this inside their transition loop, where an exception wedges
+	// the title.
+	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Layer);
+	if (numparams < 9) return TJS_E_BADPARAMCOUNT;
+
+	tTVPBaseBitmap *src = NULL;
+	tTJSVariantClosure clo = param[4]->AsObjectClosureNoAddRef();
+	if (clo.Object)
+	{
+		tTJSNI_BaseLayer *srclayer = NULL;
+		if (TJS_SUCCEEDED(clo.Object->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+			tTJSNC_Layer::ClassID, (iTJSNativeInstance**)&srclayer)))
+			src = srclayer->GetMainImage();
+		if (src == NULL)
+		{	// try the bitmap interface
+			tTJSNI_Bitmap *srcbmp = NULL;
+			if (TJS_SUCCEEDED(clo.Object->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+				tTJSNC_Bitmap::ClassID, (iTJSNativeInstance**)&srcbmp)))
+				src = srcbmp->GetBitmap();
+		}
+	}
+	if (src == NULL) return TJS_S_OK;
+
+	const tjs_int dx = (tjs_int)*param[0];
+	const tjs_int dy = (tjs_int)*param[1];
+	const tjs_int sx = (tjs_int)*param[5];
+	const tjs_int sy = (tjs_int)*param[6];
+
+	_this->StitchWrappedCopy(
+		tTVPRect(dx, dy, dx + (tjs_int)*param[2], dy + (tjs_int)*param[3]),
+		tTVPRect(sx, sy, sx + (tjs_int)*param[7], sy + (tjs_int)*param[8]),
+		src);
+
+	// Call accounting: the picker's options screen wedges with the main loop
+	// still running and no further script activity, which reads as "waiting for
+	// a transition that never finishes".  Whether this method is even reached,
+	// and how often, separates "the effect never draws" from "the effect draws
+	// but never advances".
+	{
+		static unsigned calls = 0;
+		++calls;
+		if (calls == 1 || (calls % 200) == 0)
+			KRKRNS_LOG("[layer] stitchWrappedCopy calls=%u dst=(%d,%d %dx%d) src=(%d,%d %dx%d)",
+				calls, (int)dx, (int)dy, (int)*param[2], (int)*param[3],
+				(int)sx, (int)sy, (int)*param[7], (int)*param[8]);
+	}
+
+	// Truthy result: several KAG transition effects drive their state machine
+	// off this call's return value, and a void return leaves the effect
+	// permanently incomplete -- the game then waits for a completion callback
+	// that never comes while its own script activity stops entirely.
+	if (result) *result = true;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_METHOD_DECL(/*func. name*/stitchWrappedCopy)
+//----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/operateStretch)
 {
 	// dx, dy, dw, dh, src, sx, sy, sw, sh, mode=omAuto, opa=255, type=0
@@ -10048,6 +10354,23 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGlyphDrawRect)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_METHOD_DECL(/*func. name*/getGlyphDrawRect)
+//----------------------------------------------------------------------
+// KRKR-ns: Kirikiroid2 parity — the user-font-select dialog does not exist on
+// this platform; upstream answers 0 without doing anything, and titles that
+// call it unconditionally (ガマンができない童貞兄キと) must not throw.
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/doUserSelect)
+{
+	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Font);
+
+	if(numparams < 4) return TJS_E_BADPARAMCOUNT;
+
+	tjs_int ret = 0;
+
+	if(result) *result = ret;
+
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_METHOD_DECL(/*func. name*/doUserSelect)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getList)
 {

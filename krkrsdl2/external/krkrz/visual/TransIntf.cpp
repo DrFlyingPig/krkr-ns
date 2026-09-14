@@ -18,6 +18,7 @@
 #include "SysInitIntf.h"
 #include "tvpgl.h"
 #include "TickCount.h"
+#include "KrkrNSLog.h"
 #include "DebugIntf.h"
 
 
@@ -350,6 +351,24 @@ iTVPTransHandlerProvider * TVPFindTransHandlerProvider(const ttstr &name)
 
 	tTVPTransHandlerProviderHolder *holder =
 		TVPTransHandlerProviders.Find(name);
+	if(!holder)
+	{
+		// KRKR-ns / Kirikiroid2 parity: the Windows transition plugins
+		// (extrans.dll, extNagano.dll, ...) register handlers such as
+		// "rotatezoom" that do not exist here, and titles call them
+		// unconditionally (the load screen opens with load.open =
+		// rotatezoom); without a handler the calling script dies with
+		// "Cannot find transition handler ...".  Fall back to the built-in
+		// cross fade: the effect differs, the game keeps flowing.
+		static bool reported = false;
+		if(!reported)
+		{
+			reported = true;
+			KRKRNS_LOG("[trans] missing transition handler '%s', using crossfade",
+				name.AsStdString().c_str());
+		}
+		holder = TVPTransHandlerProviders.Find(TJS_W("crossfade"));
+	}
 	if(!holder)
 		TVPThrowExceptionMessage(TVPCannotFindTransHander, name);
 

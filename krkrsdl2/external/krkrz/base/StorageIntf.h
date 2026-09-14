@@ -226,6 +226,11 @@ TJS_EXP_FUNC_DEF(bool, TVPIsExistentStorageNoSearchNoNormalize, (const ttstr &na
 
 TJS_EXP_FUNC_DEF(ttstr, TVPNormalizeStorageName, (const ttstr & name));
 
+// Kirikiroid2 dirlist.dll support: enumerate one folder through the registered
+// storage media.  The name must end with '/' and resolves like any other
+// storage name (native folder, or an archive the media can list).
+TJS_EXP_FUNC_DEF(void, TVPGetStorageListAt, (const ttstr & name, iTVPStorageLister * lister));
+
 TJS_EXP_FUNC_DEF(void, TVPSetCurrentDirectory, (const ttstr & name));
 	// set system current directory.
 	// directory must end with path delimiter '/',

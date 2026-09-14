@@ -34,6 +34,8 @@ extern tTJSVariantString * TJSAllocStringHeap(void);
 extern void TJSDeallocStringHeap(tTJSVariantString * vs);
 extern void TJSThrowStringAllocError();
 extern void TJSThrowNarrowToWideConversionError();
+// KRKR-ns: reports the bytes that failed to convert (see the .cpp).
+void TJSLogNarrowToWideFailure(const char *ref);
 extern void TJSCompactStringHeap();
 #ifdef TJS_DEBUG_DUMP_STRING
 extern void TJSDumpStringHeap(void);
@@ -111,7 +113,7 @@ public:
 	{
 		if(LongString) TJSVS_free(LongString), LongString = NULL;
 		tjs_int len = (tjs_int)TJS_narrowtowidelen(ref);
-		if(len == -1) TJSThrowNarrowToWideConversionError();
+		if(len == -1) { TJSLogNarrowToWideFailure(ref); TJSThrowNarrowToWideConversionError(); }
 
 		Length = len;
 		if(len>TJS_VS_SHORT_LEN)

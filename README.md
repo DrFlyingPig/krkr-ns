@@ -22,7 +22,7 @@
 
 KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintendo Switch，可直接运行未加密 `.xp3` 打包的 KRKR / KAG 视觉小说，也支持展开的目录式游戏。
 
-内置游戏浏览器启动器：扫描 `sdmc:/switch/KRKR-ns/Game/` 下的游戏目录，点选即玩。游戏内选择「结束游戏」会直接**返回启动器**，可以立刻更换下一款游戏，无需退出程序——模拟器与真机均以同进程整引擎重建获得全新引擎。
+内置游戏库启动器：扫描 `sdmc:/switch/KRKR-ns/Game/`，自动挑选入口 xp3（`启动游戏.xp3` > `运行游戏.xp3` > `data.xp3` …），显示封面并支持自定义名称；列表、翻页、弹窗均可触摸点击，按键与触摸都有按下反馈。游戏内选择「结束游戏」会直接**返回启动器**，可以立刻更换下一款游戏，无需退出程序——模拟器与真机均以同进程整引擎重建获得全新引擎。
 
 ## ⬇️ 获取与使用
 
@@ -42,15 +42,20 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 
 **启动器与多游戏管理**
 
-- 游戏浏览器：扫描 `sdmc:/switch/KRKR-ns/Game/`、点选 xp3 直接启动、同目录资源包自动挂载
+- 游戏库界面：封面（自定义 / 自动生成）、名称别名（`Names.tjs`）、入口 xp3 自动挑选、启动文件选择（X）、退出确认（A）、重扫（Y）
+- 全触摸操作：列表行 / 上下列表 / 翻页 / 弹窗条目 / 按钮均有触摸命中区；按键与触摸的按下反馈一致
 - 游戏内「结束游戏」→ 返回内置启动器，连续更换游戏（真机链式重启 / 模拟器同进程重建）
+- 内存模式提示与「重试」：非完整内存模式给出 HBMenu 启动指引；启动过程分阶段 `[boot]` 计时
 - 存档按游戏目录隔离；compat 补丁目录（SD 卡）可覆盖内置适配层
 
 **引擎兼容与适配**
 
 - KAG2 / KAG3 兼容层（Switch 桩替换桌面版插件脚本，自动维持优先级）
 - 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等；游戏对插件的文件存在性探测对内置插件生效，E-mote 等子系统正常启用
-- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密）
+- 内置插件再扩充：`dirlist`（getDirList）、`getabout`、`getsample`（唇同步 / 波形采样）、`savestruct`（文本存档格式）、`varfile`（`var://`）、`win32dialog`、`addfont`、`fftgraph`、`wutcwf`（TCWF 音频解码）
+- 文本编码探测：无 BOM 文本按 UTF-8 → Shift-JIS → GBK 依次尝试，中文重编码脚本不再中断启动
+- 引擎 API 补齐：`Layer.affinePile`、`Layer.stitchWrappedCopy`、`Font.doUserSelect`；缺失转场自动回落 crossfade
+- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密，附原生 XOR 快路径）
 - KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现
 - 缺失资源垫图、`Layer.loadImages` 容错、脚本异常记录并继续（风暴熔断）
 
@@ -58,21 +63,24 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 
 - E-mote 立绘动画：隔离 GL 后端 + 驱动自检（异常驱动自动回退 CPU）、脏区回读、半分辨率可选
 - simde SIMD 混合内核（NEON）、4 核绘制线程池
-- GPU 呈现链直通（FBO blit）、XP3 段缓存、增量资源索引、解码图像缓存
+- GPU 呈现链直通（FBO blit）、XP3 段缓存、增量资源索引、解码图像缓存（上限 96 MiB）
+- 帧内归因埋点（`[prof] frame:` / `[prof] blt:`）、合成层脏区上传、上传统一只传可见行带
 - 菜单公共路径优化：字体度量按需缓存、存档缓冲写入、PSB 共享资源、固实 7z 解压块复用
+- 启动器重绘优化：文本宽度缓存 + 按样式分组绘制，无输入时不重绘
 - 大位图独立内存区复用；修复文字对象销毁影响其他字体、选项文字垂直居中的问题
 - 手柄 → 鼠标/键盘事件合成（NS 物理键位语义：B 确认 / A 取消等）
 
 **视频播放**
 
 - FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 容器按签名自动识别，支持归档内与目录式视频源
-- 独立解码线程（4 MiB 栈）+ 双缓冲帧，画面经既有 GPU 合成器上屏，与引擎图层无缝混合
+- 独立解码线程（4 MiB 栈）+ 双缓冲帧；**layer / overlay / mixer 三种模式均可上屏**（overlay 按脚本设定区域叠画在场景上方）
 - 音轨解码：WMA / AAC 等经 swresample 下混为 S16，通过引擎音频设备（FAudio）输出；视频结束事件等待声音播完，音量可调
 
 **诊断基建**
 
 - 统一 SD 日志、每帧分段剖析（`[prof]`）、心跳与阶段标记、资源未解析探针（`[miss]`）、帧捕获与图层树转储
 - 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）、启动时记录游戏读取的屏幕尺寸
+- 现象定位线：`[video] overlay state/frame`（影片呈现）、`[psb] phases`（PSB 加载四段计时）、`[trans]`（转场回落）、`[comp]`（合成拷贝完整性）
 
 ## 📄 许可
 

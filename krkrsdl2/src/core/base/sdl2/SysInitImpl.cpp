@@ -1540,7 +1540,12 @@ void TVPAfterSystemInit()
 		else if(totalMemory <= 256*1024*1024)
 			TVPGraphicCacheSystemLimit = 20;
 		else if(totalMemory <= 512*1024*1024)
-			TVPGraphicCacheSystemLimit = 40;
+			// KRKR-ns: was 40.  E-mote titles decode hundreds of psb chips, and a
+			// cache that cannot hold the working set makes every frame re-decode
+			// them: [slow] image-decode measures ~26ms per chip, and a burst of
+			// them inside one frame shows up as a ~1s stall with draw=0.2ms --
+			// i.e. all of it in the script layer, none of it in rendering.
+			TVPGraphicCacheSystemLimit = 96;
 		else
 			TVPGraphicCacheSystemLimit = tjs_uint64(totalMemory / (1024*1024*10));	// cachemem = physmem / 10
 		TVPGraphicCacheSystemLimit *= 1024*1024;

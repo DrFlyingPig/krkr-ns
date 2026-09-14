@@ -1719,6 +1719,33 @@ tjs_int tTJSInterCodeContext::GenNodeCode(tjs_int & frame, tTJSExprNode *node,
 		else
 			haspropnode = false;
 
+		if(!haspropnode && cnode->GetOpecode() == T_SYMBOL)
+		{
+			// A bare name that is not a local variable compiles to "this.<name>"
+			// (see T_SYMBOL below), so it is a property access all the same -- but
+			// with the plain stNone sub type that access THROWS when the member is
+			// missing.  Titles feature-test plugin classes that way, and on a host
+			// without the plugin the whole boot died on
+			// `Member "GdiPlus" does not exist` where `typeof global.GdiPlus`
+			// (the property spelling of the same probe) answers "undefined".
+			// Route the bare form through the non-throwing typeof opcode so both
+			// spellings agree; a local variable keeps the plain VM_TYPEOF below
+			// because the T_SYMBOL reader rejects the stTypeOf sub type.
+			tjs_int n = -1;
+			if(!AsGlobalContextMode)
+			{
+				tTJSVariantString *str = cnode->GetValue().AsString();
+				n = Namespace.Find(str->operator const tjs_char *());
+				str->Release();
+			}
+			if(n == -1)
+			{
+				tSubParam param2;
+				param2.SubType = stTypeOf;
+				return _GenNodeCode(frame, cnode, TJS_RT_NEEDED, 0, param2);
+			}
+		}
+
 		if(haspropnode)
 		{
 			// has property access node
