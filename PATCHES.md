@@ -547,10 +547,10 @@ KRKR-ns/
 - **根因**：数据包（运行游戏.xp3）内容加密；游戏目录自带 `xp3filter.tjs`——Kirikiroid2 补丁生态的解密过滤器脚本：`Storages.setXP3ArchiveExtractionFilter(function(h,o,b,l){...逐块 XOR...})`。Kirikiroid2 自动把它装入**专用 per-thread tTJS 引擎**并对每个解压块回调解密；本移植无此机制 → 密文原样进引擎当文本编译。
 - **实现**（新增 src/core/base/sdl2/XP3ExtractionFilter.cpp，照 Kirikiroid2 src/plugins/xp3filter.cpp 移植）：① `CBinaryAccessor` 字节缓冲对象（`b[i]` 复合赋值运算、`xor/add(start,len,val)`、`ptr`/`count`）；② `XP3FilterRegister` 把游戏回调存入 per-thread 解码引擎（独立 `tTJS` + 专用 Storages 原生类，`thread_local` + 脚本版本号懒重建，脚本不进主引擎=工作线程解压天然线程安全）；③ `TVPXP3ArchiveExtractionFilterWrapper` 挂到 krkrz 树**既有**的逐块过滤钩子（`tTVPXP3ArchiveStream::Read`，info={Offset, Buffer, BufferSize, FileHash}）。launchXP3 在挂载前读 `<游戏目录>/xp3filter.tjs` → `TVPSetXP3FilterScript()`（无文件则清空，其他游戏零影响）。XP3Archive.h 补 `TVPSetXP3FilterScript` 声明与钩子指针 extern。
 - **编译坑**：tjs2 无 `TJS_E_BOUNDS`（用 `TJS_E_FAIL`）；同签名成员函数类内声明+定义重复报错。
-- **发布**：本批 P62–P66 随 GitHub Release v0.3.1（替换附件，md5 `c5ec1038`）发布。
+- **发布**：本批 P62–P66 曾随 GitHub Release v0.3.1 发布（md5 `c5ec1038`）。v0.3.x 系列已按用户要求撤下，内容全部并入 v0.1.0。
 
-### P71: 启动器整体重写 + 9 个插件移植 + 编码/引擎 API 补齐（2026-09-13/14，随 v0.3.2 发布）
-本批为 v0.3.1 之后陆续落地、此前未单独成节的工作（与 P67–P70 同批发布）：
+### P71: 启动器整体重写 + 9 个插件移植 + 编码/引擎 API 补齐（2026-09-13/14，随 v0.1.0 发布）
+本批为此前陆续落地、未单独成节的工作（与 P67–P70 同批发布为 v0.1.0；该版本的 NRO 元数据版本号也由上游默认的 v2.0.0 改为 v0.1.0）：
 
 **内置启动器（`krkrsdl2/data/startup.tjs` 重写，+1264/-147）**
 - 游戏库界面：左侧列表（选中高亮、资源包计数）+ 右侧详情（封面 / 入口卡片 / 自动挂载提示 / 存档目录）；空库显示目录结构示例页。

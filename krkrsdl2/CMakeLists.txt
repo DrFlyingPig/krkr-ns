@@ -132,7 +132,7 @@ endif()
 if(NINTENDO_SWITCH)
 set(SWITCH_APP_NAME "Kirikiri SDL2" CACHE STRING "The application name to use for the NRO.")
 set(SWITCH_AUTHOR   "uyjulian"      CACHE STRING "The author to use for the NRO.")
-set(SWITCH_VERSION  "v2.0.0"        CACHE STRING "The version to use for the NRO.")
+set(SWITCH_VERSION  "v0.1.0"        CACHE STRING "The version to use for the NRO.")
 set(SWITCH_RESOURCES_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/src/resources/nswitch CACHE FILEPATH "The path to the resources for Switch.")
 endif()
 
