@@ -35,10 +35,12 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 > 真机上游戏目录名与 xp3 文件名必须使用英文 / 数字等 **ASCII 字符**（如 `sdmc:/switch/KRKR-ns/Game/CafeStella/play.xp3`）。自己找来的游戏资源若带有中文文件名或中文名目录（含补丁、追加包），请**先全部重命名为 ASCII** 再放入，否则真机无法识别。
 > 模拟器走 PC 文件系统不受此限制，但建议统一使用 ASCII 命名，避免同一份资源两端行为不一致。
 
-> 诊断日志按次保存在 `sdmc:/switch/KRKR-ns/log/`（每次启动一个文件，自动只保留最新 3 份）；运行时开关（标记文件，置于 `sdmc:/switch/KRKR-ns/` 下）与全部源码级补丁清单见 [PATCHES.md](PATCHES.md)。
+> 诊断日志按次保存在 `sdmc:/switch/KRKR-ns/log/`（每次启动一个文件，自动只保留最新 3 份）；运行时开关（标记文件，置于 `sdmc:/switch/KRKR-ns/` 下）与全部源码级补丁清单见 [PATCHES.md](docs/PATCHES.md)。
 > 自行构建：devkitPro 工具链（`NINTENDO_SWITCH=ON`），`build_nro.sh` 一键完成构建、打包与模拟器部署。
 
 ## ✅ 已实现功能
+
+> 尚未覆盖的插件族与格式缺口（对照 krkrsdl3 盘点）、移植优先级见 [COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md)。
 
 **启动器与多游戏管理**
 
@@ -81,6 +83,44 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 - 统一 SD 日志、每帧分段剖析（`[prof]`）、心跳与阶段标记、资源未解析探针（`[miss]`）、帧捕获与图层树转储
 - 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）、启动时记录游戏读取的屏幕尺寸
 - 现象定位线：`[video] overlay state/frame`（影片呈现）、`[psb] phases`（PSB 加载四段计时）、`[trans]`（转场回落）、`[comp]`（合成拷贝完整性）
+
+## 🗂 代码架构（开发者向）
+
+引擎分四层，目录与 krkrsdl3（SDL3 重写版）的对应关系：
+
+| 层 | 本仓库位置 | 职责 | krkrsdl3 对应 |
+|---|---|---|---|
+| 引擎核心（内嵌上游） | `krkrsdl2/external/krkrz/` | 平台无关的 KRKR 引擎：XP3 归档、TJS2 内核、图形/声音/影片公共接口 | `core/` + `tjs2/` |
+| Switch 平台层 | `krkrsdl2/src/core/**/sdl2/`、`krkrsdl2/src/core/sdl2/` | 存储/脚本/系统装载、窗口与事件、输入、GL 呈现、FFmpeg 影片、音频输出、日志与剖析 | `environ/` |
+| 内置插件 | `krkrsdl2/src/plugins/` | Windows 插件兼容实现（ncbind 注册，名单见 `src/core/base/sdl2/PluginImpl.cpp`） | `plugins/` |
+| 脚本兼容层 | `compat-patches/` | 随 romfs 部署的 TJS 垫片（k2compat 等） | —（对方无） |
+
+```
+KRKR-ns/                    # 仓库根
+├── krkrsdl2/              # 引擎源码（基于 krkrsdl2，pinned bf207f2）
+│   ├── src/               #   Switch 平台层 + 内置插件（本项目主要改动区）
+│   │   ├── core/sdl2/     #     SDLApplication、GL 合成、KrkrNS 日志/路径/剖析
+│   │   ├── core/base/sdl2/#     存储、脚本管理、系统、插件装载（PluginImpl）、7z
+│   │   ├── core/visual/sdl2/#   绘制设备、Layer、视频 overlay（SwitchMovieOverlay）
+│   │   ├── core/sound/sdl2/#    音频设备（FAudio）与波形解码（Vorbis / Opus）
+│   │   ├── core/environ/sdl2/#  事件循环、窗口、线程、CPU 探测
+│   │   ├── core/msg/sdl2/ #     消息对话框
+│   │   ├── core/utils/sdl2/#    剪贴板等
+│   │   ├── plugins/       #     内置插件：emoteplayer、psbfile、kagparser、textrender…
+│   │   ├── resources/nswitch/#  平台资源（图标）
+│   │   └── config/        #     源文件清单（构建系统使用）
+│   ├── external/          #   内嵌上游与第三方（krkrz 引擎核心 pinned b11c43a、SDL2、FAudio、simde、zlib）
+│   ├── data/              #   启动器 startup.tjs 与内置字体
+│   ├── CMakeLists.txt     #   构建入口（NINTENDO_SWITCH=ON）
+│   └── meson.build
+├── docs/                  # 文档（索引 docs/README.md；内部开发记录按 .gitignore 保留本地）
+├── compat-patches/        # TJS 兼容垫片（部署进 romfs）
+├── tools/                 # 构建 / 调试脚本（build_ffmpeg_switch.sh、upstream_delta.sh 等）
+├── tests/                 # 单元测试（位图桥、E-mote GL 等）
+└── build_nro.sh           # 一键构建 / 打包 / 模拟器部署
+```
+
+> 文档索引：[docs/README.md](docs/README.md)——兼容性缺口 [COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md)、源码级补丁 [PATCHES.md](docs/PATCHES.md)、上游差异 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)（`tools/upstream_delta.sh` 自动生成）。
 
 ## 📄 许可
 
