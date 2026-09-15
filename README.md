@@ -84,16 +84,9 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 - 单次慢操作（`[slow]`）、主循环耗时（`[stall]`）、位图和堆内存快照（`[memory]`）、启动时记录游戏读取的屏幕尺寸
 - 现象定位线：`[video] overlay state/frame`（影片呈现）、`[psb] phases`（PSB 加载四段计时）、`[trans]`（转场回落）、`[comp]`（合成拷贝完整性）
 
-## 🗂 代码架构（开发者向）
+## 🗂 架构
 
-引擎分四层，目录与 krkrsdl3（SDL3 重写版）的对应关系：
-
-| 层 | 本仓库位置 | 职责 | krkrsdl3 对应 |
-|---|---|---|---|
-| 引擎核心（内嵌上游） | `krkrsdl2/external/krkrz/` | 平台无关的 KRKR 引擎：XP3 归档、TJS2 内核、图形/声音/影片公共接口 | `core/` + `tjs2/` |
-| Switch 平台层 | `krkrsdl2/src/core/**/sdl2/`、`krkrsdl2/src/core/sdl2/` | 存储/脚本/系统装载、窗口与事件、输入、GL 呈现、FFmpeg 影片、音频输出、日志与剖析 | `environ/` |
-| 内置插件 | `krkrsdl2/src/plugins/` | Windows 插件兼容实现（ncbind 注册，名单见 `src/core/base/sdl2/PluginImpl.cpp`） | `plugins/` |
-| 脚本兼容层 | `compat-patches/` | 随 romfs 部署的 TJS 垫片（k2compat 等） | —（对方无） |
+引擎分四层：内嵌上游引擎核心 → Switch 平台层（本项目主要改动区）→ 内置插件 → 脚本兼容层。仓库布局：
 
 ```
 KRKR-ns/                    # 仓库根
