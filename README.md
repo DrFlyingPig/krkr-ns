@@ -89,28 +89,28 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 引擎分四层：内嵌上游引擎核心 → Switch 平台层（本项目主要改动区）→ 内置插件 → 脚本兼容层。仓库布局：
 
 ```
-KRKR-ns/                    # 仓库根
-├── krkrsdl2/              # 引擎源码（基于 krkrsdl2，pinned bf207f2）
-│   ├── src/               #   Switch 平台层 + 内置插件（本项目主要改动区）
-│   │   ├── core/sdl2/     #     SDLApplication、GL 合成、KrkrNS 日志/路径/剖析
-│   │   ├── core/base/sdl2/#     存储、脚本管理、系统、插件装载（PluginImpl）、7z
-│   │   ├── core/visual/sdl2/#   绘制设备、Layer、视频 overlay（SwitchMovieOverlay）
-│   │   ├── core/sound/sdl2/#    音频设备（FAudio）与波形解码（Vorbis / Opus）
-│   │   ├── core/environ/sdl2/#  事件循环、窗口、线程、CPU 探测
-│   │   ├── core/msg/sdl2/ #     消息对话框
-│   │   ├── core/utils/sdl2/#    剪贴板等
-│   │   ├── plugins/       #     内置插件：emoteplayer、psbfile、kagparser、textrender…
-│   │   ├── resources/nswitch/#  平台资源（图标）
-│   │   └── config/        #     源文件清单（构建系统使用）
-│   ├── external/          #   内嵌上游与第三方（krkrz 引擎核心 pinned b11c43a、SDL2、FAudio、simde、zlib）
-│   ├── data/              #   启动器 startup.tjs 与内置字体
-│   ├── CMakeLists.txt     #   构建入口（NINTENDO_SWITCH=ON）
+KRKR-ns/                            # 仓库根
+├── krkrsdl2/                       # 引擎源码（基于 krkrsdl2，pinned bf207f2）
+│   ├── src/                        #   Switch 平台层 + 内置插件（本项目主要改动区）
+│   │   ├── core/sdl2/              #     SDLApplication、GL 合成、KrkrNS 日志/路径/剖析
+│   │   ├── core/base/sdl2/         #     存储、脚本管理、系统、插件装载（PluginImpl）、7z
+│   │   ├── core/visual/sdl2/       #   绘制设备、Layer、视频 overlay（SwitchMovieOverlay）
+│   │   ├── core/sound/sdl2/        #    音频设备（FAudio）与波形解码（Vorbis / Opus）
+│   │   ├── core/environ/sdl2/      #  事件循环、窗口、线程、CPU 探测
+│   │   ├── core/msg/sdl2/          #     消息对话框
+│   │   ├── core/utils/sdl2/        #    剪贴板等
+│   │   ├── plugins/                #     内置插件：emoteplayer、psbfile、kagparser、textrender…
+│   │   ├── resources/nswitch/      #  平台资源（图标）
+│   │   └── config/                 #     源文件清单（构建系统使用）
+│   ├── external/                   #   内嵌上游与第三方（krkrz 引擎核心 pinned b11c43a、SDL2、FAudio、simde、zlib）
+│   ├── data/                       #   启动器 startup.tjs 与内置字体
+│   ├── CMakeLists.txt              #   构建入口（NINTENDO_SWITCH=ON）
 │   └── meson.build
-├── docs/                  # 文档（索引 docs/README.md；内部开发记录按 .gitignore 保留本地）
-├── compat-patches/        # TJS 兼容垫片（部署进 romfs）
-├── tools/                 # 构建 / 调试脚本（build_ffmpeg_switch.sh、upstream_delta.sh 等）
-├── tests/                 # 单元测试（位图桥、E-mote GL 等）
-└── build_nro.sh           # 一键构建 / 打包 / 模拟器部署
+├── docs/                           # 文档（索引 docs/README.md；内部开发记录按 .gitignore 保留本地）
+├── compat-patches/                 # TJS 兼容垫片（部署进 romfs）
+├── tools/                          # 构建 / 调试脚本（build_ffmpeg_switch.sh、upstream_delta.sh 等）
+├── tests/                          # 单元测试（位图桥、E-mote GL 等）
+└── build_nro.sh                    # 一键构建 / 打包 / 模拟器部署
 ```
 
 > 文档索引：[docs/README.md](docs/README.md)——兼容性缺口 [COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md)、源码级补丁 [PATCHES.md](docs/PATCHES.md)、上游差异 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)（`tools/upstream_delta.sh` 自动生成）。
