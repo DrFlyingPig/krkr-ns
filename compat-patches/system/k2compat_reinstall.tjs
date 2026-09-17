@@ -45,6 +45,39 @@ if (typeof(Krkr2CompatUtils.Window) == "undefined")
 	Krkr2CompatUtils.Window = function() { return null; };
 
 // ---------------------------------------------------------------------------
+// AlphaMovie.dll (M2's alpha-channel movie plugin) is not available here.
+//
+// Titles that use it ship their glue in script/alphamovie.ks, whose whole body
+// is guarded by
+//   @if exp="typeof(global.alphamovie_object) == 'undefined'"
+// and contains `class AlphaMoviePlayer extends AlphaMovie` plus the KAG tag
+// definitions built on top of it.  Without the class the statement throws, the
+// boot stops at a fatal error dialog that has no visible representation on
+// this port (the user sees a black screen), and the tags never get defined.
+//
+// Pre-defining a model-only AlphaMovie lets the glue load intact.  The stub
+// reports exactly one frame: the player's own handler then reaches its finish
+// branch after about a second and fires `finish_alpha_movie_<slot>` /
+// `next_alpha_movie_<slot>`, so no scenario waits forever on a movie that can
+// never decode.  Nothing renders (there is no decoder), which is the same
+// visible result as the missing plugin, minus the dead boot.
+if (typeof(global.AlphaMovie) == "undefined") {
+	class AlphaMovie {
+		var loop = false;
+		var numOfFrame = 1;
+		var _opacity = 1.0;
+		function AlphaMovie() { }
+		function play() { }
+		function stop() { }
+		function setNextMovieFile(storage) { return; }
+		// Frame advance entry point: report the last (only) frame so the
+		// caller's finish/next handling runs.
+		function showNextImage(layer) { return numOfFrame - 1; }
+		property opacity { getter { return _opacity; } setter(v) { _opacity = v; } }
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Plugin availability probe.
 //
 // Kirikiroid2 answers this from a built-in registry of reimplemented Windows
