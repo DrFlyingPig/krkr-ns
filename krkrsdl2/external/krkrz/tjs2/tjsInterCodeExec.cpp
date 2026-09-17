@@ -606,7 +606,20 @@ public:
 
 	void Compact() { InternalCompact(); }
 
-} *TJSVariantArrayStack = NULL;
+};
+//---------------------------------------------------------------------------
+// KRKR-ns: the register-area stack used to be a process-global singleton with a
+// refcount (upstream TJS2 assumes one script engine, one thread).  This port
+// executes scripts on more than one thread at a time -- the xp3filter decoder
+// engine runs on the sound thread while the main thread keeps running game
+// scripts -- and two threads sharing one stack hand out overlapping register
+// areas: variants get clobbered mid-call and the teardown then releases a null
+// object (a NULL-`this` Release reached from ExecuteAsFunction's `ra[-2].Clear()`).
+// Kirikiroid2 fixed the same problem by giving the stack to each engine; here
+// each thread owns one, kept until the thread exits.  Every tTJS engine in this
+// port is built and used on a single thread, so per-thread == per-engine.
+//---------------------------------------------------------------------------
+static thread_local tTJSVariantArrayStack *TJSVariantArrayStack = NULL;
 //---------------------------------------------------------------------------
 tTJSVariantArrayStack::tTJSVariantArrayStack()
 {
@@ -761,29 +774,28 @@ inline void tTJSVariantArrayStack::Deallocate(tjs_int num, tTJSVariant *ptr)
 	}
 }
 //---------------------------------------------------------------------------
-static tjs_int TJSVariantArrayStackRefCount = 0;
+// Each thread's stack lives until the thread exits; the holder below deletes it
+// there.  Upstream's AddRef/Release refcount is gone with the shared singleton:
+// releasing at the end of every ExecuteAsFunction would now free the register
+// area a caller higher up the same thread's stack is still using.
 //---------------------------------------------------------------------------
 void TJSVariantArrayStackAddRef()
 {
-	if(TJSVariantArrayStackRefCount == 0)
+	struct tHolder
 	{
-		TJSVariantArrayStack = new tTJSVariantArrayStack;
+		tTJSVariantArrayStack *Stack;
+		~tHolder() { delete Stack; }
+	};
+	static thread_local tHolder holder = { NULL };
+	if(!TJSVariantArrayStack)
+	{
+		holder.Stack = new tTJSVariantArrayStack;
+		TJSVariantArrayStack = holder.Stack;
 	}
-	TJSVariantArrayStackRefCount++;
 }
 //---------------------------------------------------------------------------
 void TJSVariantArrayStackRelease()
 {
-	if(TJSVariantArrayStackRefCount == 1)
-	{
-		delete TJSVariantArrayStack;
-		TJSVariantArrayStack = NULL;
-		TJSVariantArrayStackRefCount = 0;
-	}
-	else
-	{
-		TJSVariantArrayStackRefCount--;
-	}
 }
 //---------------------------------------------------------------------------
 void TJSVariantArrayStackCompact()
@@ -793,6 +805,8 @@ void TJSVariantArrayStackCompact()
 //---------------------------------------------------------------------------
 void TJSVariantArrayStackCompactNow()
 {
+	// Only the calling thread's stack is reachable from here; the others compact
+	// themselves lazily on their next Allocate (CompactVariantArrayMagic check).
 	if(TJSVariantArrayStack) TJSVariantArrayStack->Compact();
 }
 //---------------------------------------------------------------------------
