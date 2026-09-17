@@ -139,10 +139,20 @@ static void krkrsdl2_prune_old_logs(void)
 	unlink("sdmc:/krkrsdl2_debug.log.prev");
 }
 
+static int krkrsdl2_log_fd = -1;
+
+/* Force the log out of the SD write cache.  A guest that dies right after the
+   last line loses exactly the lines that matter (the emulator's virtual SD
+   keeps them cached), so the lifecycle events worth diagnosing use this. */
+void krkrsdl2_log_flush()
+{
+	if (krkrsdl2_log_fd >= 0) fsync(krkrsdl2_log_fd);
+}
+
 void krkrsdl2_logf_impl(const char *fmt, ...)
 {
 	if (krkrsdl2_log_shutdown) return;
-	static int logfd = -1;
+	static int &logfd = krkrsdl2_log_fd;
 	static char logname[128];
 	if (logfd < 0)
 	{
@@ -1669,7 +1679,9 @@ TVPWindowWindow::~TVPWindowWindow()
 
 void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 {
-	KRKRNS_LOG("[win] SetPaintBoxSize window=%p w=%d h=%d renderer=%d", (void*)this, w, h, (this->renderer != nullptr));
+	KRKRNS_LOG("[win] SetPaintBoxSize window=%p w=%d h=%d renderer=%d host=%p",
+		(void *)this, w, h, (this->renderer != nullptr), (void *)this->hostWindow);
+	if (this->hostWindow) krkrsdl2_log_flush();
 #ifdef KRKRSDL2_ENABLE_ZOOM
 	this->LayerWidth = w;
 	this->LayerHeight = h;
@@ -1700,6 +1712,12 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 		this->bitmapCompletion->surface = this->surface;
 #ifdef __SWITCH__
 		this->InvalidateFullSurface();
+		if (this->hostWindow)
+		{
+			KRKRNS_LOG("[win] hosted paint box ready window=%p %dx%d texture=%p surface=%p",
+				(void *)this, (int)w, (int)h, (void *)this->texture, (void *)this->surface);
+			krkrsdl2_log_flush();
+		}
 #endif
 	}
 #ifndef KRKRSDL2_ENABLE_ZOOM
@@ -1731,8 +1749,17 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 		r.right = w;
 		r.bottom = h;
 		this->TJSNativeInstance->NotifyWindowExposureToLayer(r);
-		this->TJSNativeInstance->GetDrawDevice()->SetClipRectangle(r);
-		this->TJSNativeInstance->GetDrawDevice()->SetDestRectangle(r);
+		iTVPDrawDevice *dev = this->TJSNativeInstance->GetDrawDevice();
+		if (dev)
+		{
+			dev->SetClipRectangle(r);
+			dev->SetDestRectangle(r);
+		}
+		else
+		{
+			KRKRNS_LOG("[win] SetPaintBoxSize: window %p has no draw device", (void *)this);
+			if (this->hostWindow) krkrsdl2_log_flush();
+		}
 	}
 }
 
@@ -2024,6 +2051,8 @@ void TVPWindowWindow::ShowWindowAsModal()
 #if defined(KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE)
 	TVPThrowExceptionMessage(TJS_W("Showing window as modal is not supported"));
 #else
+	KRKRNS_LOG("[win] modal enter window=%p host=%p", (void *)this, (void *)this->hostWindow);
+	if (this->hostWindow) krkrsdl2_log_flush();
 	this->in_mode_ = true;
 	this->BringToFront();
 	this->modal_result_ = 0;
@@ -2040,6 +2069,8 @@ void TVPWindowWindow::ShowWindowAsModal()
 		}
 	}
 	this->in_mode_ = false;
+	KRKRNS_LOG("[win] modal leave window=%p result=%d", (void *)this, this->modal_result_);
+	if (this->hostWindow) krkrsdl2_log_flush();
 #endif
 }
 bool TVPWindowWindow::GetVisible()
@@ -3203,6 +3234,14 @@ const int sw = this->surface->w;
 							}
 							const int qw = this->surface ? this->surface->w : 0;
 							const int qh = this->surface ? this->surface->h : 0;
+							static bool loggedHostedPresent = false;
+							if (!loggedHostedPresent)
+							{
+								loggedHostedPresent = true;
+								KRKRNS_LOG("[win] hosted present window=%p logical=%dx%d quad=%dx%d texture=%p",
+									(void *)this, lw, lh, qw, qh, (void *)this->texture);
+								krkrsdl2_log_flush();
+							}
 							SDL_RenderClear(this->renderer);
 							if (this->hostWindow->texture && this->hostWindow->surface)
 							{
