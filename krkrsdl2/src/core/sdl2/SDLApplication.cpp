@@ -1028,6 +1028,23 @@ struct tTVPMessageReceiverRecord
 // void and the screen stays black.
 static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
 
+// Presentation policy shared by the texture upload and the present path: a
+// canvas taller than the window's fit-width height AND at least as wide as the
+// window is presented as its TOP visibleH rows (KAGEX square-screen stages,
+// e.g. LimeLight 1920x1440 on a 1920x1080 screen, mask the excess band
+// themselves).  Anything else is presented whole, letterboxed.  Both call
+// sites read this one predicate so an upload optimization cannot skip rows the
+// present path actually samples.
+static bool krkrsdl2_present_crops(int texW, int texH, int winW, int winH, int *visibleH)
+{
+	if (texW <= 0 || texH <= 0 || winW <= 0 || winH <= 0) return false;
+	int visH = (int)(((int64_t)winH * texW) / winW);
+	if (visH > texH) visH = texH;
+	if (visH < 1) visH = 1;
+	if (visibleH) *visibleH = visH;
+	return texH > visH && texW >= winW;
+}
+
 class TVPWindowWindow : public TTVPWindowForm
 {
 protected:
@@ -2942,24 +2959,19 @@ const int sw = this->surface->w;
 								rect = SDL_Rect{0, 0, sw, sh};
 								if (fFullFrameMode)
 								{
-									// Full-frame mode still only needs the rows the
-									// present path can sample: the window quad shows
-									// the TOP `visibleH` rows (square-screen canvases
-									// are taller than the 16:9 window, e.g. LimeLight
-									// 1920x1440 on 1920x1080). Rows below are never
-									// sampled by any present, so skipping them cannot
-									// produce visible artifacts even on a driver with
-									// broken partial updates — and saves up to 25% of
-									// the per-frame upload.
-									int vtw = sw, vth = sh, vwinW = 0, vwinH = 0;
+									// Full-frame mode can skip the rows no present
+									// samples -- but only on frames that really are
+									// presented as the top band.  A classic 4:3 canvas
+									// (1024x768 on a 1080p window) is presented WHOLE,
+									// letterboxed, so clipping it here left its bottom
+									// rows black forever: the surface was fully
+									// composed and clicks landed (the logical size, the
+									// paint box, was right) while the texture never
+									// received those rows.
+									int vwinW = 0, vwinH = 0, visH = 0;
 									SDL_GetWindowSize(this->window, &vwinW, &vwinH);
-									if (vtw > 0 && vwinW > 0 && vwinH > 0)
-									{
-										int visH = (int)(((int64_t)vwinH * vtw) / vwinW);
-										if (visH > vth) visH = vth;
-										if (visH < 1) visH = 1;
+									if (krkrsdl2_present_crops(sw, sh, vwinW, vwinH, &visH))
 										rect.h = visH;
-									}
 								}
 								if (!fFullFrameMode)
 								{
@@ -3104,9 +3116,7 @@ const int sw = this->surface->w;
 							}
 							if (tw > 0 && th > 0 && winW > 0 && winH > 0)
 							{
-								int visibleH = (int)(((int64_t)winH * tw) / winW);
-								if (visibleH > th) visibleH = th;
-								if (visibleH < 1) visibleH = 1;
+								int visibleH = 0;
 								// Crop only the square-screen excess canvas: the
 								// texture is taller than the window AND at least
 								// as wide (KAGEX exHeight stages extend the
@@ -3115,7 +3125,10 @@ const int sw = this->surface->w;
 								// classic 4:3 aspect (1024x768 on a 1080p
 								// screen) must be shown WHOLE, letterboxed --
 								// cropping it would cut off its message window.
-								bool crop = (th > visibleH) && (tw >= winW);
+								// The upload path reads the same predicate to
+								// decide whether the rows below the band may be
+								// skipped.
+								bool crop = krkrsdl2_present_crops(tw, th, winW, winH, &visibleH);
 								static int lastCropState = -1;
 								static int lastLogW = 0, lastLogH = 0;
 								if (crop != (lastCropState == 1) || tw != lastLogW || th != lastLogH)
