@@ -511,7 +511,20 @@ TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, keycodeToText)
 			tTJSVariant win;
 			if (TJS_SUCCEEDED(global->PropGet(0, TJS_W("Window"), NULL, &win, global))) {
 				iTJSDispatch2* obj = win.AsObjectNoAddRef();
-				obj->PropSet(TJS_MEMBERENSURE, TJS_W("menu"), NULL, &val, obj);
+				// KRKR-ns: the native menu root is deliberately NOT installed as
+				// Window.menu.  In kirikiri2 that property belongs to menu.dll, so
+				// a title without the plugin sees no Window.menu and falls back to
+				// its own TJS menu model -- which is precisely what the Kirikiroid2
+				// compat layers these distributions ship arrange for (they delete
+				// global.MenuItem / Window.menu at window construction).  Installed
+				// unconditionally it hijacks that model: a native root only accepts
+				// native MenuItem instances, so every KAGEX title's own menu items
+				// died at boot with "Please specity MenuItem class object."
+				// (永不枯萎的世界与终焉之花).  The MenuItem class below is still
+				// registered -- KAG3's Menus.tjs does `class KAGMenuItem extends
+				// MenuItem` -- and compat-patches supplies the script-side
+				// Window.menu root, which keeps the tree contract and accepts items
+				// from either model.
 				win.Clear();
 				gWindowMainWindowProperty = new WindowMainWindowProperty();
 				val = tTJSVariant(gWindowMainWindowProperty);
