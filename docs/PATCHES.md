@@ -8,6 +8,35 @@
 
 ## 已应用补丁 (源码层)
 
+### P74: 帧节奏归因完成 — 主循环与渲染耦合是「到处都卡」的根因（2026-09-15，埋点常驻）
+
+- 新增 `[prof] tjs:` 行（每 60 帧）：`deliv`（连续事件投递）/`calls`（TJS 回调）/`lim`（限速线程节拍）/`win post`（重绘请求）/`win deliver`（实际出画）/`emote prog/draw`（E-mote API 调用率）。埋点分布：`EventIntf.cpp`（投递/回调/窗口更新）、`EventImpl.cpp`（限速线程）、`emoteplayerclass.cpp`（E-mote 调用）。
+- **实测（模拟器 LimeLight）**：① 对白场景 `deliv≈60/s`、`win post=deliver=60/窗口`（10/s，且**无丢失无合并**）——投递与更新管道正常；② 加载/标题（E-mote 重）场景：`compose 67-80ms` → 主循环只有 `loops≈12/s`，且 `deliv` 同步掉到 ~10/s——**渲染在循环体内，帧贵则整个循环（含游戏逻辑 tick、动画、重绘）一起降频**；③ 帧便宜时（compose 0.8ms）循环 ~100/s、`deliv≈60/s` 正常。E-mote 的 `prog/draw` 调用率 = 呈现率（立绘可见步进 10Hz）。
+- 结论：引擎侧根因 = 主循环节拍被渲染耗时绑架；渲染大项 = E-mote 回读 16-25ms/帧 + CPU 合成 6-21ms + 上传 2.4-3.5ms。提升顺序：E-mote 免回读（先行：我们的 `withoutAdaptor` 路径补半分辨率）→ GPU 合成。
+- **NEON 光栅（同日深夜）**：`SwRasterizeBand`（CPU 回退光栅，实测 `SW draw profile avg=5.95ms/call`）内层加 4 像素 NEON 快路径（边函数/UV/模板/混色向量化，浮点运算顺序与 `BlendPixels` 完全一致 → 逐像素相同；非 alpha 模式与行尾走标量）。实测 4.84ms/call（-19%），画面一致。
+- **10Hz 对白节奏的归属（关键结论）**：对白/场景播放态（`[sceneplay]`）下引擎全闲（compose 0.78ms、wait 8ms/圈、`coal=0`），重绘请求与 E-mote `progress/draw` 调用率都是 ~10/s——**是游戏自身调度**；且设备端（硬件 GL 光栅）同场景也是 6.6-10.4fps，两种完全不同的渲染器给出同一节奏 → 非渲染器所致。渲染侧优化只在"引擎受限"态（标题 E-mote 背景/加载，`coal>0`）可见效果。
+- **后续修正（同日）**：半分辨率方案被用户否决（画面过糊，代码+标记已回退）。改走零质量损失路线：**模拟器上强制 E-mote 软件后端**（`sdmc:/switch/KRKR-ns/emote-cpu.txt`）——`glReadPixels` 完全消失（`lock=0.00`），引擎受限的 E-mote 场景 **18-33fps（原 10-11fps），2-3×**，画面逐像素同源（截图验证锐利一致）。原因：模拟器的 GL 是软件实现，"GL 渲染+全同步回读"比"自带软件光栅直接写图层（零拷贝）"更慢；代码中"CPU 后端在模拟器慢 2-3×"的旧注释已过时。**设备保持默认 GL 后端**（真硬件光栅 + 13.4ms 回读仍是后续 GPU 直通的目标）。
+
+### P73: GPU 合成路线摸底 — 探针分块、合成面尺寸/裁剪、overlay 绕行；结论：mode5 需补「认领路径」（2026-09-15，进行中，默认不启用）
+
+- **探针分块化**（`GLComposite.cpp RunProbe`）：全幅 `glReadPixels` 在模拟器软件 GL 上只回读 25% → 旧探针把 GPU 合成整体禁用（模拟器一直在跑最慢的纯 CPU 路径）。改为候选条宽 `{full,512,320,256,128,64}` 逐个试（与 E-mote 后端同一套自检），模拟器落到 `tile=512 → 100%`，探针 PASS；fold 回读同用 `GlcReadPixelsFull`。
+- **合成面尺寸跟随**（`begin_frame`）：合成 FBO 尺寸原为硬编码 1280×720 永不更新——1920×1440 的游戏画布被合成进 1280×720（画面缩放错位），且呈现探针读到空 FBO。现每帧按真实合成面尺寸校正。
+- **mode5 合成目标改为窗口尺寸**（≤ 屏幕）+ 裁剪缩放投影：画布坐标经 `(gComposeW, gVisH)` 投影映射到窗口尺寸 FBO，呈现 1:1；避免大于屏幕的目标（模拟器驱动在 1920×1440 目标上出现过分配崩溃）。
+- **overlay/mixer 影片绕行**：`krkrsdl2_video_overlay_pending()` 时整帧回退 CPU 链路（影片帧是往 CPU surface 叠画的，GPU 直出没有它）。
+- **合成目标持久化（关键修复）**：引擎只上报**脏区**（同一串通知也驱动 CPU surface 的拷贝），此前 FBO 每帧清空 → 未变动的层全丢（mode5 实测 `layers/f=0.5-0.9`、屏幕全黑）。现改为只在（重）建时清一次，脏区像 CPU surface 一样累积。**修复后模拟器实测：窗口切换后第 3 帧呈现探针 `fbo=100% LL/RL/LT/RT=100%`——合成与呈现链路本身已正确出画。**
+- **遗留阻塞：mode5 下主线程卡死**。持久化修复后游戏能正常出画并跑脚本（`[beginskip]`/`[syscover]` 之后），但随后在语音/等待阶段主线程卡死（`[heartbeat] MAIN THREAD STALLED for at least 81 seconds`，此前有一次 `[stall] active=473ms dispatch=473ms`）。根因未定，两个候选：(1) mode5 的裸 `SDL_GL_SwapWindow` 与 SDL renderer 呈现混用（overlay 影片绕行帧会走 SDL 链路）；(2) glc 的上下文切换与音频/SDL 线程交互。定位手段：把 mode5 的呈现统一为单一机制（影片改为 GL quad，彻底不碰 SDL present），或在卡死点抓栈。
+- 结论（重要）：mode5「跳过 CPU 合成」在架构上尚不成立——(1) 引擎合成不止逐层通知，还有**直接写合成缓冲的 blit**（日志 `blt#1 destIsCompose=1 sz=1920x1440`），mode5 会静默丢内容；(2) 引擎对合成目标按**增量脏区**更新，而 FBO 每帧被清空 → 未变动的层消失（实测 `layers/f=0.5-0.9`，屏幕近乎全黑）。要让 GPU 合成正确，必须实现 P67 已判定的**认领路径**：拦截"目标=合成缓冲"的 blit → 映射为持久 GPU 目标上的操作 + 无法认领区域回退 CPU。这是下一步的主体工作。当前 mode5 标记已移除，默认全走 CPU 路径。
+- 验证（模拟器）：探针 `full=1280 → 25%` / `tile=512 → 100%` / PASS；launcher 与游戏窗口的呈现探针均出现 `fbo=100% 四角=100%`（合成+呈现链路已正确出画）；随后进入主线程卡死（上方遗留阻塞）。默认 CPU 路径回归正常（`marker absent`，upload 2.6ms、游戏正常推进）。
+- **收尾轮（2026-09-15 深夜）**：① 卡死机制定案并修复——影片（overlay/mixer）帧原本强制 `gpuPresented=false` 走 SDL 链路，与 mode5 已完成的裸 GL swap 同帧并存 → 死锁。改为 `krkrsdl2_video_overlay_take_frame` + `krkrsdl2_glc_overlay_frame`：影片帧作为 GL quad 画进合成 FBO，呈现只走一条路（卡死计数归零，游戏完整推进到标题）。② **但 mode5 在模拟器上是净亏（实测 4.1fps vs CPU 路径 9.6-27fps）**：mode5 只跳过"合成缓冲→surface 的拷贝 + 整幅上传"（~3-6ms），**没跳过 CPU 图层混合本身**（compose 20-63ms 依旧），且每层纹理上传 + GL quad 走模拟器的软件 GL 更贵。③ 结论：GPU 合成要真正提速必须实现 P67 判定的**认领路径**（在 `Blt` 层面拦截"层→合成缓冲"的写入并交给 GPU），这是引擎核心改动，且应**在真机验证**（真机为硬件 GL，模拟器会掩盖收益）。模拟器最优配置维持：默认 CPU 路径 + `emote-cpu.txt`。
+
+### P72: 主循环持续空转（continuous 模式无限速）— 一核满载 / 「点击卡顿感」的根因（2026-09-15）
+
+- 现象：模拟器/真机「点游戏内按键吃满一个 CPU 核心而变得巨卡」。模拟器日志实锤：`[prof] updates=60 loops=37760 ... wait=0.00`——忙时主循环以约 6.4kHz 空转，每帧空投递数百次，单核 100%（98ms 的帧里约 44ms 是纯空转）。
+- 根因：上游 `TVPBeginContinuousEvent()` 在未指定 `-contfreq` 时走「无限速」分支直接 `BeginContinuousEvent()`——判断 vsync 的守卫被上游 `#if 0` 掉。任何连续处理器/钩子（KAG 交互循环、转场 `TransIdleCallback`、k2compat GFX_Motion tick）注册后，`ApplicationIdle()` 永远返回「不空闲」，主循环再不休眠。win32 上这条路径由 VSyncTimingThread 兜底，SDL 移植没有对应线程。
+- 修复：`src/core/base/sdl2/EventImpl.cpp` 将 `TVPContinousHandlerLimitFrequency` 默认值 0 → 60，改走引擎自带限速线程（60Hz 置位 + 唤醒事件），主循环在 `SDL_WaitEvent` 正常阻塞；`-contfreq 0` 仍可恢复旧行为，节拍与 win32 vsync 模式一致。
+- 附带常驻诊断：`[prof] src:`（每 60 帧）——帧请求来源计数（notify / invalidate / video / coalesced）、呈现间隔 min/avg/max、SDL 事件分类直方图、手柄合成 push 计数、`SDL_WaitEvent` 调用/瞬返/阻塞毫秒；`SDL_WaitEvent` 包裹计时在 `src/core/environ/sdl2/Application.cpp`。
+- 验证（模拟器，LimeLight）：修复前单核空转、fps≈10；修复后 `loops≈帧数`、空闲时正常阻塞（约 9.5s/22s 窗口），轻场景 24–42fps、标题 E-mote 场景 10–27fps。剩余瓶颈随之显形（与 P67 结论一致）：E-mote 回读 25–30ms + CPU 合成 8–21ms + 上传/呈现 ~6ms（模拟器口径）——GPU 合成 / 免回读是下一步的大头。
+
 ### P63: 长剧情位图分配、字体生命周期与选项居中（2026-09-12）
 
 - 真机日志出现 1920×1440 位图分配失败；模拟器复现通用堆约 2.38 GiB 空闲却无法分配约 17 MiB 连续位图。Switch 改用大位图专用内存区，空闲页可合并复用，保留写时复制和像素地址稳定性；完全空闲区保留预算 128 MiB，内存压缩时释放。

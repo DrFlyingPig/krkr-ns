@@ -1772,6 +1772,94 @@ bool tTJSNI_VideoOverlay::PresentFrameToSurface(SDL_Surface *surface, SDL_Rect &
 	return drawn;
 }
 //---------------------------------------------------------------------------
+// GPU-composite sibling of PresentFrameToSurface: hands the decoded frame's
+// pixels + destination rect to the caller (the glc compositor draws it as a
+// quad inside the compose FBO) instead of blitting into the CPU surface.
+// Consumes the frame (LastPresentedFrame) exactly like the CPU path so the
+// two can never both present the same frame.
+bool krkrsdl2_video_overlay_take_frame(const void **bits, int *bw, int *bh, int *pitch,
+	int *dx, int *dy, int *dw, int *dh, bool *bottomup)
+{
+	if(bits) *bits = nullptr;
+	if(bw) *bw = 0;
+	if(bh) *bh = 0;
+	if(pitch) *pitch = 0;
+	if(dx) *dx = 0;
+	if(dy) *dy = 0;
+	if(dw) *dw = 0;
+	if(dh) *dh = 0;
+	if(bottomup) *bottomup = false;
+	for(size_t i = 0; i < TVPVideoOverlayVector.size(); ++i)
+	{
+		tTJSNI_VideoOverlay *ov = TVPVideoOverlayVector[i];
+		if(!ov)
+			continue;
+		if(ov->TakeFrameForGpu(bits, bw, bh, pitch, dx, dy, dw, dh, bottomup))
+			return true;
+	}
+	return false;
+}
+//---------------------------------------------------------------------------
+// The GPU-composite twin of PresentFrameToSurface: same gates, but instead of
+// blitting into the CPU surface it hands out the frame's pixels + destination
+// rect and consumes the frame (LastPresentedFrame) so the CPU and GPU paths
+// can never both present the same decoded frame.
+bool tTJSNI_VideoOverlay::TakeFrameForGpu(const void **bits, int *bw, int *bh, int *pitch,
+	int *dx, int *dy, int *dw, int *dh, bool *bottomup)
+{
+	if(!VideoOverlay)
+		return false;
+	if(Mode == vomLayer) // composited by the layer tree
+		return false;
+	if(!Visible)
+		return false;
+	if(Status != tTVPVideoOverlayStatus::Play &&
+		Status != tTVPVideoOverlayStatus::Pause) // keeps the last frame on pause
+		return false;
+	if(!Bitmap[0] || !Bitmap[1])
+		return false;
+
+	int movieFrame = 0;
+	VideoOverlay->GetFrame(&movieFrame);
+	if(movieFrame == LastPresentedFrame)
+		return false; // no new decoded frame since the last present
+
+	BYTE *buff = NULL;
+	VideoOverlay->GetFrontBuffer(&buff);
+	tTVPBaseBitmap *frame = NULL;
+	if(buff && buff == BmpBits[0]) frame = Bitmap[0];
+	else if(buff && buff == BmpBits[1]) frame = Bitmap[1];
+	if(!frame)
+		return false;
+	tTVPBitmap *bmp = frame->GetBitmap();
+	if(!bmp || !bmp->Is32bit())
+		return false;
+
+	long vw = 0, vh = 0;
+	VideoOverlay->GetVideoSize(&vw, &vh);
+	const BitmapInfomation *info = bmp->GetBitmapInfomation();
+	if(vw <= 0 || vh <= 0 || !info || !info->GetBITMAPINFO())
+		return false;
+
+	if(bits) *bits = bmp->GetBits();
+	if(bw) *bw = (int)vw;
+	if(bh) *bh = (int)vh;
+	if(pitch) *pitch = frame->GetPitchBytes();
+	if(dx) *dx = Rect.left;
+	if(dy) *dy = Rect.top;
+	if(dw) *dw = Rect.get_width();
+	if(dh) *dh = Rect.get_height();
+	if(bottomup) *bottomup = info->GetBITMAPINFO()->bmiHeader.biHeight > 0;
+
+	LastPresentedFrame = movieFrame;
+	++VideoFramesApplied;
+	if(VideoFramesApplied == 1 || (VideoFramesApplied % 120) == 0)
+		KRKRNS_LOG("[video] overlay gpu frame=%u mode=%d rect=(%d,%d)-(%d,%d) vid=%ldx%ld",
+			(unsigned)VideoFramesApplied, (int)Mode,
+			Rect.left, Rect.top, Rect.right, Rect.bottom, vw, vh);
+	return true;
+}
+//---------------------------------------------------------------------------
 bool krkrsdl2_video_overlay_present(SDL_Surface *surface, SDL_Rect *dirty)
 {
 	if(dirty)

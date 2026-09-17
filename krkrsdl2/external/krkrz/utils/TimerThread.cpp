@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
 
+#include "KrkrNSProf.h" // KRKR-ns: [prof] tmr fire accounting
 #include <algorithm>
 #include "EventIntf.h"
 #include "TickCount.h"
@@ -398,6 +399,8 @@ void tTVPTimerBase::FirePendingEventsAndClear()
 	// fire all pending events and clear the pending event count
 	if(PendingCount)
 	{
+		krkrsdl2_prof_timer_fire((unsigned)(Interval >> TVP_SUBMILLI_FRAC_BITS),
+			(unsigned)PendingCount); // KRKR-ns: [prof] tmr accounting
 		Fire(PendingCount);
 		ZeroPendingCount();
 	}

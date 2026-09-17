@@ -342,6 +342,16 @@ void TVPInitScriptEngine()
 	windowclass->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|TJS_STATICMEMBER,
 		TJS_W("BasicDrawDevice"), NULL, &val, windowclass);
 #endif
+	// MenuItem: KAG3's system-menu model (class KAGMenuItem extends MenuItem,
+	// built at MainWindow construction).  The reference implementation
+	// (Kirikiroid2 / kirikiri2) registers the class AND the Window "menu"
+	// property together inside TVPCreateNativeClass_MenuItem, so this runs
+	// after the Window class exists.  Ported from Kirikiroid2
+	// src/core/visual/MenuItemIntf.cpp + win32/MenuItemImpl.cpp.
+	{
+		extern tTJSNativeClass * TVPCreateNativeClass_MenuItem();
+		REGISTER_OBJECT(MenuItem, TVPCreateNativeClass_MenuItem());
+	}
 	// Add Extension Classes
 	TVPCauseAtInstallExtensionClass( global );
 

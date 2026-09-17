@@ -1140,6 +1140,7 @@ void EmotePlayer::progress(tjs_real mstime)
 {
     EmoteProfTimer profTimer(krkrsdl2_prof_emote_progress);
     (void)profTimer;
+    krkrsdl2_prof_emote_prog_call(); // KRKR-ns: progress call rate
     if (_isStop)
         return;
     if (emtEngine._mainfile != nullptr && emtEngine._mainmotion != nullptr && clockPassed > -1.0 &&
@@ -1209,6 +1210,7 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
 {
     EmoteProfTimer profTimer(krkrsdl2_prof_emote_draw);
     (void)profTimer;
+    krkrsdl2_prof_emote_draw_call(); // KRKR-ns: draw call rate
     auto* self = ncbInstanceAdaptor<SeparateLayerAdaptor>::GetNativeInstance(objthis);
     tTJSNI_BaseLayer* ths = NULL;
     D3DAdaptor* d3dAdaptor = NULL;

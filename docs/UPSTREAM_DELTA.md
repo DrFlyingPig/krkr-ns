@@ -1,23 +1,23 @@
 # KRKR-ns 上游差异清单（UPSTREAM_DELTA）
 
-> 生成时间：2026-09-15 15:11 · 生成方式：`tools/upstream_delta.sh > docs/UPSTREAM_DELTA.md`（换行符不敏感）
+> 生成时间：2026-09-15 16:04 · 生成方式：`tools/upstream_delta.sh > docs/UPSTREAM_DELTA.md`（换行符不敏感）
 > 只统计源码；第三方 vendored 目录（krkrz submodule 内容、zlib/SDL/FAudio/simde 等）不参与对比。
 
 ## 引擎层：`krkrsdl2/` vs krkrsdl2/krkrsdl2 @ bf207f2
 
-### 我们的修改（24 个文件，按改动行数排序）
+### 我们的修改（25 个文件，按改动行数排序）
 
 | 改动行数 | 文件 |
 |---|---|
-| 2541 | `src/core/sdl2/SDLApplication.cpp` |
+| 2609 | `src/core/sdl2/SDLApplication.cpp` |
 | 1286 | `data/startup.tjs` |
 | 446 | `src/core/visual/sdl2/VideoOvlImpl.cpp` |
 | 199 | `src/core/base/sdl2/PluginImpl.cpp` |
 | 154 | `src/core/base/sdl2/StorageImpl.cpp` |
 | 138 | `src/core/sdl2/SDLBitmapCompletion.cpp` |
 | 136 | `src/core/base/sdl2/SysInitImpl.cpp` |
+| 128 | `src/core/environ/sdl2/Application.cpp` |
 | 120 | `CMakeLists.txt` |
-| 115 | `src/core/environ/sdl2/Application.cpp` |
 | 92 | `src/core/base/sdl2/SystemImpl.cpp` |
 | 82 | `src/core/base/sdl2/NativeEventQueue.cpp` |
 | 65 | `src/core/visual/sdl2/BitmapBitsAlloc.cpp` |
@@ -25,6 +25,7 @@
 | 41 | `src/core/visual/sdl2/VideoOvlImpl.h` |
 | 32 | `src/core/visual/win32/krmovie.h` |
 | 16 | `src/core/visual/sdl2/WindowImpl.cpp` |
+| 13 | `src/core/base/sdl2/EventImpl.cpp` |
 | 11 | `src/core/visual/sdl2/TVPScreen.cpp` |
 | 11 | `src/core/sdl2/SDLEntrypoint.cpp` |
 | 8 | `src/core/base/sdl2/NativeEventQueue.h` |

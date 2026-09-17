@@ -2051,7 +2051,11 @@ TJS_BEGIN_NATIVE_PROP_DECL(mainWindow) /* static */
 
 	TJS_DENY_NATIVE_PROP_SETTER
 }
-TJS_END_NATIVE_PROP_DECL(mainWindow)
+// Registered with the STATIC form: games read this off the class object
+// (`Window.mainWindow`, e.g. the k2compat stayOnTop property setter), and the
+// plain TJS_END_NATIVE_PROP_DECL registers an instance property only -- that
+// read then failed with `Member "mainWindow" does not exist`.
+TJS_END_NATIVE_STATIC_PROP_DECL(mainWindow)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_PROP_DECL(focusedLayer)
 {

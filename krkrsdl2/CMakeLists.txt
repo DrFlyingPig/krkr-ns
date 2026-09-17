@@ -551,6 +551,8 @@ pkg_check_modules(VORBIS_STACK REQUIRED IMPORTED_TARGET vorbisfile vorbis ogg)
 # modern games commonly use PSB/PIMG UI archives containing PNG/TLG/WebP.
 list(APPEND KRKRSDL2COMMON_SRC
 src/core/base/sdl2/XP3ExtractionFilter.cpp
+external/krkrz/visual/MenuItemIntf.cpp
+external/krkrz/visual/MenuItemImpl.cpp
 src/core/base/sdl2/SevenZipArchive.cpp
 src/core/base/sdl2/7zip/7zArcIn.c
 src/core/base/sdl2/7zip/7zBuf.c

@@ -2136,6 +2136,15 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 	}
 	krkrsdl2_mount_xp3_resources();
 
+	// The classic kirikiri2 debug console is hidden by the game re-spawning
+	// itself with "-debugwin=no" and exiting the first instance (see the
+	// game's startup.tjs: `getArgument("-debugwin") != "no"` -> shellExecute
+	// + exit).  There is no second process to spawn here, so supply the
+	// steady-state argument directly: games observe "-debugwin=no" and skip
+	// that respawn-and-exit branch entirely, exactly like the console-hidden
+	// Windows launch they are distributed for.
+	TVPSetCommandLine(TJS_W("-debugwin"), TJS_W("no"));
+
 	// KAG-standard boot globals. Stock Windows system init defines these;
 	// game startup scripts evaluate expressions like "kirikiriz -debugwin"
 	// which throw and abort the game's boot when the identifiers are

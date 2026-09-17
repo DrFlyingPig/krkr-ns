@@ -904,7 +904,20 @@ void tTVPApplication::Run() {
 		{
 #ifndef __EMSCRIPTEN__
 			krkrsdl2_heartbeat_main_progress(); // idle wait still counts as alive
+#ifdef __SWITCH__
+			// KRKR-ns diagnosis: count the blocking waits and whether they
+			// returned instantly (an event was already queued).
+			{
+				extern void krkrsdl2_prof_wait_event(double ms);
+				const Uint64 krkrsns_w0 = SDL_GetPerformanceCounter();
+				SDL_WaitEvent(NULL);
+				krkrsdl2_prof_wait_event(
+					(double)(SDL_GetPerformanceCounter() - krkrsns_w0) * 1000.0 /
+					(double)SDL_GetPerformanceFrequency());
+			}
+#else
 			SDL_WaitEvent(NULL);
+#endif
 #endif
 		}
 	}

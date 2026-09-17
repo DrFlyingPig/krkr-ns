@@ -9,6 +9,38 @@
 // no-op instead.
 if (typeof(global.__krkrns_compat_k2compat) == "undefined") {
 global.__krkrns_compat_k2compat = true;
+
+// Kirikiroid2-compatible distributions carry their own compat layer at
+// k2compat/k2compat.tjs.  That layer is the authoritative one for them (it
+// removes MenuItem/Window.menu when menu.dll is absent so KAGEX titles use
+// their own TJS menu model, among other KAG2 compatibility work).  Our file
+// shadows its basename, so run the distribution's copy first; everything
+// below then only fills gaps for titles that ship no layer at all.  The
+// launcher records the storage name at game mount.
+if (typeof(global.__krkrns_game_k2compat) != "undefined" &&
+	global.__krkrns_game_k2compat != "")
+{
+	try
+	{
+		Scripts.execStorage(global.__krkrns_game_k2compat);
+		// One-shot probe of a member the shipped layer reads back later
+		// (Window.mainWindow in its stayOnTop property).  "does not exist"
+		// here means the layer or the engine is missing the class member.
+		try
+		{
+			Debug.message("[compat] Window.mainWindow -> " + typeof(Window.mainWindow));
+		}
+		catch(e2)
+		{
+			Debug.message("[compat] Window.mainWindow read FAILED: " + e2);
+		}
+	}
+	catch(e)
+	{
+		Debug.message("[compat] shipped k2compat layer failed: " + e);
+	}
+}
+
 class DebugConsoleCompatDialog {
     function DebugConsoleCompatDialog(owner) {
         this.owner = owner;
@@ -74,9 +106,17 @@ if (typeof(global.Pad) == "undefined") {
 // Assigned rather than declared as a bare `function`: inside the install guard
 // below a function declaration is block-scoped, so it would not become a
 // global when this script runs as a function body.
-global.Krkr2CompatUtils = function() {};
-Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
-Krkr2CompatUtils.getWindowRect = function() { return null; };
+//
+// Additive: the deferral block at the top of this file has already executed
+// the distribution's own Kirikiroid2 compat layer, whose Krkr2CompatUtils is
+// the authoritative object (it carries members this file never knew about,
+// e.g. `require` and the module loaders built on it).  Never replace it.
+if (typeof(global.Krkr2CompatUtils) == "undefined" || global.Krkr2CompatUtils === null)
+	global.Krkr2CompatUtils = function() {};
+if (typeof(Krkr2CompatUtils.getMouseCursorPos) == "undefined")
+	Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
+if (typeof(Krkr2CompatUtils.getWindowRect) == "undefined")
+	Krkr2CompatUtils.getWindowRect = function() { return null; };
 
 // Do not synthesize BaseConductorExtendClass here.  KAG's Conductor.tjs falls
 // back to its complete built-in KAGParser when KAGParserEx.dll is unavailable;
@@ -228,11 +268,16 @@ if (typeof(global.gpButtonDpadUp) == "undefined") {
     global.gpTouchDown           = 1;
 }
 
-Krkr2CompatUtils.loadPlugin = function(name) { return null; };
-Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
-Krkr2CompatUtils.isLoaded = function(name) { return true; };
-Krkr2CompatUtils.autoLoad = function() { return null; };
-Krkr2CompatUtils.Window = function() { return null; };
+if (typeof(Krkr2CompatUtils.loadPlugin) == "undefined")
+	Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+if (typeof(Krkr2CompatUtils.unloadPlugin) == "undefined")
+	Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+if (typeof(Krkr2CompatUtils.isLoaded) == "undefined")
+	Krkr2CompatUtils.isLoaded = function(name) { return true; };
+if (typeof(Krkr2CompatUtils.autoLoad) == "undefined")
+	Krkr2CompatUtils.autoLoad = function() { return null; };
+if (typeof(Krkr2CompatUtils.Window) == "undefined")
+	Krkr2CompatUtils.Window = function() { return null; };
 
 // KAGParserEx normally extends Scripts with object helpers.  Reuse the
 // engine's native Dictionary enumeration methods; TJS2 does not implement

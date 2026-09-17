@@ -38,6 +38,9 @@
 #include <SDL_opengles2.h>
 
 extern SDL_Renderer* TVPGetPrimarySDLRenderer();
+extern bool krkrsdl2_video_overlay_pending(); // overlay/mixer movie pending (VideoOvlImpl.cpp)
+extern bool krkrsdl2_video_overlay_take_frame(const void** bits, int* bw, int* bh, int* pitch,
+                                              int* dx, int* dy, int* dw, int* dh, bool* bottomup);
 #include <cstring>
 #include <cerrno>
 #include <vector>
@@ -208,6 +211,11 @@ static int gMode = 0;        // 0 off, 1 full, 2 observe, 3 log-only
 static void* gComposeBitmap = nullptr;   // LayerManager::DrawBuffer
 static GLuint gComposeTex = 0, gComposeFbo = 0;
 static int gComposeW = 1280, gComposeH = 720;
+// Actual compose-FBO texture size and the visible canvas rows it maps.
+// Mode 5 composes into a WINDOW-sized FBO (dw x dh, never larger than the
+// screen) with the crop+scale projection; every other mode keeps a
+// canvas-sized FBO (gFboW/H == gComposeW/H, gVisH == gComposeH).
+static int gFboW = 1280, gFboH = 720, gVisH = 720;
 
 static GLuint gProgram = 0;
 static GLint gSizeLoc = -1, gOpaLoc = -1, gImageLoc = -1, gSwapLoc = -1;
@@ -527,28 +535,78 @@ static void EndContext()
 
 /* full-readback probe: a driver whose whole-rect ReadPixels truncates
  * (the emulator's software GLES returns only 25%) gets disabled here. */
+/* Full-target readback honoring the driver's honest strip width, measured by
+ * RunProbe (0 = one whole-rect call; >0 = vertical strips of that width, the
+ * form compatibility drivers read honestly).  Output layout is the same for
+ * both forms: tightly packed rows, GL bottom-up order, KRKRNS_GL_FORMAT. */
+static int gReadTileWidth = 0;
+static void GlcReadPixelsFull(std::vector<unsigned char>& dst)
+{
+    const int w = gFboW, h = gFboH;
+    const size_t rowBytes = (size_t)w * 4;
+    dst.resize(rowBytes * (size_t)h);
+    if (gReadTileWidth <= 0 || gReadTileWidth >= w)
+    {
+        gl.ReadPixels(0, 0, w, h, KRKRNS_GL_FORMAT, GL_UNSIGNED_BYTE, dst.data());
+        return;
+    }
+    std::vector<unsigned char> tile;
+    for (int x = 0; x < w; x += gReadTileWidth)
+    {
+        const int tw = (x + gReadTileWidth <= w) ? gReadTileWidth : (w - x);
+        const size_t tileRow = (size_t)tw * 4;
+        tile.resize(tileRow * (size_t)h);
+        gl.ReadPixels(x, 0, tw, h, KRKRNS_GL_FORMAT, GL_UNSIGNED_BYTE, tile.data());
+        for (int y = 0; y < h; ++y)
+            std::memcpy(dst.data() + (size_t)y * rowBytes + (size_t)x * 4,
+                        tile.data() + (size_t)y * tileRow, tileRow);
+    }
+}
+
 static bool RunProbe()
 {
     if (gProbeDone) return !gProbeFailed;
     gProbeDone = true;
     if (!gComposeTex) return false;
     gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
-    gl.Viewport(0, 0, gComposeW, gComposeH);
+    gl.Viewport(0, 0, gFboW, gFboH);
     gl.Disable(GL_BLEND);
     gl.ClearColor(1.0f, 0.0f, 0.0f, 1.0f);
     gl.Clear(GL_COLOR_BUFFER_BIT);
-    std::vector<unsigned char> full((size_t)gComposeW * gComposeH * 4);
     gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
-    gl.ReadPixels(0, 0, gComposeW, gComposeH, KRKRNS_GL_FORMAT, GL_UNSIGNED_BYTE, full.data());
-    unsigned red = 0;
-    for (size_t i = 0; i < full.size(); i += 4)
-        if (full[i] > 200 && full[i + 3] > 200) red++; // RGBA: red in byte 0
-    const double frac = (double)red / ((double)gComposeW * gComposeH);
+    // KRKR-ns (2026-09-15): the old probe required ONE whole-rect ReadPixels
+    // to be honest and disabled every GPU-composite mode otherwise -- the
+    // Nextendo emulator's software GL truncates a full 1920x1440 read (25%
+    // red) while vertical strips <=512 px read back correctly (the E-mote
+    // backend measured exactly this and tiles its readback).  Try the same
+    // candidate widths; the first honest one wins and is remembered for
+    // every full-target readback (probe + mode1 fold).
+    const int candidates[] = {0, 512, 320, 256, 128, 64};
+    double frac = 0.0;
+    int previous = -2;
+    std::vector<unsigned char> full;
+    for (int cand : candidates)
+    {
+        int mode = cand;
+        if (mode > gComposeW) mode = 0;
+        if (mode == previous) continue;
+        previous = mode;
+        gReadTileWidth = mode;
+        GlcReadPixelsFull(full);
+        unsigned red = 0;
+        for (size_t i = 0; i < full.size(); i += 4)
+            if (full[i] > 200 && full[i + 3] > 200) red++; // RGBA: red in byte 0
+        frac = (double)red / ((double)gFboW * gFboH);
+        KRKRNS_LOG("[glc] probe %s%d fullRed=%.1f%%",
+                   mode ? "tile=" : "full=", mode ? mode : gComposeW, frac * 100.0);
+        if (frac >= 0.90) break;
+    }
     gProbeFailed = frac < 0.90;
+    if (gProbeFailed) gReadTileWidth = 0;
     const char* rend = (const char*)gl.GetString(GL_RENDERER);
-    KRKRNS_LOG("[glc] probe %s: fullRed=%.1f%% renderer=%s",
+    KRKRNS_LOG("[glc] probe %s: fullRed=%.1f%% tile=%d renderer=%s",
                gProbeFailed ? "FAIL (disabled)" : "PASS", frac * 100.0,
-               rend ? rend : "?");
+               gReadTileWidth, rend ? rend : "?");
     if (gProbeFailed)
     {
         gl.DeleteFramebuffers(1, &gComposeFbo);
@@ -632,7 +690,62 @@ void krkrsdl2_glc_begin_frame()
     if (gProbeDone && gProbeFailed) return;
     if (!BeginContext()) return;
     gSavedContext = SDL_GL_GetCurrentContext();
+    bool fboFresh = false; // set when the compose target is (re)created below
+    // KRKR-ns (2026-09-15): follow the compose surface's real size.  gComposeW/H
+    // used to stay at their 1280x720 defaults forever, so a 1920x1440 game
+    // canvas was composed into a 1280x720 FBO: wrong present scale and the
+    // present probe read an empty FBO (black screen).  The legacy LayerManager
+    // only reports the buffer at creation, and it can also SetSize() later, so
+    // the size is re-queried here every frame; a change rebuilds the FBO.
+    if (gComposeBitmap)
+    {
+        int cw = 0, ch = 0;
+        if (krkrsdl2_glc_get_bitmap_raster(gComposeBitmap, &cw, &ch, nullptr, nullptr) &&
+            cw > 0 && ch > 0 && (cw != gComposeW || ch != gComposeH))
+        {
+            KRKRNS_LOG("[glc] compose size %dx%d -> %dx%d (FBO rebuilt)",
+                       gComposeW, gComposeH, cw, ch);
+            gComposeW = cw;
+            gComposeH = ch;
+            if (gComposeTex) { gl.DeleteTextures(1, &gComposeTex); gComposeTex = 0; }
+            if (gComposeFbo) { gl.DeleteFramebuffers(1, &gComposeFbo); gComposeFbo = 0; }
+        }
+    }
     if (!gM1) { gM1 = true; Milestone("m1 context+program ready"); }
+    // KRKR-ns (2026-09-15): mode 5 composes into a WINDOW-sized FBO with the
+    // crop+scale mapping (canvas coords -> visible rows scaled to the window);
+    // the other modes keep the canvas-sized FBO their 1:1 readback/fold needs.
+    // A window-sized target is never larger than the screen, which is what the
+    // emulator's software GL can allocate (a full 1920x1440 target failed).
+    if (gMode == 5)
+    {
+        int dw = 0, dh = 0;
+        if (SDL_GetRendererOutputSize(TVPGetPrimarySDLRenderer(), &dw, &dh) != 0 ||
+            dw <= 0 || dh <= 0)
+            SDL_GL_GetDrawableSize(gWindow, &dw, &dh);
+        if (dw > 0 && dh > 0)
+        {
+            int vis = (int)(((int64_t)dh * gComposeW) / dw);
+            if (vis > gComposeH) vis = gComposeH;
+            if (vis < 1) vis = 1;
+            if (dw != gFboW || dh != gFboH)
+            {
+                KRKRNS_LOG("[glc] mode5 compose target %dx%d (canvas %dx%d visH=%d)",
+                           dw, dh, gComposeW, gComposeH, vis);
+                gFboW = dw;
+                gFboH = dh;
+                if (gComposeTex) { gl.DeleteTextures(1, &gComposeTex); gComposeTex = 0; }
+                if (gComposeFbo) { gl.DeleteFramebuffers(1, &gComposeFbo); gComposeFbo = 0; }
+            }
+            gVisH = vis;
+        }
+    }
+    else
+    {
+        gFboW = gComposeW;
+        gFboH = gComposeH;
+        gVisH = gComposeH;
+    }
     if (!gComposeTex)
     {
         gl.GenTextures(1, &gComposeTex);
@@ -641,13 +754,17 @@ void krkrsdl2_glc_begin_frame()
         gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gComposeW, gComposeH, 0,
+        gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, gFboW, gFboH, 0,
                       GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
         gl.GenFramebuffers(1, &gComposeFbo);
         gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
         gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                 GL_TEXTURE_2D, gComposeTex, 0);
-        KRKRNS_LOG("[glc] compose FBO %dx%d created", gComposeW, gComposeH);
+        GLint maxTex = 0;
+        gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTex);
+        KRKRNS_LOG("[glc] compose FBO %dx%d created (maxTex=%d err=0x%x)",
+                   gFboW, gFboH, (int)maxTex, (unsigned)gl.GetError());
+        fboFresh = true;
     }
     if (!RunProbe()) return;
     if (!gM2) { gM2 = true; Milestone("m2 probe passed"); }
@@ -658,12 +775,89 @@ void krkrsdl2_glc_begin_frame()
     gLayerCount = 0;
     gLayerMs = 0;
     gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
-    gl.Viewport(0, 0, gComposeW, gComposeH);
+    gl.Viewport(0, 0, gFboW, gFboH);
     gl.Disable(GL_BLEND);
-    gl.ClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    gl.Clear(GL_COLOR_BUFFER_BIT);
+    // KRKR-ns (2026-09-15): the FBO is a PERSISTENT composite target.  The
+    // engine only reports damaged regions (the same notifications also drive
+    // the CPU surface blits), so clearing every frame erased all unchanged
+    // content — mode 5 showed a nearly black screen with layers/f 0.5-0.9.
+    // Clear only when the target was just (re)created; region updates
+    // accumulate exactly like they do on the CPU surface.
+    if (fboFresh)
+    {
+        gl.ClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        gl.Clear(GL_COLOR_BUFFER_BIT);
+    }
     if (!gM3) { gM3 = true; Milestone("m3 compose clear ok"); }
     gFrameActive = true; // context current, FBO bound: GPU may claim blits now
+}
+
+/* Mode 5: draw the pending overlay/mixer movie frame as a quad inside the
+ * compose FBO, above the layer quads.  Called from TickBeat just before the
+ * readback present.  Mixing the raw GL swap (mode 5's present) with the SDL
+ * renderer's present path in the SAME frame deadlocked the main thread
+ * (2026-09-15, "MAIN THREAD STALLED" right after the first movie frame), so
+ * movie frames must stay on the GPU like everything else. */
+static GLuint gOverlayTex = 0;
+static int gOverlayTexW = 0, gOverlayTexH = 0;
+bool krkrsdl2_glc_overlay_frame()
+{
+    if (!krkrsdl2_glc_enabled() || gMode != 5 || !gFrameActive) return false;
+    const void* bits = nullptr;
+    int bw = 0, bh = 0, pitch = 0, dx = 0, dy = 0, dw = 0, dh = 0;
+    bool bottomup = false;
+    if (!krkrsdl2_video_overlay_take_frame(&bits, &bw, &bh, &pitch, &dx, &dy, &dw, &dh, &bottomup))
+        return false;
+    if (!bits || bw <= 0 || bh <= 0 || pitch == 0 || dw <= 0 || dh <= 0)
+        return false;
+    if (!BeginContext()) return false;
+    gSavedContext = SDL_GL_GetCurrentContext();
+    if (gOverlayTex && (gOverlayTexW != bw || gOverlayTexH != bh))
+    {
+        gl.DeleteTextures(1, &gOverlayTex);
+        gOverlayTex = 0;
+    }
+    if (!gOverlayTex)
+    {
+        gl.GenTextures(1, &gOverlayTex);
+        gl.BindTexture(GL_TEXTURE_2D, gOverlayTex);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bw, bh, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        gOverlayTexW = bw;
+        gOverlayTexH = bh;
+        KRKRNS_LOG("[glc] overlay texture %dx%d", bw, bh);
+    }
+    else
+    {
+        gl.BindTexture(GL_TEXTURE_2D, gOverlayTex);
+    }
+    {
+        // tight top-down repack (frame bitmaps are normally bottom-up)
+        static std::vector<unsigned char> tight;
+        tight.resize((size_t)bw * (size_t)bh * 4);
+        for (int r = 0; r < bh; ++r)
+        {
+            const unsigned char* srcrow = static_cast<const unsigned char*>(bits) +
+                (size_t)(bottomup ? (bh - 1 - r) : r) * (size_t)pitch;
+            std::memcpy(tight.data() + (size_t)r * (size_t)bw * 4, srcrow,
+                        (size_t)bw * 4);
+        }
+        gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        gl.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, bw, bh, GL_RGBA, GL_UNSIGNED_BYTE,
+                         tight.data());
+    }
+    gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
+    gl.Viewport(0, 0, gFboW, gFboH);
+    gl.Disable(GL_BLEND);
+    // Same coordinate space as the layer quads (canvas coords -> visible rows).
+    DrawQuad(dx, dy, dw, dh, 0, 0, bw, bh, bw, bh, 255, false, gComposeW, gVisH);
+    GLErr("glc_overlay");
+    EndContext();
+    return true;
 }
 
 void krkrsdl2_glc_end_frame()
@@ -953,7 +1147,10 @@ bool krkrsdl2_glc_pure_frame()
 
 bool krkrsdl2_glc_gpuonly()
 {
-    return gMode == 5;
+    // Only frames actually composed on the GPU may skip the CPU-side layer
+    // blit; bypassed frames (overlay movie pending, probe/context failure,
+    // disabled) keep the CPU composition.
+    return gMode == 5 && gFrameActive;
 }
 
 /* Per-layer composite (v2.6). Called from BasicDrawDevice::
@@ -1055,7 +1252,7 @@ void krkrsdl2_glc_layer(tjs_int x, tjs_int y,
     const bool alpha = (type == 2 || type == 12);      // ltAlpha / ltAddAlpha
     const bool additive = (type == 3 || type == 12);   // ltAdditive
     gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
-    gl.Viewport(0, 0, gComposeW, gComposeH);
+    gl.Viewport(0, 0, gFboW, gFboH);
     gl.Disable(GL_BLEND);
     if (alpha || additive)
     {
@@ -1069,7 +1266,7 @@ void krkrsdl2_glc_layer(tjs_int x, tjs_int y,
     }
     DrawQuad(x, y, sw, sh,
              cliprect.left, cliprect.top, sw, sh,
-             w, h, (float)opacity, alpha || additive, gComposeW, gComposeH);
+             w, h, (float)opacity, alpha || additive, gComposeW, gVisH);
     GLErr("glc_layer");
     gLayerMs += SDL_GetTicks() - l_t0;
 }
@@ -1113,6 +1310,14 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
         }
         gSavedContext = SDL_GL_GetCurrentContext();
         const bool gpuOnly = (gMode == 5);
+        if (gpuOnly && !gFrameActive)
+        {
+            // Bypassed frame (overlay movie pending / context unavailable):
+            // the CPU chain composed the surface, so the standard present
+            // chain must run — do not publish the (stale) FBO here.
+            EndContext();
+            return false;
+        }
         if (gpuOnly)
         {
             // v2.8b: publish every frame the engine notifies — the FBO holds
@@ -1146,15 +1351,14 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
                 // on both docked and handheld.  Presenting the whole canvas
                 // stretched it (4:3 canvas into a 16:9 window becomes a
                 // distorted picture; taller-than-screen canvases 0.75-shrink).
-                int visH = (int)(((int64_t)dh * gComposeW) / dw);
-                if (visH > gComposeH) visH = gComposeH;
-                if (visH < 1) visH = 1;
+                // The compose FBO is already window-sized and holds the
+                // crop+scale mapping, so the present is a 1:1 bottom-up flip.
                 gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
                 gl.ActiveTexture(GL_TEXTURE0);
                 gl.BindTexture(GL_TEXTURE_2D, gComposeTex);
-                DrawQuad(0, 0, dw, dh,
-                         0, gComposeH, gComposeW, -visH,
-                         gComposeW, gComposeH, 255, false, dw, dh, false);
+                DrawQuad(0, 0, gFboW, gFboH,
+                         0, gFboH, gFboW, -gFboH,
+                         gFboW, gFboH, 255, false, gFboW, gFboH, false);
                 gl.Flush();
                 // First frames after (re)start or a window switch: probe the real
                 // display buffer (READ=0) at center + 4 corners so a wrong
@@ -1170,7 +1374,7 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
                     unsigned fbb = 0;
                     gl.BindFramebuffer(GL_READ_FRAMEBUFFER, gComposeFbo);
                     gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
-                    gl.ReadPixels(gComposeW / 2, gComposeH / 2, 8, 8,
+                    gl.ReadPixels(gFboW / 2, gFboH / 2, 8, 8,
                                   GL_RGBA, GL_UNSIGNED_BYTE, probe);
                     for (int i = 0; i < 8 * 8; ++i)
                         if (probe[i * 4] || probe[i * 4 + 1] || probe[i * 4 + 2]) fbb++;
@@ -1210,8 +1414,8 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
         const size_t bytes = (size_t)gComposeW * 4;
         gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
         gl.PixelStorei(GL_PACK_ALIGNMENT, 1);
-        std::vector<unsigned char> rows((size_t)gComposeW * gComposeH * 4);
-        gl.ReadPixels(0, 0, gComposeW, gComposeH, KRKRNS_GL_FORMAT, GL_UNSIGNED_BYTE, rows.data());
+        std::vector<unsigned char> rows;
+        GlcReadPixelsFull(rows);
         GLErr("layer.ReadPixels");
         unsigned nonblack = 0;
         for (int y = 0; y < gComposeH; y += 3)

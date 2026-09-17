@@ -45,6 +45,27 @@ extern void krkrsdl2_prof_emote_mesh();
 /* One NotifyBitmapCompleted call: the engine's per-layer presentation, inside
  * the compose segment on the CPU path and the glc quad path on the GPU one. */
 extern void krkrsdl2_prof_notify(double ms, int blend_type);
+/* Continuous-event delivery accounting (KRKR-ns 2026-09-15): how often the
+ * engine delivers continuous events, how many TJS closure calls that is, and
+ * how many limit-thread ticks fired.  These rates pin down whether a title
+ * animating at ~10 fps is the game's own cadence or the engine's pacing. */
+extern void krkrsdl2_prof_cont_delivery();
+extern void krkrsdl2_prof_cont_call();
+extern void krkrsdl2_prof_limit_tick();
+/* Window update requests (RequestUpdate -> post) vs actual UpdateContent
+ * deliveries.  post >> deliver means the engine coalesces/drops repaint
+ * requests — the layer tree asked for 60 fps but the window rendered fewer. */
+extern void krkrsdl2_prof_win_update_post();
+extern void krkrsdl2_prof_win_update_deliver();
+/* E-mote API call rates (progress/draw per second) — splits "the game drives
+ * the character at 60 Hz but repaints at 10" from "the game drives it at 10". */
+extern void krkrsdl2_prof_emote_prog_call();
+extern void krkrsdl2_prof_emote_draw_call();
+/* TJS Timer fire accounting: how many timers fire per window and at which
+ * requested intervals.  If the game asks for a 16 ms animation timer and the
+ * histogram shows it firing far less often, the engine's timer delivery is
+ * the cadence problem (rather than the game's own scheduling). */
+extern void krkrsdl2_prof_timer_fire(unsigned interval_ms, unsigned pending);
 /* One tTVPBaseBitmap::Blt: the layer-tree blend primitive.  Split by whether
  * the destination is the layer manager's compose buffer — that subset is what
  * a GPU-compositing switch would remove from the CPU. */
@@ -79,6 +100,14 @@ static inline void krkrsdl2_prof_emote_lock(double ms) {}
 static inline void krkrsdl2_prof_emote_convert(double ms) {}
 static inline void krkrsdl2_prof_emote_mesh() {}
 static inline void krkrsdl2_prof_notify(double ms, int blend_type) {}
+static inline void krkrsdl2_prof_cont_delivery() {}
+static inline void krkrsdl2_prof_cont_call() {}
+static inline void krkrsdl2_prof_limit_tick() {}
+static inline void krkrsdl2_prof_win_update_post() {}
+static inline void krkrsdl2_prof_win_update_deliver() {}
+static inline void krkrsdl2_prof_emote_prog_call() {}
+static inline void krkrsdl2_prof_emote_draw_call() {}
+static inline void krkrsdl2_prof_timer_fire(unsigned interval_ms, unsigned pending) {}
 static inline void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px) {}
 static inline void krkrsdl2_prof_emit_and_reset(double interval_ms) {}
 static inline unsigned krkrsdl2_pool_begins() { return 0; }

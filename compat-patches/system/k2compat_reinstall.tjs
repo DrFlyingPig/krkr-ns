@@ -13,17 +13,36 @@
 // cannot repair this by running again.  SDLApplication.cpp therefore executes
 // THIS file at every session boundary, before the next game can boot.
 //
-// Re-run this whole file: every line is an idempotent assignment, and the point
-// is precisely to overwrite whatever the finished game left behind.
-global.Krkr2CompatUtils = function() {};
-Krkr2CompatUtils.scriptBase = "";
-Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
-Krkr2CompatUtils.getWindowRect = function() { return null; };
-Krkr2CompatUtils.loadPlugin = function(name) { return null; };
-Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
-Krkr2CompatUtils.isLoaded = function(name) { return true; };
-Krkr2CompatUtils.autoLoad = function(name) { return null; };
-Krkr2CompatUtils.Window = function() { return null; };
+// Re-run this whole file: the plugin probe, the .psb motion handler and the
+// -scanim answer below are idempotent re-installations.
+//
+// The namespace itself is now filled ADDITIVELY.  The distributions carry their
+// own Kirikiroid2 compat layer (k2compat/k2compat.tjs, executed by our stub),
+// whose Krkr2CompatUtils is the authoritative one -- it has members this file
+// never knew about (require, and the module loaders built on it).  Overwriting
+// the object took `require` away from k2compat/k2compat_pad.tjs, which then
+// died with `Member "require" does not exist` right after the layer loaded.
+// So: create the object only when there is none, and add only members that are
+// missing (an earlier game's desktop shell is still shadowed by our stub, so
+// its broken variants never reach this point).
+if (typeof(global.Krkr2CompatUtils) == "undefined" || global.Krkr2CompatUtils === null)
+	global.Krkr2CompatUtils = function() {};
+if (typeof(Krkr2CompatUtils.scriptBase) == "undefined")
+	Krkr2CompatUtils.scriptBase = "";
+if (typeof(Krkr2CompatUtils.getMouseCursorPos) == "undefined")
+	Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
+if (typeof(Krkr2CompatUtils.getWindowRect) == "undefined")
+	Krkr2CompatUtils.getWindowRect = function() { return null; };
+if (typeof(Krkr2CompatUtils.loadPlugin) == "undefined")
+	Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+if (typeof(Krkr2CompatUtils.unloadPlugin) == "undefined")
+	Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+if (typeof(Krkr2CompatUtils.isLoaded) == "undefined")
+	Krkr2CompatUtils.isLoaded = function(name) { return true; };
+if (typeof(Krkr2CompatUtils.autoLoad) == "undefined")
+	Krkr2CompatUtils.autoLoad = function(name) { return null; };
+if (typeof(Krkr2CompatUtils.Window) == "undefined")
+	Krkr2CompatUtils.Window = function() { return null; };
 
 // ---------------------------------------------------------------------------
 // Plugin availability probe.
@@ -60,6 +79,15 @@ global.__krkrns_prev_can_load = null;
 if (typeof(global.CanLoadPlugin) != "void" && typeof(global.CanLoadPlugin) != "undefined") {
     global.__krkrns_prev_can_load = global.CanLoadPlugin;
 }
+// Re-entrancy guard: distributions hook CanLoadPlugin / Plugins.link through
+// their own compat layer (k2compat/k2compat.tjs), and such a hook commonly
+// delegates back to the current global for names it does not know.  With this
+// wrapper installed on top, that delegation re-enters the wrapper, which calls
+// the saved definition again -- an endless mutual recursion that overflowed the
+// guest stack at Voice.tjs (stack walked below SP into the guard page).  The
+// flag turns any nested call into a plain `false`, which is what the base
+// implementation would answer for the plugins this port cannot provide.
+global.__krkrns_in_can_load = false;
 global.CanLoadPlugin = function(name) {
     var hit = global.__krkrns_emulated_plugins[name.toLowerCase()];
     if (typeof(hit) != "void" && typeof(hit) != "undefined") {
@@ -67,7 +95,16 @@ global.CanLoadPlugin = function(name) {
         return true;
     }
     var prev = global.__krkrns_prev_can_load;
-    if (prev != null) return prev(name);
+    if (prev != null && prev !== global.CanLoadPlugin && !global.__krkrns_in_can_load) {
+        global.__krkrns_in_can_load = true;
+        var r = false;
+        // try/catch, not try/finally: this TJS2 grammar does not accept a
+        // catch-less finally clause.
+        try { r = prev(name); }
+        catch (e) { global.__krkrns_in_can_load = false; throw e; }
+        global.__krkrns_in_can_load = false;
+        return r;
+    }
     return false;
 };
 

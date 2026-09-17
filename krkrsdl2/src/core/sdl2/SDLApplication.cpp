@@ -202,6 +202,31 @@ static struct {
 	unsigned long long layer_px;      // sum of layer cliprect pixels
 	unsigned loop_frames;   // Application::Run iterations
 	unsigned update_frames; // frames with a graphic update (emit cadence)
+
+	// KRKR-ns diagnosis (2026-09-15): who requests frames and what wakes the
+	// pump.  req_* count needsGraphicUpdate sets by source; coal counts sets
+	// that landed while the flag was already raised (requests faster than the
+	// present loop).  gap = inter-present spacing; ev_src = SDL event classes
+	// seen by the pump (index = event.type>>8 & 15), ev_wake = our wake-only
+	// custom events.
+	unsigned long long req_notify, req_invalidate, req_video, req_coalesced;
+	unsigned long long ev_src[16];
+	unsigned long long ev_wake;
+	double pres_gap_ms, pres_gap_min_ms, pres_gap_max_ms;
+	unsigned pres_gap_n;
+	Uint64 last_pres_ticks;
+	// Input-synthesis pushes and SDL_WaitEvent accounting.  SDL_WaitEvent(NULL)
+	// removes one event from the queue and discards it, so events it eats are
+	// invisible to ev_src; these counters close that blind spot (a push per
+	// loop would keep the main loop from ever sleeping).
+	unsigned long long gp_push_motion, gp_push_button, gp_push_key;
+	unsigned long long wait_calls, wait_instant;
+	double wait_ms;
+	// Continuous-event delivery accounting (see KrkrNSProf.h).
+	unsigned long long cont_deliveries, cont_calls, limit_ticks;
+	unsigned long long win_upd_post, win_upd_deliver;
+	unsigned long long emote_prog_calls, emote_draw_calls;
+	unsigned long long tmr_fires, tmr_bucket[6];
 } g_krkrns_prof;
 
 void krkrsdl2_prof_seg(int which, double ms)
@@ -212,6 +237,30 @@ void krkrsdl2_prof_seg(int which, double ms)
 void krkrsdl2_prof_accum_frame()
 {
 	g_krkrns_prof.loop_frames++;
+}
+
+void krkrsdl2_prof_wait_event(double ms)
+{
+	g_krkrns_prof.wait_calls++;
+	g_krkrns_prof.wait_ms += ms;
+	if (ms < 0.05) g_krkrns_prof.wait_instant++;
+}
+
+void krkrsdl2_prof_cont_delivery() { g_krkrns_prof.cont_deliveries++; }
+void krkrsdl2_prof_cont_call() { g_krkrns_prof.cont_calls++; }
+void krkrsdl2_prof_limit_tick() { g_krkrns_prof.limit_ticks++; }
+void krkrsdl2_prof_win_update_post() { g_krkrns_prof.win_upd_post++; }
+void krkrsdl2_prof_win_update_deliver() { g_krkrns_prof.win_upd_deliver++; }
+void krkrsdl2_prof_emote_prog_call() { g_krkrns_prof.emote_prog_calls++; }
+void krkrsdl2_prof_emote_draw_call() { g_krkrns_prof.emote_draw_calls++; }
+
+void krkrsdl2_prof_timer_fire(unsigned interval_ms, unsigned pending)
+{
+	g_krkrns_prof.tmr_fires++;
+	const int b = interval_ms < 20 ? 0 : interval_ms < 40 ? 1 : interval_ms < 80 ? 2
+	              : interval_ms < 160 ? 3 : interval_ms < 320 ? 4 : 5;
+	g_krkrns_prof.tmr_bucket[b]++;
+	(void)pending;
 }
 
 static uint64_t g_compose_start = 0;
@@ -358,6 +407,33 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 		(double)g_krkrns_prof.blt_method[7] / (double)n);
 	prevPoolB = poolB;
 	prevPoolBig = poolBig;
+	// Frame-request sources and pump wakeups for the same window (see the
+	// struct comment).  "coal" >> 0 means the game asked for updates faster
+	// than frames were presented; "gap" shows the real present cadence and
+	// whether it is quantized (e.g. every 2nd vblank) or content-bound.
+	KRKRNS_LOG("[prof] src: req n=%llu i=%llu v=%llu coal=%llu | gap=%.1f[%.1f..%.1f]ms n=%u | sdl q=%llu w=%llu k=%llu m=%llu p=%llu t=%llu g=%llu | wake=%llu | pad m=%llu b=%llu k=%llu | wev n=%llu inst=%llu ms=%.1f",
+		g_krkrns_prof.req_notify, g_krkrns_prof.req_invalidate,
+		g_krkrns_prof.req_video, g_krkrns_prof.req_coalesced,
+		g_krkrns_prof.pres_gap_n ? g_krkrns_prof.pres_gap_ms / (double)g_krkrns_prof.pres_gap_n : 0.0,
+		g_krkrns_prof.pres_gap_min_ms, g_krkrns_prof.pres_gap_max_ms,
+		g_krkrns_prof.pres_gap_n,
+		g_krkrns_prof.ev_src[1], g_krkrns_prof.ev_src[2], g_krkrns_prof.ev_src[3],
+		g_krkrns_prof.ev_src[4], g_krkrns_prof.ev_src[6], g_krkrns_prof.ev_src[7],
+		g_krkrns_prof.ev_src[8], g_krkrns_prof.ev_wake,
+		g_krkrns_prof.gp_push_motion, g_krkrns_prof.gp_push_button,
+		g_krkrns_prof.gp_push_key,
+		g_krkrns_prof.wait_calls, g_krkrns_prof.wait_instant,
+		g_krkrns_prof.wait_ms);
+	KRKRNS_LOG("[prof] tjs: deliv=%llu calls=%llu lim=%llu | win post=%llu deliver=%llu | emote prog=%llu draw=%llu",
+		g_krkrns_prof.cont_deliveries, g_krkrns_prof.cont_calls,
+		g_krkrns_prof.limit_ticks,
+		g_krkrns_prof.win_upd_post, g_krkrns_prof.win_upd_deliver,
+		g_krkrns_prof.emote_prog_calls, g_krkrns_prof.emote_draw_calls);
+	KRKRNS_LOG("[prof] tmr: fires=%llu <20=%llu 20-40=%llu 40-80=%llu 80-160=%llu 160-320=%llu >320=%llu",
+		g_krkrns_prof.tmr_fires,
+		g_krkrns_prof.tmr_bucket[0], g_krkrns_prof.tmr_bucket[1],
+		g_krkrns_prof.tmr_bucket[2], g_krkrns_prof.tmr_bucket[3],
+		g_krkrns_prof.tmr_bucket[4], g_krkrns_prof.tmr_bucket[5]);
 	g_krkrns_prof = ((decltype(g_krkrns_prof)){});
 }
 #endif
@@ -509,6 +585,7 @@ static Uint16 ns_gp_read_buttons(SDL_GameController *c)
 
 static void ns_gp_push_mouse_motion(SDL_Window *window, int x, int y)
 {
+	g_krkrns_prof.gp_push_motion++;
 	SDL_Event ev;
 	SDL_zero(ev);
 	ev.type = SDL_MOUSEMOTION;
@@ -524,6 +601,7 @@ static void ns_gp_push_mouse_motion(SDL_Window *window, int x, int y)
 
 static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 button)
 {
+	g_krkrns_prof.gp_push_button++;
 	SDL_Event ev;
 	SDL_zero(ev);
 	ev.type = (state == SDL_PRESSED) ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
@@ -538,6 +616,7 @@ static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 butto
 
 static void ns_gp_push_key(SDL_Window *window, Uint8 state, SDL_Scancode scancode)
 {
+	g_krkrns_prof.gp_push_key++;
 	SDL_Event ev;
 	SDL_zero(ev);
 	ev.type = (state == SDL_PRESSED) ? SDL_KEYDOWN : SDL_KEYUP;
@@ -2268,6 +2347,8 @@ void TVPWindowWindow::SetPosition(tjs_int l, tjs_int t)
 }
 TVPSDLBitmapCompletion *TVPWindowWindow::GetTVPSDLBitmapCompletion()
 {
+	g_krkrns_prof.req_notify++;
+	if (this->needsGraphicUpdate) g_krkrns_prof.req_coalesced++;
 	this->needsGraphicUpdate = true;
 	return this->bitmapCompletion;
 }
@@ -2424,6 +2505,8 @@ void TVPWindowWindow::InvalidateFullSurface()
 		r.right = this->surface->w;
 		r.bottom = this->surface->h;
 		this->bitmapCompletion->update_rect.do_union(r);
+		g_krkrns_prof.req_invalidate++;
+		if (this->needsGraphicUpdate) g_krkrns_prof.req_coalesced++;
 		this->needsGraphicUpdate = true;
 	}
 }
@@ -2690,7 +2773,11 @@ void TVPWindowWindow::TickBeat()
 	if (this->surface && this->renderer)
 	{
 		if (krkrsdl2_video_overlay_pending())
+		{
+			g_krkrns_prof.req_video++;
+			if (this->needsGraphicUpdate) g_krkrns_prof.req_coalesced++;
 			this->needsGraphicUpdate = true;
+		}
 	}
 #endif
 	if (this->needsGraphicUpdate)
@@ -2892,15 +2979,26 @@ const int sw = this->surface->w;
 						// surface; the validated upload/present chain follows.
 						// Mode 5 returns true when the frame was blitted to
 						// the window backbuffer directly (see gpuPresented).
+						bool movieOnGpu = false;
 						if (this->surface)
+						{
+							// Mode 5: an overlay/mixer movie frame is drawn as a
+							// GPU quad inside the compose FBO.  Letting it fall
+							// back to the SDL chain instead put the raw GL swap
+							// and the SDL present in the same frame, which
+							// deadlocked the main thread (MAIN THREAD STALLED).
+							movieOnGpu = krkrsdl2_glc_overlay_frame();
 							gpuPresented = krkrsdl2_glc_readback(this->surface->pixels,
 								this->surface->w, this->surface->h,
 								this->surface->pitch);
+						}
 						// Overlay/mixer-mode movie frames go on top of the
 						// composed scene (after the readback, so a GPU-composed
 						// frame cannot overwrite them) and must reach the
-						// texture through the normal upload path.
-						if (this->surface)
+						// texture through the normal upload path.  GPU frames
+						// already carry the movie as a quad — only the CPU
+						// path blits here.
+						if (this->surface && !gpuPresented)
 						{
 							SDL_Rect videoDirty;
 							if (krkrsdl2_video_overlay_present(this->surface, &videoDirty) &&
@@ -2912,6 +3010,7 @@ const int sw = this->surface->w;
 								rect = uni;
 							}
 						}
+						(void)movieOnGpu;
 #endif
 						const Uint64 uploadStart = SDL_GetPerformanceCounter();
 						if (!gpuPresented && TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect) != 0)
@@ -3008,7 +3107,15 @@ const int sw = this->surface->w;
 								int visibleH = (int)(((int64_t)winH * tw) / winW);
 								if (visibleH > th) visibleH = th;
 								if (visibleH < 1) visibleH = 1;
-								bool crop = th > visibleH;
+								// Crop only the square-screen excess canvas: the
+								// texture is taller than the window AND at least
+								// as wide (KAGEX exHeight stages extend the
+								// canvas downward beyond the screen and mask the
+								// band themselves).  A smaller canvas in a
+								// classic 4:3 aspect (1024x768 on a 1080p
+								// screen) must be shown WHOLE, letterboxed --
+								// cropping it would cut off its message window.
+								bool crop = (th > visibleH) && (tw >= winW);
 								static int lastCropState = -1;
 								static int lastLogW = 0, lastLogH = 0;
 								if (crop != (lastCropState == 1) || tw != lastLogW || th != lastLogH)
@@ -3091,6 +3198,20 @@ const int sw = this->surface->w;
 #endif
 #ifdef __SWITCH__
 				const Uint64 presentStart = SDL_GetPerformanceCounter();
+				{
+					const double pf = (double)SDL_GetPerformanceFrequency();
+					if (g_krkrns_prof.last_pres_ticks)
+					{
+						const double gap = (double)(presentStart - g_krkrns_prof.last_pres_ticks) * 1000.0 / pf;
+						g_krkrns_prof.pres_gap_ms += gap;
+						if (!g_krkrns_prof.pres_gap_n || gap < g_krkrns_prof.pres_gap_min_ms)
+							g_krkrns_prof.pres_gap_min_ms = gap;
+						if (gap > g_krkrns_prof.pres_gap_max_ms)
+							g_krkrns_prof.pres_gap_max_ms = gap;
+						g_krkrns_prof.pres_gap_n++;
+					}
+					g_krkrns_prof.last_pres_ticks = presentStart;
+				}
 #endif
 				// GPU-presented frames were already swapped inside
 				// krkrsdl2_glc_readback (SDL_GL_SwapWindow); presenting an
@@ -4371,6 +4492,7 @@ void sdl_process_events()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
+		g_krkrns_prof.ev_src[(event.type >> 8) & 15]++;
 		if (event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED)
 		{
 			refresh_controllers();
@@ -5158,6 +5280,29 @@ void krkrsdl2_mount_xp3_resources()
 	{
 		extern void krkrsdl2_log_autopath_state(const char *);
 		krkrsdl2_log_autopath_state("at game mount");
+	}
+
+	// Kirikiroid2-compatible distributions ship their own compat layer at
+	// k2compat/k2compat.tjs (it removes MenuItem/Window.menu when menu.dll is
+	// absent so KAGEX titles use their own TJS menu model, and provides the
+	// rest of the KAG2/Menu compatibility).  Our romfs fallback stub shadows
+	// that path's basename, so record the distribution's own storage name for
+	// the session: compat/system/k2compat.tjs executes it before installing
+	// its fallback, exactly like Kirikiroid2 runs the shipped layer.
+	{
+		ttstr layer;
+		for (const auto &ap : krkrsdl2_game_autopaths)
+		{
+			const ttstr cand = ap + TJS_W("k2compat/k2compat.tjs");
+			if (TVPIsExistentStorageNoSearch(cand))
+			{
+				layer = cand;
+				break;
+			}
+		}
+		TVPExecuteScript(ttstr(TJS_W("global.__krkrns_game_k2compat = \"")) + layer + TJS_W("\";"));
+		KRKRNS_LOG("[compat] game k2compat layer: %s",
+			layer.IsEmpty() ? "absent" : "found");
 	}
 }
 

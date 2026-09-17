@@ -30,6 +30,10 @@ extern bool krkrsdl2_glc_try_copy(void* dest, tjs_int x, tjs_int y,
 /* copy the composed GL texture into the (top-down, 32bpp) compose surface;
  * returns true when the frame was composed on the GPU */
 extern bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch);
+/* mode 5: draw the pending overlay/mixer movie frame as a quad inside the
+ * compose FBO; call just before krkrsdl2_glc_readback.  Returns true when a
+ * decoded frame was consumed (the CPU overlay blit must then be skipped). */
+extern bool krkrsdl2_glc_overlay_frame();
 /* true while the current frame was composed entirely on the GPU */
 extern bool krkrsdl2_glc_pure_frame();
 /* true in mode 5 (gpu-composite-gpuonly.txt): the CPU-side layer

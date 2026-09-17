@@ -9,6 +9,7 @@
 // Script/Window Event Handling and Dispatching / System Idle Event Delivering
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSProf.h" // KRKR-ns: [prof] tjs delivery/call counters
 
 #include <algorithm>
 #include "SysInitIntf.h"
@@ -153,6 +154,7 @@ public:
 	void Deliver() const
 	{
 		Window->UpdateContent();
+		krkrsdl2_prof_win_update_deliver(); // KRKR-ns: actual repaint rate
 	}
 
     tTJSNI_BaseWindow * GetWindow() const { return Window; }
@@ -696,6 +698,7 @@ void TVPPostWindowUpdate(tTJSNI_BaseWindow *window)
 
 	// put into queue.
 	TVPWinUpdateEventQueue.push_back(tTVPWinUpdateEvent(window));
+	krkrsdl2_prof_win_update_post(); // KRKR-ns: repaint-request rate
 
 	// make sure that the event is to be delivered.
 	TVPInvokeEvents();
@@ -1015,6 +1018,7 @@ static void _TVPDeliverContinuousEvent() // internal
 				tjs_error er;
 				try
 				{
+					krkrsdl2_prof_cont_call(); // KRKR-ns: closure-call rate
 					er =
 						TVPContinuousHandlerVector[i].FuncCall(0, NULL, NULL, NULL, 1, &pvtick, NULL);
 				}
@@ -1072,6 +1076,7 @@ static void _TVPDeliverContinuousEvent() // internal
 void TVPDeliverContinuousEvent()
 {
 	if(TVPContinuousEventProcessing) return;
+	krkrsdl2_prof_cont_delivery(); // KRKR-ns: continuous-event delivery rate
 	TVPContinuousEventProcessing = true;
 	try
 	{

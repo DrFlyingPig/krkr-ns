@@ -216,6 +216,11 @@ public:
 	// they reach the screen through the layer tree.  `dirty` receives the
 	// touched surface rect.
 	bool PresentFrameToSurface(SDL_Surface *surface, SDL_Rect &dirty);
+	// GPU-composite twin: hands out the frame's pixels + destination rect and
+	// consumes it, so the glc compositor can draw it as a quad inside the
+	// compose FBO (mode 5) instead of blitting into the CPU surface.
+	bool TakeFrameForGpu(const void **bits, int *bw, int *bh, int *pitch,
+		int *dx, int *dy, int *dw, int *dh, bool *bottomup);
 	// Would PresentFrameToSurface draw right now?  Cheap probe (no pixel
 	// work), used to decide whether the frame needs an upload at all.
 	bool IsPresentable() const;
@@ -237,6 +242,12 @@ private:
 // can force the frame to be uploaded even when the layer tree reported no
 // damage (a movie over a static scene produces no layer notification).
 bool krkrsdl2_video_overlay_present(SDL_Surface *surface, SDL_Rect *dirty);
+// GPU-composite variant: fills the frame's pixels/size/pitch and its
+// destination rect (canvas coords) and consumes the frame.  Used by the glc
+// compositor so an overlay movie reaches the screen without mixing the raw
+// GL swap with the SDL renderer's present path.
+bool krkrsdl2_video_overlay_take_frame(const void **bits, int *bw, int *bh, int *pitch,
+	int *dx, int *dy, int *dw, int *dh, bool *bottomup);
 // Cheap probe for the same condition (no pixel work): lets TickBeat decide
 // whether to enter its upload branch before doing the actual blit.
 bool krkrsdl2_video_overlay_pending();
