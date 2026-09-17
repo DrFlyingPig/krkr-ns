@@ -1186,7 +1186,15 @@ function runAction(action) {
 
 function pageRail(delta) {
     if (games.count == 0) return;
-    selectFolder(selectedFolder + delta * VISIBLE_ROWS);
+    var index = selectedFolder + delta * VISIBLE_ROWS;
+    // A forward page step that overshoots the end must land ON the last
+    // folder.  selectFolder() wraps out-of-range values, so the old code
+    // stepped from index 6 to 12 (= count for 8 folders), wrapped to 0 and
+    // reset the view to the top: the last folder could never be shown by
+    // paging, and the list looked like it was missing an entry.  Backward
+    // paging keeps its wrap (top -> bottom) because it always lands in range.
+    if (delta > 0 && index >= games.count) index = games.count - 1;
+    selectFolder(index);
     redraw();
 }
 
