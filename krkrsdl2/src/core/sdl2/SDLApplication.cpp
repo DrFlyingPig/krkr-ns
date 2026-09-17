@@ -2053,8 +2053,17 @@ void TVPWindowWindow::BringToFront()
 void TVPWindowWindow::ShowWindowAsModal()
 {
 #if defined(KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE)
-	TVPThrowExceptionMessage(TJS_W("Showing window as modal is not supported"));
-#else
+	// A window that would need its own OS window cannot be modal here, but a
+	// HOSTED one (see hostWindow) can: it already lives inside the primary SDL
+	// window, and the engine's own modality -- which points the current window
+	// at the dialog and keeps pumping events in the loop below -- is all a
+	// modal KAG dialog needs.  KAG3's askYesNo depends on it: without the loop
+	// showModal throws, the caller aborts, and the answer never happens.
+	if (!this->hostWindow)
+	{
+		TVPThrowExceptionMessage(TJS_W("Showing window as modal is not supported"));
+	}
+#endif
 	KRKRNS_LOG("[win] modal enter window=%p host=%p", (void *)this, (void *)this->hostWindow);
 	if (this->hostWindow) krkrsdl2_log_flush();
 	this->in_mode_ = true;
@@ -2075,7 +2084,6 @@ void TVPWindowWindow::ShowWindowAsModal()
 	this->in_mode_ = false;
 	KRKRNS_LOG("[win] modal leave window=%p result=%d", (void *)this, this->modal_result_);
 	if (this->hostWindow) krkrsdl2_log_flush();
-#endif
 }
 bool TVPWindowWindow::GetVisible()
 {
@@ -3256,18 +3264,15 @@ const int sw = this->surface->w;
 								SDL_Rect dst;
 								dst.w = qw;
 								dst.h = qh;
-								if (this->hostHasPosition)
-								{
-									// The game asked for a screen position; the
-									// host reports its own through GetLeft/GetTop.
-									dst.x = this->hostPosX - (int)this->hostWindow->GetLeft();
-									dst.y = this->hostPosY - (int)this->hostWindow->GetTop();
-								}
-								else
-								{
-									dst.x = (lw - qw) / 2;
-									dst.y = (lh - qh) / 2;
-								}
+								// Always center inside the host's paint box.  The
+								// position a KAG dialog sets (0,0 at construction,
+								// and its own with(kag) setPos actually targets the
+								// MAIN window) would park the overlay in the top
+								// left corner; the game's intent -- and what the
+								// desktop window manager ends up doing anyway -- is
+								// a dialog in the middle of the game screen.
+								dst.x = (lw - qw) / 2;
+								dst.y = (lh - qh) / 2;
 								if (dst.x + dst.w > lw) dst.x = lw - dst.w;
 								if (dst.y + dst.h > lh) dst.y = lh - dst.h;
 								if (dst.x < 0) dst.x = 0;
