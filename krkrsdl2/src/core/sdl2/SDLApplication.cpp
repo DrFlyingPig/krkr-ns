@@ -1527,6 +1527,7 @@ else
 #endif
 			}
 #endif
+	}
 
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 		// move the event watch to after the SDL_RendererEventWatch to ensure transformed values are received
@@ -1534,6 +1535,10 @@ else
 		SDL_AddEventWatch(sdl_event_watch, nullptr);
 #endif
 
+		// Only the renderer creation above is host-specific.  Everything from
+		// here on runs for a hosted window as well: it needs its own bitmap
+		// completion, texture and surface exactly like a window with its own
+		// SDL window (those are what its layer tree composits into).
 		this->bitmapCompletion = new TVPSDLBitmapCompletion();
 		// A hosted window must not fall back to SDL_GetWindowSurface(): that is
 		// the host's screen buffer, and drawing the dialog into it would write
@@ -1587,7 +1592,6 @@ else
 		{
 			SDL_SetRenderDrawColor(this->renderer, 0x00, 0x00, 0x00, 0xFF);
 		}
-	}
 #ifdef _WIN32
 	::SetWindowLongPtr(this->GetHandle(), GWLP_USERDATA, (LONG_PTR)this);
 #endif
