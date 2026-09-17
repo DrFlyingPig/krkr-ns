@@ -10,35 +10,20 @@
 if (typeof(global.__krkrns_compat_k2compat) == "undefined") {
 global.__krkrns_compat_k2compat = true;
 
-// Kirikiroid2-compatible distributions carry their own compat layer at
-// k2compat/k2compat.tjs.  That layer is the authoritative one for them (it
-// removes MenuItem/Window.menu when menu.dll is absent so KAGEX titles use
-// their own TJS menu model, among other KAG2 compatibility work).  Our file
-// shadows its basename, so run the distribution's copy first; everything
-// below then only fills gaps for titles that ship no layer at all.  The
-// launcher records the storage name at game mount.
-if (typeof(global.__krkrns_game_k2compat) != "undefined" &&
-	global.__krkrns_game_k2compat != "")
+// Kirikiroid2-compatible distributions ship their own compat layer at
+// k2compat/k2compat.tjs.  It is deliberately NOT executed: our file shadows
+// its basename, and its main job -- deleting MenuItem / Window.menu so a KAGEX
+// title falls back to its own menu model -- is unnecessary now that the engine
+// exposes neither (kirikiri2 keeps both inside menu.dll, which this port does
+// not have).  Running it instead installs machinery of its own that expects
+// engine members this port lacks: its stayOnTop property reads
+// Window.mainWindow, and LimeLight died at boot on exactly that read.  Its
+// presence is still what decides whether the script-side MenuItem model below
+// may be published, so it is detected either way.
+if (typeof(global.__krkrns_game_k2compat) == "undefined" ||
+	global.__krkrns_game_k2compat == "")
 {
-	try
-	{
-		Scripts.execStorage(global.__krkrns_game_k2compat);
-		// One-shot probe of a member the shipped layer reads back later
-		// (Window.mainWindow in its stayOnTop property).  "does not exist"
-		// here means the layer or the engine is missing the class member.
-		try
-		{
-			Debug.message("[compat] Window.mainWindow -> " + typeof(Window.mainWindow));
-		}
-		catch(e2)
-		{
-			Debug.message("[compat] Window.mainWindow read FAILED: " + e2);
-		}
-	}
-	catch(e)
-	{
-		Debug.message("[compat] shipped k2compat layer failed: " + e);
-	}
+	global.__krkrns_no_game_layer = true;
 }
 
 class DebugConsoleCompatDialog {
@@ -184,6 +169,17 @@ class MenuItem {
     function addHook(h) { return this; }
     function removeHook(h) { return this; }
     function finalize() { this.children.clear(); this.parent = null; return null; }
+}
+
+// Publish the model as a global.  KAG3's system/Menus.tjs declares
+// `class KAGMenuItem extends MenuItem` at global scope (and builds its whole
+// system menu from it), so the name has to be reachable there; a class
+// declared inside this guard block is block-scoped and never becomes a global
+// on its own.  Titles that ship a Kirikiroid2 compat layer are excluded --
+// they bring their own menu model and never reference this name.  Keep it a
+// plain global member so a title's layer can still delete it.
+if (typeof(global.MenuItem) == "undefined") {
+	if (typeof(global.__krkrns_no_game_layer) != "undefined") global.MenuItem = MenuItem;
 }
 
 // Kirikiri's Window.menu property lazily returns a root MenuItem.  Native

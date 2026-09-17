@@ -342,16 +342,30 @@ void TVPInitScriptEngine()
 	windowclass->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|TJS_STATICMEMBER,
 		TJS_W("BasicDrawDevice"), NULL, &val, windowclass);
 #endif
-	// MenuItem: KAG3's system-menu model (class KAGMenuItem extends MenuItem,
-	// built at MainWindow construction).  The reference implementation
-	// (Kirikiroid2 / kirikiri2) registers the class AND the Window "menu"
-	// property together inside TVPCreateNativeClass_MenuItem, so this runs
-	// after the Window class exists.  Ported from Kirikiroid2
-	// src/core/visual/MenuItemIntf.cpp + win32/MenuItemImpl.cpp.
-	{
-		extern tTJSNativeClass * TVPCreateNativeClass_MenuItem();
-		REGISTER_OBJECT(MenuItem, TVPCreateNativeClass_MenuItem());
-	}
+	// MenuItem is deliberately NOT registered as a native class.
+	//
+	// The port of Kirikiroid2's MenuItemIntf/MenuItemImpl (external/krkrz/
+	// visual) is still compiled and keeps the implementation available, but
+	// exposing it to scripts changes what titles see, and the shipped
+	// Kirikiroid2 compat layers depend on the opposite:  In kirikiri2 the
+	// MenuItem class and the Window.menu property belong to menu.dll, so a
+	// title without that plugin sees neither and falls back to its own TJS
+	// menu model -- which is exactly what k2compat/k2compat.tjs arranges (it
+	// deletes global.MenuItem and Window.menu, and its debug-menu helpers are
+	// expected to fail harmlessly).  With the native class and its root menu
+	// installed, KAGEX titles instead hand their script-side items to a native
+	// root that only accepts native instances and dies at boot with "Please
+	// specity MenuItem class object." (永不枯萎的世界与终焉之花, LimeLight).
+	//
+	// KAG3's system/Menus.tjs does need `MenuItem` to exist (it declares
+	// `class KAGMenuItem extends MenuItem`), so compat-patches/system/
+	// k2compat.tjs publishes its script-side model as a global instead -- a
+	// plain global member a title's compat layer can still delete.
+	//
+	// {
+	// 	extern tTJSNativeClass * TVPCreateNativeClass_MenuItem();
+	// 	REGISTER_OBJECT(MenuItem, TVPCreateNativeClass_MenuItem());
+	// }
 	// Add Extension Classes
 	TVPCauseAtInstallExtensionClass( global );
 

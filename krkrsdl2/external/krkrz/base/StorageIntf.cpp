@@ -2251,6 +2251,24 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 		// immediately before startup, so the members KAG needs are always
 		// present; ScriptMgnIntf.cpp also reinstalls after any k2compat.tjs the
 		// game loads, covering the rest of the session.
+		// KRKR-ns: run OUR compat stub here as well.  It is normally pulled in by
+		// the game itself -- KAGEX titles execute Scripts.execStorage(
+		// "k2compat.tjs") and the patch path resolves that to this file -- but a
+		// plain KAG3 title never does, and it still needs the script-side
+		// members: its system/Menus.tjs builds the whole system menu from
+		// `class KAGMenuItem extends MenuItem`, and the engine cannot supply that
+		// class itself (in kirikiri2 both MenuItem and Window.menu belong to
+		// menu.dll, and a title without the plugin supplies its own).  The stub
+		// is guarded against re-entry, so a title that also loads it later is
+		// unaffected.
+		try
+		{
+			TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat.tjs")));
+		}
+		catch(...)
+		{
+			KRKRNS_LOG("[launcher] compat stub execution failed");
+		}
 		TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat_reinstall.tjs")));
 		TVPExecuteStorage(entry);
 		KRKRNS_STAGE("game startup returned");
