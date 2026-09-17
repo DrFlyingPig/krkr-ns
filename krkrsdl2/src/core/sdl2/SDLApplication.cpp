@@ -1231,6 +1231,27 @@ public:
 	bool CanCloseWork = false;
 	bool in_mode_ = false; // is modal
 	int modal_result_ = 0;
+#ifdef __SWITCH__
+	/* KRKR-ns: the Switch video driver allows exactly one SDL window, but KAG
+	   titles open real secondary windows for their modal dialogs (KAG3's
+	   system/CustomDialogWindow.tjs does "class YesNoDialogWindow extends
+	   Window" and then showModal()).  A window that cannot get its own SDL
+	   window hosts itself inside the primary one instead: it borrows the
+	   host's SDL_Window and renderer, keeps its own surface/texture, presents
+	   as an overlay at its own placement, and receives input translated into
+	   its coordinates while it is modal.  Null for an ordinary window. */
+	TVPWindowWindow *hostWindow = nullptr;
+	/* Placement inside the host's logical (paint box) space.  SetPosition
+	   records the game's wish; without one the window is centered. */
+	bool hostHasPosition = false;
+	int hostPosX = 0, hostPosY = 0;
+	/* Destination rectangle of this window's texture in the host's logical
+	   space, recomputed by every present and reused to translate input. */
+	SDL_Rect hostDst = {0, 0, 0, 0};
+	static TVPWindowWindow *find_host_for_secondary_window(TVPWindowWindow *self);
+	/* The hosted child that currently owns input (modal), or null. */
+	TVPWindowWindow *hosted_modal_child();
+#endif
 	enum CloseAction
 	{
 		caNone,
@@ -1405,7 +1426,22 @@ TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 	if (!this->window)
 	{
 		KRKRNS_LOG("[ns] SDL_CreateWindow FAILED: [%s]", SDL_GetError() ? SDL_GetError() : "");
-		TVPThrowExceptionMessage(TJS_W("Cannot create SDL window: %1"), ttstr(SDL_GetError()));
+#ifdef __SWITCH__
+		// Host this window inside the primary one instead of refusing.  KAG's
+		// modal dialogs are real Window objects; letting the constructor throw
+		// makes the game skip the action the dialog was asking about.
+		if (TVPWindowWindow *host = find_host_for_secondary_window(this))
+		{
+			this->hostWindow = host;
+			this->window = host->window; // borrowed: never destroyed here
+			KRKRNS_LOG("[win] secondary window %p hosted in the primary SDL window %p",
+				(void *)this, (void *)this->window);
+		}
+		else
+#endif
+		{
+			TVPThrowExceptionMessage(TJS_W("Cannot create SDL window: %1"), ttstr(SDL_GetError()));
+		}
 	}
 	KRKRNS_LOG("[ns] SDL_CreateWindow ok, video driver=[%s]", SDL_GetCurrentVideoDriver() ? SDL_GetCurrentVideoDriver() : "?");
 #if defined(__EMSCRIPTEN__) && defined(KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE)
@@ -1433,9 +1469,21 @@ TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 	this->openGlScreen = nullptr;
 #endif
 	this->surface = nullptr;
+#ifdef __SWITCH__
+	if (this->hostWindow)
+	{
+		// A hosted secondary window has no SDL window of its own, and one SDL
+		// window can only carry one presenting renderer, so draw with the
+		// host's.  Its own surface/texture stay private: its layer tree
+		// composits independently and only the present step shares the screen.
+		this->renderer = this->hostWindow->renderer;
+		KRKRNS_LOG("[win] secondary window %p uses host renderer %p", (void *)this, (void *)this->renderer);
+	}
+#endif
 #ifdef KRKRZ_ENABLE_CANVAS
 	if (TVPIsEnableDrawDevice())
 #endif
+	if (!this->hostWindow)
 	{
 #if !defined(__EMSCRIPTEN__) || (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__))
 		KRKRNS_LOG("[ns] before SDL_CreateRenderer(ACCELERATED|VSYNC)");
@@ -1477,7 +1525,10 @@ else
 #endif
 
 		this->bitmapCompletion = new TVPSDLBitmapCompletion();
-		if (!this->renderer)
+		// A hosted window must not fall back to SDL_GetWindowSurface(): that is
+		// the host's screen buffer, and drawing the dialog into it would write
+		// over the game's frame instead of on top of it.
+		if (!this->renderer && !this->hostWindow)
 		{
 			this->surface = SDL_GetWindowSurface(this->window);
 			if (!this->surface)
@@ -1511,8 +1562,14 @@ else
 			KRKRNS_LOG("[win] pre-created surface %p %dx%d", (void*)this->surface, cw, ch);
 			this->bitmapCompletion->surface = this->surface;
 			// render the 720p content scaled to the (1080p fullscreen) window
-			SDL_RenderSetLogicalSize(this->renderer, cw, ch);
-			KRKRNS_LOG("[win] renderer logical size %dx%d", cw, ch);
+			// -- but a hosted secondary window shares the host's renderer, so
+			// the logical size there stays the host's paint box (the overlay
+			// is placed inside it).
+			if (!this->hostWindow)
+			{
+				SDL_RenderSetLogicalSize(this->renderer, cw, ch);
+				KRKRNS_LOG("[win] renderer logical size %dx%d", cw, ch);
+			}
 			this->InvalidateFullSurface();
 		}
 #endif
@@ -1577,16 +1634,18 @@ TVPWindowWindow::~TVPWindowWindow()
 		SDL_FreeSurface(this->surface);
 		this->surface = nullptr;
 	}
-	if (this->renderer)
+	if (this->renderer && !this->hostWindow)
 	{
 		SDL_DestroyRenderer(this->renderer);
 		this->renderer = nullptr;
 	}
-	if (this->window)
+	if (this->window && !this->hostWindow)
 	{
 		SDL_DestroyWindow(this->window);
 		this->window = nullptr;
 	}
+	this->renderer = nullptr;
+	this->window = nullptr;
 
 #ifdef _WIN32
 	tjs_int count = this->WindowMessageReceivers.GetCount();
@@ -1655,7 +1714,13 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 #ifdef KRKRSDL2_ENABLE_ZOOM
 		this->UpdateActualZoom();
 #else
-		SDL_RenderSetLogicalSize(this->renderer, w, h);
+		// A hosted secondary window shares the host's renderer, whose logical
+		// size must stay the HOST's paint box: that is the space the overlay is
+		// placed in and the space input coordinates arrive in.
+		if (!this->hostWindow)
+		{
+			SDL_RenderSetLogicalSize(this->renderer, w, h);
+		}
 #endif
 	}
 	if (this->TJSNativeInstance)
@@ -1689,16 +1754,18 @@ void TVPWindowWindow::ReleaseNativeForSwitch(void)
 		SDL_FreeSurface(this->surface);
 		this->surface = nullptr;
 	}
-	if (this->renderer)
+	if (this->renderer && !this->hostWindow)
 	{
 		SDL_DestroyRenderer(this->renderer);
 		this->renderer = nullptr;
 	}
-	if (this->window)
+	if (this->window && !this->hostWindow)
 	{
 		SDL_DestroyWindow(this->window);
 		this->window = nullptr;
 	}
+	this->renderer = nullptr;
+	this->window = nullptr;
 	this->uploadShadow.clear();
 	this->uploadShadowW = 0;
 	this->uploadShadowH = 0;
@@ -1709,6 +1776,28 @@ void TVPWindowWindow::ReleaseNativeForSwitch(void)
 static int MulDiv(int nNumber, int nNumerator, int nDenominator)
 {
 	return (int)(((int64_t)nNumber * (int64_t)nNumerator) / nDenominator);
+}
+#endif
+
+#ifdef __SWITCH__
+TVPWindowWindow *TVPWindowWindow::find_host_for_secondary_window(TVPWindowWindow *self)
+{
+	for (TVPWindowWindow *w : krkrsdl2_live_windows)
+	{
+		if (w == self) continue;
+		if (w->hostWindow) continue;              // a hosted window cannot host
+		if (w->window && w->renderer) return w;   // the real SDL window owner
+	}
+	return nullptr;
+}
+
+TVPWindowWindow *TVPWindowWindow::hosted_modal_child()
+{
+	for (TVPWindowWindow *w : krkrsdl2_live_windows)
+	{
+		if (w->hostWindow == this && w->in_mode_) return w;
+	}
+	return nullptr;
 }
 #endif
 
@@ -1964,7 +2053,7 @@ void TVPWindowWindow::SetVisible(bool visible)
 	{
 		return;
 	}
-	if (this->window)
+	if (this->window && !this->hostWindow)
 	{
 #ifndef KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE
 		if (visible)
@@ -2355,8 +2444,20 @@ void TVPWindowWindow::SetTop(tjs_int t)
 }
 void TVPWindowWindow::SetPosition(tjs_int l, tjs_int t)
 {
+#ifdef __SWITCH__
+	if (this->hostWindow)
+	{
+		// The game centers its dialog with setPos(); a hosted window has no
+		// screen of its own, so remember the wish and place the overlay with
+		// it instead of moving the shared SDL window.
+		this->hostHasPosition = true;
+		this->hostPosX = (int)l;
+		this->hostPosY = (int)t;
+		return;
+	}
+#endif
 #ifndef KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE
-	if (this->window)
+	if (this->window && !this->hostWindow)
 	{
 		SDL_SetWindowPosition(this->window, l, t);
 	}
@@ -3085,11 +3186,62 @@ const int sw = this->surface->w;
 					srcrect.h = this->GetInnerHeight();
 					SDL_RenderCopy(this->renderer, this->texture, &srcrect, &destrect);
 #elif defined(__SWITCH__)
+						// A hosted secondary window (KAG's modal dialog) has no
+						// SDL window of its own: draw the host's frame first and
+						// this window on top of it, both in the host's logical
+						// (paint box) space so the dialog sits in game pixels.
+						// SDL does not preserve the backbuffer, so the host's
+						// frame has to be redrawn here even though it presented
+						// this same frame already.
+						if (this->hostWindow && !gpuPresented)
+						{
+							int lw = 0, lh = 0;
+							SDL_RenderGetLogicalSize(this->renderer, &lw, &lh);
+							if (lw <= 0 || lh <= 0)
+							{
+								SDL_GetWindowSize(this->window, &lw, &lh);
+							}
+							const int qw = this->surface ? this->surface->w : 0;
+							const int qh = this->surface ? this->surface->h : 0;
+							SDL_RenderClear(this->renderer);
+							if (this->hostWindow->texture && this->hostWindow->surface)
+							{
+								SDL_RenderCopy(this->renderer, this->hostWindow->texture, nullptr, nullptr);
+							}
+							if (qw > 0 && qh > 0 && this->texture)
+							{
+								SDL_Rect dst;
+								dst.w = qw;
+								dst.h = qh;
+								if (this->hostHasPosition)
+								{
+									// The game asked for a screen position; the
+									// host reports its own through GetLeft/GetTop.
+									dst.x = this->hostPosX - (int)this->hostWindow->GetLeft();
+									dst.y = this->hostPosY - (int)this->hostWindow->GetTop();
+								}
+								else
+								{
+									dst.x = (lw - qw) / 2;
+									dst.y = (lh - qh) / 2;
+								}
+								if (dst.x + dst.w > lw) dst.x = lw - dst.w;
+								if (dst.y + dst.h > lh) dst.y = lh - dst.h;
+								if (dst.x < 0) dst.x = 0;
+								if (dst.y < 0) dst.y = 0;
+								this->hostDst = dst;
+								SDL_RenderCopy(this->renderer, this->texture, nullptr, &dst);
+							}
+							else
+							{
+								this->hostDst = SDL_Rect{0, 0, 0, 0};
+							}
+						}
 						// The Switch swapchain does not preserve untouched pixels after
 						// Present, so redraw the complete resident texture each time.
 						// (Skipped on GPU-presented frames: the blit already wrote the
 						// backbuffer and the queue below is empty -> swap only.)
-						if (!gpuPresented)
+						if (!gpuPresented && !this->hostWindow && !this->hosted_modal_child())
 						{
 							// KRKR-ns: KAGEX square-screen stages extend BELOW the
 							// visible area (LimeLight: 1920x1440 paint box on a
@@ -4127,6 +4279,29 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 		delete this;
 		return false;
 	}
+#ifdef __SWITCH__
+	// A hosted secondary window shares the host's SDL window, so the event
+	// coordinates arrive in the host's logical (paint box) space.  Move them
+	// into this window's own space, which is where its layers are laid out.
+	// Keys carry no coordinates and pass through unchanged.
+	if (this->hostWindow && this->hostDst.w > 0)
+	{
+		switch (event.type)
+		{
+			case SDL_MOUSEMOTION:
+				event.motion.x -= this->hostDst.x;
+				event.motion.y -= this->hostDst.y;
+				break;
+			case SDL_MOUSEBUTTONDOWN:
+			case SDL_MOUSEBUTTONUP:
+				event.button.x -= this->hostDst.x;
+				event.button.y -= this->hostDst.y;
+				break;
+			default:
+				break;
+		}
+	}
+#endif
 	if (this->should_try_parent_window(event))
 	{
 		if (!this->in_mode_)
