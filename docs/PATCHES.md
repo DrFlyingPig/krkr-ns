@@ -8,6 +8,14 @@
 
 ## 已应用补丁 (源码层)
 
+### P87: 收回自造的 WindowEx 兼容面 — 以 Kirikiroid2 为准（2026-09-18）
+
+- **起因**：P86 修好 LimeLight 时，我按 krkr2 / krkrsdl3 的 **windowEx.dll 插件源码**补了一批成员，并自造了若干（`restmax`/`getScreenRect`/`setPrimarySize`/`pseudoFullScreened`/`isPseudoMode` …）。用户逐条追问"这些是 Kirikiroid2 里有的吗"。双向字节检索（ASCII + UTF-16）五棵参考树的结果：**`getNormalRect`/`getWindowRect`/`getClientRect`/`setClientRect`/`getPlacement`/`setPlacement`/`getMonitorInfo`/`getSystemMetrics`/`maximized`/`disableMove`/`MenuItem.bi*`/`bmpItem`/`rightJustify` 在 Kirikiroid2 里全部不存在**（只在 krkr2/krkrsdl3 的 Win32 插件里），自造的那批在任何参考树里都没有；只有 `Window.PassThroughDrawDevice` 别名与 `dt*` 常量是 Kirikiroid2 真有的。
+- **为什么不需要**：KAGEX 自带守卫 —— 全屏切换里读 `getNormalRect` 处是 `typeof this.getNormalRect == "Object"` 三元兜底；裸调用的伪全屏分支要 `System.getDisplayMonitors`/`System.getMonitorInfo` 存在才进得去，而这两个系统函数 Kirikiroid2 与本移植都没有；`SetWindowControlMenu()` 的首行是 `typeof win.minimize != "Object"` 探测门。**能力的"缺失"本身就是游戏走回落分支的依据。**
+- **修复**：`compat-patches/system/k2compat.tjs` 删除上述全部自造/插件专属成员（-134 行），只在文件里留下明确注释：**这些必须保持缺失、为什么、以及"为了让某个游戏启动而伪造它们"会导致级联缺成员（P86 的白屏正是这么来的）**。同时清掉 P82 时代的删除自测探针残渣。
+- **实测**：清理后 LimeLight / 魔女 / 9nine 等启动与退出正常（用户确认），证明这些成员确实无用。
+- **方法论（写给未来）**："参照实现"必须先确认**是哪一棵树**：krkr2/krkrsdl3 是 Win32 插件环境（有 windowEx.dll、D3D 绘制设备），Kirikiroid2 是移动端移植（两者都没有）。凡 Windows 插件提供的能力，移动端移植的默认状态是**不存在**。
+
 ### P86: KAGEX 窗口尺寸与 LimeLight 全屏崩溃 — 以 Kirikiroid2 为准的四处对齐（2026-09-18）
 
 - **现象**：①`【KRKR】魔女的夜宴`（KAGEX，scWidth/scHeight=1280×720、exHeight=960）窗口比例不对：1280×960 画布被整幅塞进 16:9 窗口（应为"可见带 1280×720 缩放到满屏"）；②修好①后 `【KRKR】LimeLight_lj` 开机即黑/白屏，日志显示全屏切换路径接连抛 `Member "maximized"`、`Member "biMinimize"`、`Cannot convert ((int)0 to Object)`。

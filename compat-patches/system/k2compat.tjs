@@ -182,37 +182,6 @@ class MenuItem {
     function finalize() { this.children.clear(); this.parent = null; return null; }
 }
 
-// MenuItemEx (the windowEx.dll extension of MenuItem) adds the system-bitmap
-// constants KAGEX uses to build its window control menu -- the fullscreen
-// transition ends in SetWindowControlMenu, which failed with
-// Member "biMinimize" does not exist and left the title on a white screen.
-// Values are the stock Windows menu bitmap ids, exactly as the plugin defines
-// them (upstream-krkr2 cpp/plugins/windowEx.cpp).
-MenuItem.biSystem           = 1;
-MenuItem.biRestore          = 2;
-MenuItem.biMinimize         = 3;
-MenuItem.biClose            = 5;
-MenuItem.biCloseDisabled    = 6;
-MenuItem.biMinimizeDisabled = 7;
-MenuItem.biPopupClose       = 8;
-MenuItem.biPopupRestore     = 9;
-MenuItem.biPopupMaximize    = 10;
-MenuItem.biPopupMinimize    = 11;
-
-// The rest of MenuItemEx's surface.  bmpItem/bmpChecked/bmpUnchecked accept a
-// Layer (or null) and are only read back by the plugin that draws the menu
-// bar, which does not exist here; rightJustify decides the text alignment the
-// titles set on their window-control items.
-if (typeof(MenuItem.prototype) == "object" || true) {
-    if (typeof(global.__krkrns_menu_ex) == "undefined") {
-        global.__krkrns_menu_ex = true;
-        MenuItem.bmpItem      = null;
-        MenuItem.bmpChecked   = null;
-        MenuItem.bmpUnchecked = null;
-        MenuItem.rightJustify = false;
-    }
-}
-
 // Publish the model as a global.  KAG3's system/Menus.tjs declares
 // `class KAGMenuItem extends MenuItem` at global scope (and builds its whole
 // system menu from it), so the name has to be reachable there; a class
@@ -261,83 +230,30 @@ Window.registerExEvent = function(name) { return true; };
 // query the documented members without introducing a second platform window.
 if (typeof(Window.disableResize) == "undefined") Window.disableResize = false;
 if (typeof(Window.enableNCMouseEvent) == "undefined") Window.enableNCMouseEvent = false;
-if (typeof(Window.disableMove) == "undefined") Window.disableMove = false;
 
-// windowEx.dll also answers the window geometry queries.  KAGEX's fullscreen
-// transition reads these before switching (it remembers the windowed rect and
-// restores it later); without them the setter aborts halfway, leaves
-// _fullScreenChanging set and the boot wait never completes -- which is why
-// the TJS-visible fullScreen was once forced true here.  Reporting the real
-// window rect instead lets the transition finish, and keeps fullScreen
-// truthful, which the games' own sizing logic depends on (their setZoom()
-// returns early when fullScreen is true, so a forced true skips the
-// window-size setup and leaves a mis-sized stage behind).
-// The rect is reported in the window's own coordinates with the width/height
-// spellings both kirikiri rect conventions use.
-Window.getNormalRect = function() {
-    var w = this.width, h = this.height;
-    return %[ left:0, top:0, right:w, bottom:h,
-              x:0, y:0, w:w, h:h,
-              normalLeft:0, normalTop:0, normalRight:w, normalBottom:h ];
-};
-Window.getWindowRect = function() {
-    var w = this.width, h = this.height;
-    return %[ left:0, top:0, right:w, bottom:h, x:0, y:0, w:w, h:h ];
-};
-Window.getClientRect = function() {
-    var w = this.innerWidth, h = this.innerHeight;
-    return %[ left:0, top:0, right:w, bottom:h, x:0, y:0, w:w, h:h ];
-};
-Window.setClientRect = function(r) { return true; };
-Window.getPlacement = function() {
-    var w = this.width, h = this.height;
-    return %[ normalLeft:0, normalTop:0, normalRight:w, normalBottom:h,
-              showCmd:1, flags:0, minPosition:0, maxPosition:0 ];
-};
-Window.setPlacement = function(p) { return true; };
-
-// Window state that windowEx.dll keeps for the title's own window manager.
-// KAGEX's fullscreen/size transition (LimeLight's mainwindow.tjs setZoom and
-// friends) reads and writes all of these while it remembers the windowed state
-// and restores it after going fullscreen; a missing member aborts that
-// transition (the session died on Member "maximized" does not exist) and the
-// title ends up on a black screen.  These are bookkeeping values for a
-// single-window console -- there is no OS chrome to maximize or move -- so
-// they are kept script-side with sane defaults and never refuse an assignment.
-if (typeof(Window.maximized) == "undefined")    Window.maximized = false;
-if (typeof(Window.restmax) == "undefined")      Window.restmax = false;
-if (typeof(Window.restoreMaximize) == "undefined") Window.restoreMaximize = function() { return null; };
-if (typeof(Window.callResize) == "undefined")   Window.callResize = false;
-if (typeof(Window.resetIcon) == "undefined")    Window.resetIcon = false;
-if (typeof(Window.resetWindowMaxSize) == "undefined") Window.resetWindowMaxSize = function() { return null; };
-if (typeof(Window.disableMove) == "undefined")  Window.disableMove = false;
-if (typeof(Window.pseudoFullScreened) == "undefined") Window.pseudoFullScreened = false;
-if (typeof(Window.isPseudoMode) == "undefined") Window.isPseudoMode = function() { return false; };
-// Screen/window rectangles.  KAGEX keeps its own copy of these while it
-// switches modes; answering with the live values keeps that copy consistent.
-Window.windowPos = %[ x:0, y:0 ];
-Window.setScreenRect = function(r) { return true; };
-Window.getScreenRect = function() {
-    return %[ left:0, top:0, right:System.screenWidth, bottom:System.screenHeight,
-              x:0, y:0, w:System.screenWidth, h:System.screenHeight ];
-};
-Window.setPrimarySize = function(w, h) { return true; };
-Window.getSystemMetrics = function(name) {
-    // Win32 metrics the titles ask for while laying out their window edge.
-    if (name == "CXSIZEFRAME") return 0;
-    if (name == "CYSIZEFRAME") return 0;
-    if (name == "CYCAPTION")   return 0;
-    if (name == "CYMENU")      return 0;
-    return 0;
-};
-Window.getMonitorInfo = function() { return void; };
-
-// NOTE: minimize / maximize / showRestore / resetWindowIcon / setWindowIcon are
-// deliberately NOT defined.  They are windowEx.dll's, and KAGEX uses their
-// presence as the capability probe: SetWindowControlMenu() starts with
-// "if (typeof win.minimize != 'Object') return;" and otherwise builds a menu
-// out of MenuItemEx members that exist on Windows only.  Kirikiroid2 leaves
-// them undefined too, and the titles distributed for it rely on that fallback.
+// NOTE: the rest of the WindowEx surface is deliberately NOT defined here,
+// and must stay that way.
+//
+// windowEx.dll supplies minimize / maximize / showRestore / resetWindowIcon /
+// setWindowIcon, the geometry queries (getNormalRect / getWindowRect /
+// getClientRect / setClientRect / getPlacement / setPlacement /
+// getMonitorInfo / getSystemMetrics) and MenuItemEx's bitmap constants
+// (MenuItem.biMinimize and friends).  None of them exist in Kirikiroid2 -- the
+// environment these releases are built for -- and KAGEX uses their ABSENCE as
+// the capability probe, falling back cleanly: SetWindowControlMenu() opens
+// with "if (typeof win.minimize != 'Object') return;", the pseudo-fullscreen
+// branch is only reachable when System.getDisplayMonitors /
+// System.getMonitorInfo exist (they do not, here or in Kirikiroid2), and the
+// fullscreen transition's getNormalRect read is itself guarded by
+// "typeof this.getNormalRect == 'Object'".
+//
+// Adding them "to make a title boot" is wrong twice over: each fabricated
+// value sends the title further down WindowEx-only paths that then need the
+// next missing member, and a synthetic getNormalRect reports geometry the
+// title trusts.  Two rounds of that produced a cascade of
+// "Member \"maximized\" / \"biMinimize\" does not exist" errors.  If a title
+// needs something from this list, the fix is its fallback above, exactly as on
+// Kirikiroid2.
 
 Window.setOverlayBitmap = function() { return null; };
 Window.ncHitTest = function(x, y) { return false; };
@@ -433,32 +349,5 @@ if (typeof(Storages.deleteFile) != "undefined" && typeof(global.__krkrns_deletef
 		return global.__krkrns_deletefile_native(name);
 	} incontextof global;
 }
-
-// Self-test (temporary): prove the whole delete path on a scratch file the
-// test harness drops next to the launcher, so the fix can be checked without
-// clicking through the save screen.  System.inform is a log channel here.
-if (typeof(global.__krkrns_diag_delete_probe) == "undefined")
-{
-	global.__krkrns_diag_delete_probe = true;
-	try
-	{
-		var probe = "file://sdmc:/switch/KRKR-ns/krkrns-delete-probe.bmp";
-		if (Storages.isExistentStorage(probe))
-		{
-			var ok = Storages.deleteFile(probe);
-			System.inform("KRKR-ns diag: delete probe -> " + ok
-				+ " exists_after=" + Storages.isExistentStorage(probe));
-		}
-		else
-		{
-			System.inform("KRKR-ns diag: delete probe file not present");
-		}
-	}
-	catch (e)
-	{
-		System.inform("KRKR-ns diag: delete probe threw: " + e.message);
-	}
-}
-
 
 } // __krkrns_compat_k2compat (install once per process)
