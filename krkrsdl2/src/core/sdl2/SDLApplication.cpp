@@ -1101,6 +1101,15 @@ protected:
 #endif
 	int lastMouseX;
 	int lastMouseY;
+	/* Pointer buttons that arrived together with a cursor jump wait for the
+	   game's own per-frame logic to see the new position (see the button case in
+	   window_receive_event_input).  frameStartMouse* is the cursor as the last
+	   frame left it, i.e. what that logic has already looked at. */
+	std::vector<SDL_Event> deferredPointerButtons;
+	Uint32 deferredPointerDue;
+	int frameStartMouseX;
+	int frameStartMouseY;
+	bool redispatchingPointer;
 
 #ifdef KRKRSDL2_ENABLE_ZOOM
 	tTVPRect FullScreenDestRect;
@@ -1323,6 +1332,11 @@ public:
 #endif
 	bool should_try_parent_window(SDL_Event event);
 	void window_receive_event(SDL_Event event);
+	/* Note the cursor position the game's per-frame logic has seen, and release
+	   the pointer buttons that were held back for it (both called once a frame
+	   from sdl_process_events). */
+	void note_frame_cursor() { this->frameStartMouseX = this->lastMouseX; this->frameStartMouseY = this->lastMouseY; }
+	void flush_deferred_pointer_buttons();
 	bool window_receive_event_input(SDL_Event event);
 };
 
@@ -1340,6 +1354,10 @@ TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 	this->fileDropArrayCount = 0;
 	this->lastMouseX = 0;
 	this->lastMouseY = 0;
+	this->deferredPointerDue = 0;
+	this->frameStartMouseX = 0;
+	this->frameStartMouseY = 0;
+	this->redispatchingPointer = false;
 	this->_nextWindow = nullptr;
 	this->_prevWindow = _lastWindowWindow;
 	_lastWindowWindow = this;
@@ -4330,6 +4348,31 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 		delete this;
 		return false;
 	}
+	// A pointer that jumps delivers its position and the click together: a
+	// touchscreen tap, an emulated mouse, and the pad's virtual cursor all work
+	// that way.  KAG's dialogs answer a click with the hit test of their last
+	// per-frame pass, so such a click is judged by wherever the cursor used to
+	// be -- a check dialog parks the cursor on "No", which is how clicking "Yes"
+	// ended up answering no and no save was ever deleted.  Hold the click back
+	// until the game has had a frame with the new position; a click that lands
+	// where the cursor already was (an ordinary mouse) stays immediate.
+	if (!this->redispatchingPointer &&
+		(event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) &&
+		(!this->deferredPointerButtons.empty() ||
+		 event.button.x != this->frameStartMouseX || event.button.y != this->frameStartMouseY))
+	{
+		this->lastMouseX = event.button.x;
+		this->lastMouseY = event.button.y;
+		this->TranslateWindowToDrawArea(this->lastMouseX, this->lastMouseY);
+		this->deferredPointerButtons.push_back(event);
+		if (this->deferredPointerDue == 0)
+		{
+			// 20ms is longer than the engine's finest timer (16ms), so the
+			// game's own per-frame pass is guaranteed to run in between.
+			this->deferredPointerDue = SDL_GetTicks() + 20;
+		}
+		return true;
+	}
 #ifdef __SWITCH__
 	// A hosted secondary window shares the host's SDL window, so the event
 	// coordinates arrive in the host's logical (paint box) space.  Move them
@@ -4706,6 +4749,39 @@ void TVPWindowWindow::switch_process_gamepad_input()
 }
 #endif
 
+void TVPWindowWindow::flush_deferred_pointer_buttons()
+{
+	if (this->deferredPointerButtons.empty())
+	{
+		return;
+	}
+	if (this->isBeingDeleted)
+	{
+		this->deferredPointerButtons.clear();
+		this->deferredPointerDue = 0;
+		return;
+	}
+	if (this->deferredPointerDue != 0 && SDL_GetTicks() < this->deferredPointerDue)
+	{
+		return;
+	}
+	std::vector<SDL_Event> pending;
+	pending.swap(this->deferredPointerButtons);
+	this->deferredPointerDue = 0;
+	this->redispatchingPointer = true;
+	for (size_t i = 0; i < pending.size(); i += 1)
+	{
+		if (this->isBeingDeleted)
+		{
+			return; // the handler deleted this window; drop what is left
+		}
+		// Straight back into the input path: the event was already routed (and
+		// carries untouched coordinates), so it must not be routed again.
+		this->window_receive_event_input(pending[i]);
+	}
+	this->redispatchingPointer = false;
+}
+
 void sdl_process_events()
 {
 	if (!SDL_WasInit(SDL_INIT_EVENTS))
@@ -4715,6 +4791,14 @@ void sdl_process_events()
 	// KRKR-ns: events posted by timer/limiter threads are dispatched here on
 	// the main thread (console SDL is single-threaded for events).
 	krkrsdl2_drain_pending_native_events();
+	if (_currentWindowWindow)
+	{
+		// Remember the cursor the game's per-frame logic has already looked at
+		// (it is the reference for what counts as a jump), then let the clicks
+		// held back for that frame go out before this frame's own events.
+		_currentWindowWindow->note_frame_cursor();
+		_currentWindowWindow->flush_deferred_pointer_buttons();
+	}
 #ifdef __SWITCH__
 	if (_currentWindowWindow)
 	{
