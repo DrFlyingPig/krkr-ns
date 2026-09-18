@@ -7168,16 +7168,29 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getProvincePixel)
 	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Layer);
 	if(numparams >= 2)
 	{
-		if(result) *result = _this->GetProvincePixel(*param[0], *param[1]);
+		tjs_int hit = _this->GetProvincePixel(*param[0], *param[1]);
+		// Probe: this two-argument form is the one the KAGEX scripts really
+		// call -- BaseLayer.GetProvincePixel() passes the cursor-derived point
+		// on to getProvincePixel(x, y) -- so a run that never logs this line
+		// means the hit test was never asked, while a line answering 0 for a
+		// point inside the province image means the province image itself is
+		// what is wrong.
+		static int probeCount = 0;
+		if((++probeCount % 30) == 0)
+		{
+			tTVPBaseBitmap * prov = _this->GetProvinceImage();
+			KRKRNS_LOG("[province] xy=(%d,%d) -> %d (province=%dx%d)",
+				(int)*param[0], (int)*param[1], (int)hit,
+				prov ? (int)prov->GetWidth() : -1, prov ? (int)prov->GetHeight() : -1);
+		}
+		if(result) *result = hit;
 		return TJS_S_OK;
 	}
 	if(numparams == 0)
 	{
-		// Probe: KAG map hit tests answer nothing when this returns 0, and a
-		// silent wrong answer is the hardest thing to see from a log.
-		tjs_int hit = _this->GetProvincePixelAtCursor();
-		KRKRNS_LOG("[province] cursor hit=%d (layer=%p)", (int)hit, (void *)_this);
-		if(result) *result = hit;
+		// Kirikiri2 semantics for the no-argument form: read the province at
+		// the cursor.  Keep it, though the KAGEX scripts take the path above.
+		if(result) *result = _this->GetProvincePixelAtCursor();
 		return TJS_S_OK;
 	}
 	return TJS_E_BADPARAMCOUNT;

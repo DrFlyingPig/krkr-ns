@@ -543,16 +543,14 @@ static void refresh_controllers()
 
 #ifdef __SWITCH__
 // ---- KRKR-ns patch: gamepad -> mouse/keyboard event synthesis ----
-// KAG games are driven by mouse clicks / Enter / Space / Escape key events,
-// and the Switch SDL2 driver only reports controller buttons/axes. Poll the
-// opened SDL_GameController(s) every frame and inject synthetic SDL mouse /
-// keyboard events via SDL_PushEvent (public API), letting the existing event
-// pipeline deliver them
-// to TJS as ordinary input (plus the engine's own VK_PAD* events).
+// KAG games are driven by mouse clicks and by Enter / Space / Escape / arrow
+// key events, and the Switch SDL2 driver only reports controller buttons and
+// axes.  Poll the opened SDL_GameController(s) every frame and drive both:
+// the left stick moves the (SDL) mouse cursor, while the d-pad and the face
+// buttons synthesize the key events KAG's own menu and dialog navigation is
+// built on (MainWindow.onKeyUp -> ActiveObj.KeyUpAction).
 #define NS_GP_DEADZONE 8000
 #define NS_GP_STICK_PX_PER_FRAME 14.0f
-#define NS_GP_DPAD_STEP 12
-#define NS_GP_DPAD_REPEAT_MS 150
 
 enum {
 	NS_GP_BTN_A = 0, NS_GP_BTN_B, NS_GP_BTN_X, NS_GP_BTN_Y,
@@ -567,7 +565,6 @@ struct ns_gamepad_state_t
 	bool right_down = false; // synthetic right mouse button held
 	int mouse_x = -1;        // cursor in window pixel coords
 	int mouse_y = -1;
-	Uint32 dpad_repeat_until[4] = { 0, 0, 0, 0 };
 };
 static ns_gamepad_state_t ns_gp;
 static Uint16 ns_gp_prev_buttons = 0;
@@ -593,35 +590,26 @@ static Uint16 ns_gp_read_buttons(SDL_GameController *c)
 	return bits;
 }
 
-static void ns_gp_push_mouse_motion(SDL_Window *window, int x, int y)
+static void ns_gp_move_cursor(SDL_Window *window, int x, int y)
 {
-	g_krkrns_prof.gp_push_motion++;
-	SDL_Event ev;
-	SDL_zero(ev);
-	ev.type = SDL_MOUSEMOTION;
-	ev.motion.windowID = SDL_GetWindowID(window);
-	ev.motion.x = x;
-	ev.motion.y = y;
-	ev.motion.xrel = 0;
-	ev.motion.yrel = 0;
-	ev.motion.state = (Uint32)((ns_gp.left_down ? SDL_BUTTON(SDL_BUTTON_LEFT) : 0) |
-	                           (ns_gp.right_down ? SDL_BUTTON(SDL_BUTTON_RIGHT) : 0));
-	SDL_PushEvent(&ev);
-}
-
-static void ns_gp_push_mouse_motion_if_moved(SDL_Window *window, int x, int y)
-{
-	// The pad drives a virtual cursor, and this used to announce its position
-	// every frame even when nothing moved.  Those repeats overwrite the cursor
-	// the engine tracks for the real mouse, and KAG dialogs decide which input
-	// device is in charge by comparing that value against their own key-driven
-	// position -- so a parked pad cursor (0,y) kept every dialog locked in pad
-	// mode and mouse clicks stopped registering at all.
+	// The pad's virtual cursor has to move the SDL cursor itself.  The engine
+	// reads the cursor back from SDL (Window.getCursorPos -> SDL_GetMouseState,
+	// see TVPWindowWindow::GetCursorPos), and an event injected with
+	// SDL_PushEvent does not touch that state: the pad "moved" for nobody, and
+	// KAG's per-frame hit test -- BaseLayer.GetProvincePixel() reads
+	// MainWnd.PrimaryLayer.cursorX/cursorY -- kept testing the position the
+	// last real mouse or touch had left behind, so no menu could be operated.
+	// Warping makes SDL own the position again and emit the motion event the
+	// engine's own pipeline expects.
 	static int lastX = -1, lastY = -1;
-	if(x == lastX && y == lastY) return;
+	if (x == lastX && y == lastY)
+	{
+		return;
+	}
 	lastX = x;
 	lastY = y;
-	ns_gp_push_mouse_motion(window, x, y);
+	g_krkrns_prof.gp_push_motion++;
+	SDL_WarpMouseInWindow(window, x, y);
 }
 
 static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 button)
@@ -4605,7 +4593,7 @@ void TVPWindowWindow::switch_process_gamepad_input()
 		SDL_GetWindowSize(window, &w, &h);
 		ns_gp.mouse_x = (w > 0) ? w / 2 : 640;
 		ns_gp.mouse_y = (h > 0) ? h / 2 : 360;
-		ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
+		ns_gp_move_cursor(window, ns_gp.mouse_x, ns_gp.mouse_y);
 	}
 	Uint16 buttons = 0;
 	int ax = 0, ay = 0;
@@ -4639,31 +4627,7 @@ void TVPWindowWindow::switch_process_gamepad_input()
 			if (ns_gp.mouse_y < 0) ns_gp.mouse_y = 0;
 			else if (ns_gp.mouse_y >= h) ns_gp.mouse_y = h - 1;
 		}
-		ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
-	}
-	// dpad -> cursor nudge with auto-repeat
-	Uint32 now = SDL_GetTicks();
-	{
-		static const int step_x[4] = { 0, 0, -1, 1 };
-		static const int step_y[4] = { -1, 1, 0, 0 };
-		for (int d = 0; d < 4; d += 1)
-		{
-			Uint16 bit = (Uint16)(1 << (NS_GP_BTN_DPAD_UP + d));
-			if (buttons & bit)
-			{
-				if (ns_gp.dpad_repeat_until[d] <= now)
-				{
-					ns_gp.mouse_x += step_x[d] * NS_GP_DPAD_STEP;
-					ns_gp.mouse_y += step_y[d] * NS_GP_DPAD_STEP;
-					ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
-					ns_gp.dpad_repeat_until[d] = now + NS_GP_DPAD_REPEAT_MS;
-				}
-			}
-			else
-			{
-				ns_gp.dpad_repeat_until[d] = 0;
-			}
-		}
+		ns_gp_move_cursor(window, ns_gp.mouse_x, ns_gp.mouse_y);
 	}
 	// button edges -> synthetic mouse / key events
 	Uint16 changed = (Uint16)(buttons ^ ns_gp_prev_buttons);
@@ -4717,6 +4681,23 @@ void TVPWindowWindow::switch_process_gamepad_input()
 				break;
 			case NS_GP_BTN_RSHOULDER: // R = wheel down (advance)
 				if (pressed) ns_gp_push_mouse_wheel(window, -1);
+				break;
+			// d-pad = the arrow keys KAG navigates its menus and dialogs with:
+			// MainWindow.onKeyUp hands VK_LEFT/RIGHT/UP/DOWN to the active
+			// object (a check dialog toggles Yes/No on left/right, the save
+			// screen moves the slot selection), and the object switches itself
+			// into key mode on the first one.  That path needs no cursor at all.
+			case NS_GP_BTN_DPAD_UP:
+				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_UP);
+				break;
+			case NS_GP_BTN_DPAD_DOWN:
+				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_DOWN);
+				break;
+			case NS_GP_BTN_DPAD_LEFT:
+				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_LEFT);
+				break;
+			case NS_GP_BTN_DPAD_RIGHT:
+				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_RIGHT);
 				break;
 			default:
 				break;

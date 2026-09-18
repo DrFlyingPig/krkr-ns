@@ -480,17 +480,25 @@ void tTJSNI_BaseWindow::OnMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 			3, arg);
 	}
 	if(DrawDevice) DrawDevice->OnMouseMove(x, y, flags);
-	// KRKR-ns probe: KAG dialogs hand control back to the mouse only when
-	// the primary layer's cursorX/cursorY differ from their own key-driven
-	// position, so both the window value and the layer value have to move.
+	// KRKR-ns probe: the game never sees the event position -- KAG hit tests
+	// read the cursor back through the primary layer (BaseLayer.GetProvincePixel
+	// -> MainWnd.PrimaryLayer.cursorX/cursorY) -- so log that value next to the
+	// event position.  A pad that only pushes motion events shows up here as an
+	// event position that changes while layerCursor stays where it was.
 	{
-		static int probeCount = 0;
-		if((++probeCount % 60) == 0)
+		static int last_cx = -1, last_cy = -1, unchanged = 0;
+		tTJSNI_BaseLayer * pri = DrawDevice ? DrawDevice->GetPrimaryLayer() : NULL;
+		int cx = pri ? (int)pri->GetCursorX() : -1;
+		int cy = pri ? (int)pri->GetCursorY() : -1;
+		if(cx != last_cx || cy != last_cy || unchanged >= 120)
 		{
-			tTJSNI_BaseLayer * pri = DrawDevice ? DrawDevice->GetPrimaryLayer() : NULL;
-			KRKRNS_LOG("[cursor] window=(%d,%d) primaryLayer=(%d,%d)",
-				(int)x, (int)y, pri ? (int)pri->GetCursorX() : -1, pri ? (int)pri->GetCursorY() : -1);
+			last_cx = cx;
+			last_cy = cy;
+			unchanged = 0;
+			KRKRNS_LOG("[cursor] event=(%d,%d) layerCursor=(%d,%d)",
+				(int)x, (int)y, cx, cy);
 		}
+		else unchanged++;
 	}
 }
 //---------------------------------------------------------------------------
