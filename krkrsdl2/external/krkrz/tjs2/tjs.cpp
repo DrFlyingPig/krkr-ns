@@ -106,6 +106,7 @@ public:
 tTJS::tTJS()
 {
 	// tTJS constructor
+	ShuttingDown = false;
 	RefCount = 1;
 	ConsoleOutput = NULL;
 	PPValues = NULL;
@@ -252,6 +253,7 @@ void tTJS::Release()
 //---------------------------------------------------------------------------
 void tTJS::Shutdown()
 {
+	ShuttingDown = true;
 	TJSVariantArrayStackCompactNow();
 	Global->Clear();
 	if(Global) Global->Release(), Global = NULL;

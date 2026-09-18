@@ -124,9 +124,20 @@ class MenuItem {
         this.radio = false;
         this.group = 0;
         this.index = 0;
-        this.shortcut = "";
         this.parent = null;
         this.children = new Array();
+    }
+    // shortcut is a STRING here, exactly as in kirikiri2: its native property
+    // stores what SetShortcut(ttstr) produced, so an integer assignment comes
+    // back as text.  KAGEX relies on that -- it creates items with shortcut 0
+    // (no shortcut) and later runs shortcut.split("+"); a raw integer throws
+    // "Cannot convert the variable type ((int)0 to Object)", which aborts the
+    // fullscreen transition it was in the middle of (LimeLight sat white at
+    // boot).  Every assignment is therefore stringified.
+    var _shortcut = "";
+    property shortcut {
+        getter { return _shortcut; }
+        setter(v) { _shortcut = (v === void) ? "" : (string)v; }
     }
     function setText(t) { this.text = t; this.caption = t; return this; }
     function getText() { return this.text; }
@@ -169,6 +180,37 @@ class MenuItem {
     function addHook(h) { return this; }
     function removeHook(h) { return this; }
     function finalize() { this.children.clear(); this.parent = null; return null; }
+}
+
+// MenuItemEx (the windowEx.dll extension of MenuItem) adds the system-bitmap
+// constants KAGEX uses to build its window control menu -- the fullscreen
+// transition ends in SetWindowControlMenu, which failed with
+// Member "biMinimize" does not exist and left the title on a white screen.
+// Values are the stock Windows menu bitmap ids, exactly as the plugin defines
+// them (upstream-krkr2 cpp/plugins/windowEx.cpp).
+MenuItem.biSystem           = 1;
+MenuItem.biRestore          = 2;
+MenuItem.biMinimize         = 3;
+MenuItem.biClose            = 5;
+MenuItem.biCloseDisabled    = 6;
+MenuItem.biMinimizeDisabled = 7;
+MenuItem.biPopupClose       = 8;
+MenuItem.biPopupRestore     = 9;
+MenuItem.biPopupMaximize    = 10;
+MenuItem.biPopupMinimize    = 11;
+
+// The rest of MenuItemEx's surface.  bmpItem/bmpChecked/bmpUnchecked accept a
+// Layer (or null) and are only read back by the plugin that draws the menu
+// bar, which does not exist here; rightJustify decides the text alignment the
+// titles set on their window-control items.
+if (typeof(MenuItem.prototype) == "object" || true) {
+    if (typeof(global.__krkrns_menu_ex) == "undefined") {
+        global.__krkrns_menu_ex = true;
+        MenuItem.bmpItem      = null;
+        MenuItem.bmpChecked   = null;
+        MenuItem.bmpUnchecked = null;
+        MenuItem.rightJustify = false;
+    }
 }
 
 // Publish the model as a global.  KAG3's system/Menus.tjs declares
@@ -219,11 +261,84 @@ Window.registerExEvent = function(name) { return true; };
 // query the documented members without introducing a second platform window.
 if (typeof(Window.disableResize) == "undefined") Window.disableResize = false;
 if (typeof(Window.enableNCMouseEvent) == "undefined") Window.enableNCMouseEvent = false;
-Window.minimize = function() { return null; };
-Window.maximize = function() { return null; };
-Window.showRestore = function() { return null; };
-Window.resetWindowIcon = function() { return null; };
-Window.setWindowIcon = function(storage) { return null; };
+if (typeof(Window.disableMove) == "undefined") Window.disableMove = false;
+
+// windowEx.dll also answers the window geometry queries.  KAGEX's fullscreen
+// transition reads these before switching (it remembers the windowed rect and
+// restores it later); without them the setter aborts halfway, leaves
+// _fullScreenChanging set and the boot wait never completes -- which is why
+// the TJS-visible fullScreen was once forced true here.  Reporting the real
+// window rect instead lets the transition finish, and keeps fullScreen
+// truthful, which the games' own sizing logic depends on (their setZoom()
+// returns early when fullScreen is true, so a forced true skips the
+// window-size setup and leaves a mis-sized stage behind).
+// The rect is reported in the window's own coordinates with the width/height
+// spellings both kirikiri rect conventions use.
+Window.getNormalRect = function() {
+    var w = this.width, h = this.height;
+    return %[ left:0, top:0, right:w, bottom:h,
+              x:0, y:0, w:w, h:h,
+              normalLeft:0, normalTop:0, normalRight:w, normalBottom:h ];
+};
+Window.getWindowRect = function() {
+    var w = this.width, h = this.height;
+    return %[ left:0, top:0, right:w, bottom:h, x:0, y:0, w:w, h:h ];
+};
+Window.getClientRect = function() {
+    var w = this.innerWidth, h = this.innerHeight;
+    return %[ left:0, top:0, right:w, bottom:h, x:0, y:0, w:w, h:h ];
+};
+Window.setClientRect = function(r) { return true; };
+Window.getPlacement = function() {
+    var w = this.width, h = this.height;
+    return %[ normalLeft:0, normalTop:0, normalRight:w, normalBottom:h,
+              showCmd:1, flags:0, minPosition:0, maxPosition:0 ];
+};
+Window.setPlacement = function(p) { return true; };
+
+// Window state that windowEx.dll keeps for the title's own window manager.
+// KAGEX's fullscreen/size transition (LimeLight's mainwindow.tjs setZoom and
+// friends) reads and writes all of these while it remembers the windowed state
+// and restores it after going fullscreen; a missing member aborts that
+// transition (the session died on Member "maximized" does not exist) and the
+// title ends up on a black screen.  These are bookkeeping values for a
+// single-window console -- there is no OS chrome to maximize or move -- so
+// they are kept script-side with sane defaults and never refuse an assignment.
+if (typeof(Window.maximized) == "undefined")    Window.maximized = false;
+if (typeof(Window.restmax) == "undefined")      Window.restmax = false;
+if (typeof(Window.restoreMaximize) == "undefined") Window.restoreMaximize = function() { return null; };
+if (typeof(Window.callResize) == "undefined")   Window.callResize = false;
+if (typeof(Window.resetIcon) == "undefined")    Window.resetIcon = false;
+if (typeof(Window.resetWindowMaxSize) == "undefined") Window.resetWindowMaxSize = function() { return null; };
+if (typeof(Window.disableMove) == "undefined")  Window.disableMove = false;
+if (typeof(Window.pseudoFullScreened) == "undefined") Window.pseudoFullScreened = false;
+if (typeof(Window.isPseudoMode) == "undefined") Window.isPseudoMode = function() { return false; };
+// Screen/window rectangles.  KAGEX keeps its own copy of these while it
+// switches modes; answering with the live values keeps that copy consistent.
+Window.windowPos = %[ x:0, y:0 ];
+Window.setScreenRect = function(r) { return true; };
+Window.getScreenRect = function() {
+    return %[ left:0, top:0, right:System.screenWidth, bottom:System.screenHeight,
+              x:0, y:0, w:System.screenWidth, h:System.screenHeight ];
+};
+Window.setPrimarySize = function(w, h) { return true; };
+Window.getSystemMetrics = function(name) {
+    // Win32 metrics the titles ask for while laying out their window edge.
+    if (name == "CXSIZEFRAME") return 0;
+    if (name == "CYSIZEFRAME") return 0;
+    if (name == "CYCAPTION")   return 0;
+    if (name == "CYMENU")      return 0;
+    return 0;
+};
+Window.getMonitorInfo = function() { return void; };
+
+// NOTE: minimize / maximize / showRestore / resetWindowIcon / setWindowIcon are
+// deliberately NOT defined.  They are windowEx.dll's, and KAGEX uses their
+// presence as the capability probe: SetWindowControlMenu() starts with
+// "if (typeof win.minimize != 'Object') return;" and otherwise builds a menu
+// out of MenuItemEx members that exist on Windows only.  Kirikiroid2 leaves
+// them undefined too, and the titles distributed for it rely on that fallback.
+
 Window.setOverlayBitmap = function() { return null; };
 Window.ncHitTest = function(x, y) { return false; };
 Window.focusMenuByKey = function(key) { return false; };

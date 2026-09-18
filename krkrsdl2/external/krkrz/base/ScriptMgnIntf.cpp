@@ -230,10 +230,17 @@ void TVPInitScriptEngine()
 	TVPScriptEngine = new tTJS();
 	KRKRNS_LOG("[script] new tTJS() ok");
 
-	// add kirikiriz
-	KRKRNS_LOG("[script] before SetPPValue kirikiriz");
-	TVPScriptEngine->SetPPValue( TJS_W("kirikiriz"), 1 );
-	KRKRNS_LOG("[script] SetPPValue ok");
+	// "kirikiriz" (KRKRZ) is deliberately NOT defined, matching Kirikiroid2 --
+	// its line is commented out there for the same reason.  KAGEX titles read
+	// the preprocessor value to pick KRKRZ-only branches, and those branches
+	// assume WindowEx: the fullscreen transition ends in
+	// SetWindowControlMenu(), whose gate is "typeof win.minimize != 'Object'",
+	// followed by MenuItemEx members (MenuItem.biMinimize...) that only the
+	// Windows plugin provides.  Claiming KRKRZ made LimeLight take that path
+	// and die on Member "biMinimize" does not exist (white screen at boot).
+	// The releases this port targets are distributed for Kirikiroid2, i.e.
+	// they were built with this value unset.
+	KRKRNS_LOG("[script] PP kirikiriz: not set (Kirikiroid2 parity)");
 
 	// system definition
 #ifdef WIN32
@@ -406,6 +413,19 @@ void TVPInitScriptEngine()
 // TVPUninitScriptEngine
 //---------------------------------------------------------------------------
 static bool TVPScriptEngineUninit = false;
+
+// Kirikiroid2 semantics that several shipped localisations depend on: while a
+// game's startup script is running, System.exit()/System.terminate() do
+// nothing (upstream guards them with `if (!TVPStartupSuccess) ;`).  The 9-nine
+// KR port relies on exactly that: its product-key check executes a
+// pkeycheck.tjs the package does not ship, catches the failure and calls
+// System.exit() -- on Kirikiroid2 that call is ignored and the boot continues,
+// while here it tore the session down ("9nine will not open").  True once the
+// startup script has run; the launcher's own bootstrap (romfs startup.tjs)
+// runs while it is still false, which is what the reference does too.
+bool TVPStartupSuccess = false;
+bool TVPIsStartupSuccess() { return TVPStartupSuccess; }
+void TVPSetStartupSuccess(bool value) { TVPStartupSuccess = value; }
 void TVPUninitScriptEngine()
 {
 	if(TVPScriptEngineUninit) return;
@@ -448,7 +468,17 @@ void krkrsdl2_reset_script_engine_for_restart()
 		(int)TVPScriptEngineInit, (int)TVPScriptEngineUninit,
 		(void *)TVPScriptEngine,
 		TVPScriptEngine ? (void *)TVPScriptEngine->GetGlobalNoAddRef() : (void *)nullptr);
-	TVPUninitScriptEngine();
+	// A script error raised while shutting down is propagated (see
+	// TVPShowScriptException): the teardown is half done, but the restart must
+	// still go on, so swallow it here rather than let it reach the main loop.
+	try
+	{
+		TVPUninitScriptEngine();
+	}
+	catch(...)
+	{
+		KRKRNS_LOG("[reinit] script engine: uninit threw, continuing the restart");
+	}
 	TVPScriptEngineUninit = false; // re-arm the one-shot shutdown latch
 	TVPScriptEngineInit = false;   // and the one-shot init latch
 	KRKRNS_LOG("[reinit] script engine: latches cleared, next init builds a fresh engine");
@@ -1096,12 +1126,31 @@ void TVPShowScriptException(eTJSScriptError &e)
 		}
 #endif
 #ifdef __SWITCH__
-		// KRKR-ns: report and continue (see TVPShowScriptException(eTJS&)).
+		// KRKR-ns: report and continue (see TVPShowScriptException(eTJS&)) --
+		// except while the engine is shutting down.  Then the code running is
+		// the teardown itself (finalizers, a title's exit scripts), and a game
+		// whose exit path throws looped: every swallowed error was retried,
+		// the recovery path threw again, and the TJS call stack ran out (the
+		// crash landed in tTJSString::~tTJSString under a repeated
+		// ExecuteAsFunction chain).  Propagate instead, as upstream does, so
+		// the TJS execution unwinds; the engine restart catches it.
+		if(TVPScriptEngineUninit)
+		{
+			KRKRNS_LOG("[script] script error during engine shutdown (propagating): %s",
+				krkrns_utf8_of(e.GetMessage(), 300).c_str());
+			throw;
+		}
 		// Include message and trace so a recovered error can still be located.
 		KRKRNS_LOG("[script] script error ignored (continuing): %s",
 			krkrns_utf8_of(e.GetMessage(), 300).c_str());
-		KRKRNS_LOG("[script]   script trace: %s",
-			krkrns_utf8_of(e.GetTrace(), 900).c_str());
+		// The trace walks the block/call stack, which is unsafe once the
+		// engine is shutting down (the crash landed in a string destructor
+		// under DisplayExceptionGeneratedCode).
+		if(!TVPScriptEngineUninit)
+		{
+			KRKRNS_LOG("[script]   script trace: %s",
+				krkrns_utf8_of(e.GetTrace(), 900).c_str());
+		}
 		TVPSetSystemEventDisabledState(false);
 #else
 		TVPTerminateSync(1);
@@ -1772,11 +1821,39 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 			}
 			if (guardEnabled)
 			{
+				// The guard must only fire on a script that really is runaway.
+				// A synchronous load legitimately evals hundreds of lines
+				// (9nine's emotion.tjs evals its 572-line emotion.txt) and
+				// produces no frames while it runs, so "no frames during the
+				// burst" is not evidence of a loop -- it aborted that title's
+				// boot.  Evidence, in order of strength: a burst that is orders
+				// of magnitude larger than any legitimate load, and a burst
+				// that keeps going while the engine is still presenting frames
+				// (i.e. it never finishes).
+				//
+				// frameMark is the [prof] frame counter; framesSinceBurst
+				// remembers whether any frame was presented since the burst
+				// began.  Once a frame appears, the burst is not the whole
+				// session -- the script is running alongside the engine -- so
+				// the counter is allowed to grow much larger before it is
+				// called a storm.
 				static unsigned stormCount = 0;
 				static tjs_uint64 stormStart = 0;
+				static tjs_uint64 frameMark = 0;
+				static bool framesSinceBurst = false;
 				const tjs_uint64 now = TVPGetTickCount();
-				if (!stormStart || now - stormStart > 3000) { stormStart = now; stormCount = 0; }
-				if (++stormCount > 2500)
+				extern tjs_uint64 krkrsdl2_frame_counter();
+				const tjs_uint64 framesNow = krkrsdl2_frame_counter();
+				if (!stormStart || now - stormStart > 3000)
+				{
+					stormStart = now;
+					stormCount = 0;
+					frameMark = framesNow;
+					framesSinceBurst = false;
+				}
+				if (framesNow != frameMark) framesSinceBurst = true;
+				const unsigned limit = framesSinceBurst ? 60000u : 12000u;
+				if (++stormCount > limit)
 				{
 					stormCount = 0;
 					// Dump the script call stack: this is what pinpoints the

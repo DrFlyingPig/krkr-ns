@@ -22,6 +22,7 @@
 #include "Random.h"
 #include "ScriptMgnIntf.h"
 #include "DebugIntf.h"
+#include "KrkrNSLog.h"
 
 #if 0
 extern int TVPGetOpenGLESVersion();
@@ -107,6 +108,10 @@ TJS_END_NATIVE_CONSTRUCTOR_DECL(/*TJS class name*/System)
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/terminate)
 {
 	int code = numparams > 0 ? static_cast<int>(*param[0]) : 0;
+	{
+		extern bool TVPIsStartupSuccess();
+		if(!TVPIsStartupSuccess()) return TJS_S_OK; // see the note on exit
+	}
 	TVPTerminateAsync(code);
 
 	return TJS_S_OK;
@@ -118,6 +123,18 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/exit)
 	// this method does not return
 
 	int code = numparams > 0 ? static_cast<int>(*param[0]) : 0;
+	// Before the game's startup script has finished, an exit request is
+	// ignored -- the reference does this and shipped localisations rely on it
+	// (a failed product-key check ends in System.exit()).  See
+	// TVPStartupSuccess in ScriptMgnIntf.cpp.
+	{
+		extern bool TVPIsStartupSuccess();
+		if(!TVPIsStartupSuccess())
+		{
+			KRKRNS_LOG("[exit] System.exit(%d) ignored: the game startup script is still running", code);
+			return TJS_S_OK;
+		}
+	}
 	TVPTerminateSync(code);
 
 	return TJS_S_OK;

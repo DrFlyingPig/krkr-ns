@@ -1779,22 +1779,24 @@ void tTJSNI_Window::SetFullScreen(bool b)
 //---------------------------------------------------------------------------
 bool tTJSNI_Window::GetFullScreen() const
 {
-#ifdef __SWITCH__
-	// Report the console window as always-fullscreen to game scripts, like
-	// krkrz's android backend does.  KAGEX games read Window.fullScreen
-	// before their own fullscreen transition and must see true, otherwise
-	// they enter the win32 windowEx.dll code path (getNormalRect) that
-	// cannot exist here -- the transition aborts midway and the boot wait
-	// never completes (LimeLight boot white screen).  This deliberately
-	// bypasses only the TJS-visible property: TVPWindowWindow::
-	// GetFullScreenMode() (and thus FullScreenGuard) keeps its real state
-	// so engine/launcher code may still resize the window.
-	if(Form) return true;
-	return false;
-#else
+	// The real state, i.e. false on this target (TVPWindowWindow::
+	// GetFullScreenMode() reports the SDL flags, and the console window is
+	// created without them).  This matches the reference player: Kirikiroid2's
+	// window layer answers GetFullScreenMode() with false and treats
+	// SetFullScreenMode() as a no-op.
+	//
+	// An earlier fix reported true here to keep KAGEX titles out of their
+	// fullscreen transition, because the transition calls the win32
+	// windowEx.dll members (getNormalRect and friends) that this port does not
+	// have -- it aborted halfway and the boot wait never finished (LimeLight).
+	// Those members are now provided by the compat layer, so the transition
+	// completes, and reporting true costs more than it buys: KAGEX's own
+	// window sizing runs through setZoom(), whose first line returns
+	// immediately when fullScreen is true, so the game never declares its
+	// visible size and the stage stays mis-sized (1280x960 canvas shown as a
+	// 4:3 letterbox instead of the 1280x720 band scaled to the screen).
 	if(!Form) return false;
 	return Form->GetFullScreenMode();
-#endif
 }
 //---------------------------------------------------------------------------
 void tTJSNI_Window::SetUseMouseKey(bool b)

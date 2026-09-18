@@ -8,6 +8,18 @@
 
 ## 已应用补丁 (源码层)
 
+### P86: KAGEX 窗口尺寸与 LimeLight 全屏崩溃 — 以 Kirikiroid2 为准的四处对齐（2026-09-18）
+
+- **现象**：①`【KRKR】魔女的夜宴`（KAGEX，scWidth/scHeight=1280×720、exHeight=960）窗口比例不对：1280×960 画布被整幅塞进 16:9 窗口（应为"可见带 1280×720 缩放到满屏"）；②修好①后 `【KRKR】LimeLight_lj` 开机即黑/白屏，日志显示全屏切换路径接连抛 `Member "maximized"`、`Member "biMinimize"`、`Cannot convert ((int)0 to Object)`。
+- **根因（四处，全部对照 Kirikiroid2）**：
+  1. **`Window.fullScreen` 被本移植恒置 true**（早年为绕开 LimeLight 的 windowEx 依赖而加）→ KAGEX 的 `setZoom()` 首行 `if (super.fullScreen) return;` 直接返回，游戏**从不声明可见区尺寸**。Kirikiroid2 的窗口层 `GetFullScreenMode()` 恒 false，照此改回真实状态。
+  2. **呈现裁剪判据用几何猜测**（"画布比窗口宽就裁顶部"）无法区分"方屏扩展画布"与"整幅就是画面"。参考实现是**游戏通过 setSize/setInnerSize 声明内容区**：Kirikiroid2 的 contentSize=声明值、draw sprite 携带整张画布，声明区缩放进视图、其余裁掉。改为：记录游戏声明的 client 尺寸，`krkrsdl2_present_crops()` 用它换算可见行数（未声明时保留旧启发式）。
+  3. **本移植设了 `kirikiriz` 预处理值**（`SetPPValue` + `global.kirikiriz` 种子），而 **Kirikiroid2 里这一行是注释掉的**。KAGEX 用 `@if(kirikiriz)` 选择 KRKRZ/WindowEx 分支——于是我们莫名走进了只该在 Windows 插件环境走的路（`SetWindowControlMenu` 需要 `MenuItemEx.bi*`、`minimize` 等）。
+  4. 我们**虚构了 `Window.minimize/maximize/showRestore/resetWindowIcon/setWindowIcon`**，而这些在 Kirikiroid2 里不存在，KAGEX 恰用 `typeof win.minimize != "Object"` 作为"windowEx 可用"的探测门。
+- **修复**：①`tTJSNI_Window::GetFullScreen()` 返回真实值（`TVPWindowWindow::GetFullScreenMode()`）；②呈现/上传共用 `krkrsdl2_present_crops(texW,texH,declW,declH,winW,winH,&visibleH)`，依据游戏声明的 client 尺寸；③不再设 `kirikiriz` PP 值、移除 `global.kirikiriz` 种子；④删除虚构的 windowEx 方法，改为补齐**真实存在**的成员：`MenuItem.bi*` 常量（照 `upstream-krkr2 cpp/plugins/windowEx.cpp` 的原值 1/2/3/5/6/7/8/9/10/11）与 windowEx 几何查询（`getNormalRect/getWindowRect/getClientRect/setClientRect/getPlacement/setPlacement`）——供自带 `Override.tjs` 的作品（如汉化作）使用；⑤`MenuItem.shortcut` 改为**转字符串的属性**（kirikiri2 原生 setter 存 ttstr，整型赋值读回是文本），修掉 `Cannot convert ((int)0 to Object)`。
+- **验证（模拟器）**：LimeLight 走 `first.ks → m2logo(E-mote) → title.ks`，全程无异常；魔女同样进标题、无异常、画面满帧；痴情哥哥/樱空等启动正常。
+- **附带观察（非致命）**：`樱空汉化组 9-nine` 的 `system.tjs onAction` 会调用 `updatePassThroughMenuItem`（KAGEX 的 `sysscn/Override.tjs` 里定义）；该发行版未加载 Override.tjs 时该调用报"Member does not exist"并被"记录并继续"兜住，帧率不受影响——与 Kirikiroid2（同样暴露 PassThroughDrawDevice 别名、同样不设 kirikiriz）行为一致。
+
 ### P85: 启动器"入口归档"选择持久化（2026-09-18）
 
 - **背景**：汉化版常常是**独立归档**（如 `dtcn.xp3` 与原版 `data.xp3` 并列），入口要靠启动器的"启动文件"（X 键）手动选；而 `pickDefaultEntry` 每次扫描都按 `ENTRY_PREFERENCE` 重新推默认值，选择**不跨重启保留**，用户每次开机都要重选。

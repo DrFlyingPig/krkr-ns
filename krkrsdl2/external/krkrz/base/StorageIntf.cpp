@@ -16,6 +16,7 @@
 #include <memory>
 #include <set>
 #include <vector>
+#include <unordered_map>
 #include "StorageIntf.h"
 #include "BinaryStream.h"
 #include <errno.h>
@@ -38,6 +39,30 @@
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
 extern std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory);
 extern ttstr krkrsdl2_game_entry_preference(const ttstr &game_directory);
+
+// UTF-8 view of a storage path for the SD log (ttstr is UTF-16, and game
+// directory names are non-ASCII, so AsNarrowStdString() is not usable here).
+static std::string krkrns_utf8_of_path(const ttstr &s)
+{
+	std::string out;
+	for (tjs_uint i = 0; i < s.GetLen() && i < 200; ++i)
+	{
+		tjs_uint32 ch = static_cast<tjs_uint32>(s[i]);
+		if (ch < 0x80) out += static_cast<char>(ch);
+		else if (ch < 0x800)
+		{
+			out += static_cast<char>(0xC0 | (ch >> 6));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+		else
+		{
+			out += static_cast<char>(0xE0 | (ch >> 12));
+			out += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+			out += static_cast<char>(0x80 | (ch & 0x3F));
+		}
+	}
+	return out;
+}
 extern bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name);
 extern unsigned krkrsdl2_autocycle_round_count();
 extern ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &selected);
@@ -48,7 +73,6 @@ extern bool TVPTerminateOnWindowClose;
 
 #define TVP_DEFAULT_ARCHIVE_CACHE_NUM 64
 #define TVP_DEFAULT_AUTOPATH_CACHE_NUM 256
-
 
 //---------------------------------------------------------------------------
 // オプション
@@ -71,7 +95,6 @@ static void TVPInitStorageOptions() {
 }
 //---------------------------------------------------------------------------
 
-
 //---------------------------------------------------------------------------
 // global variables
 //---------------------------------------------------------------------------
@@ -84,14 +107,11 @@ tjs_char  TVPArchiveDelimiter = '>';
 
 
 
-
 //---------------------------------------------------------------------------
 // statics
 //---------------------------------------------------------------------------
 static tTJSCriticalSection TVPCreateStreamCS;
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -134,8 +154,6 @@ ttstr TVPStringFromBMPUnicode(const tjs_uint16 *src, tjs_int maxlen)
 	return (const tjs_char*)TVPTjsCharMustBeTwoOrFour;
 }
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -331,7 +349,6 @@ ttstr tTVPStorageMediaManager::NormalizeStorageName(const ttstr &name,
 		tmp = ttstr(pca, (int)(pa - pca));
 	}
 	if(tmp.IsEmpty()) TVPThrowExceptionMessage(TVPInvalidPathName, name);
-
 
 	// split the name into media, domain, path
 	// (and guess what component is omitted)
@@ -572,7 +589,6 @@ ttstr tTVPStorageMediaManager::GetLocallyAccessibleName(const ttstr &name)
 }
 //---------------------------------------------------------------------------
 
-
 //---------------------------------------------------------------------------
 void TVPRegisterStorageMedia(iTVPStorageMedia *media)
 {
@@ -584,8 +600,6 @@ void TVPUnregisterStorageMedia(iTVPStorageMedia *media)
 	TVPStorageMediaManager.Unregister(media);
 }
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -604,8 +618,6 @@ ttstr TVPNormalizeStorageName(const ttstr & _name)
 
 
 
-
-
 //---------------------------------------------------------------------------
 // TVPSetCurrentDirectory
 //---------------------------------------------------------------------------
@@ -615,8 +627,6 @@ void TVPSetCurrentDirectory(const ttstr & _name)
 	TVPClearStorageCaches();
 }
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -637,8 +647,6 @@ ttstr TVPGetLocallyAccessibleName(const ttstr &name)
 	return TVPStorageMediaManager.GetLocallyAccessibleName(name);
 }
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -769,8 +777,6 @@ tjs_int tTVPArchive::GetFirstIndexStartsWith(const ttstr & prefix)
 
 
 
-
-
 //---------------------------------------------------------------------------
 // tTVPArchiveCache
 //---------------------------------------------------------------------------
@@ -779,7 +785,6 @@ class tTVPArchiveCache
 	typedef tTJSRefHolder<tTVPArchive> tHolder;
 	tTJSHashCache<ttstr, tHolder> ArchiveCache;
 	tTJSCriticalSection CS;
-
 
 public:
 	tTVPArchiveCache() : ArchiveCache(TVP_DEFAULT_ARCHIVE_CACHE_NUM)
@@ -842,8 +847,6 @@ void krkrsdl2_clear_archive_cache() { TVPClearArchiveCache(); }
 
 
 
-
-
 //---------------------------------------------------------------------------
 // TVPIsExistentStorageNoSearch
 //---------------------------------------------------------------------------
@@ -888,8 +891,6 @@ bool TVPIsExistentStorageNoSearch(const ttstr &_name)
 
 
 
-
-
 //---------------------------------------------------------------------------
 // TVPExtractStorageExt
 //---------------------------------------------------------------------------
@@ -925,7 +926,6 @@ ttstr TVPExtractStorageExt(const ttstr & name)
 //---------------------------------------------------------------------------
 
 
-
 //---------------------------------------------------------------------------
 // TVPExtractStorageName
 //---------------------------------------------------------------------------
@@ -955,7 +955,6 @@ ttstr TVPExtractStorageName(const ttstr & name)
 
 
 
-
 //---------------------------------------------------------------------------
 // TVPExtractStoragePath
 //---------------------------------------------------------------------------
@@ -979,7 +978,6 @@ ttstr TVPExtractStoragePath(const ttstr & name)
 	return ttstr(s, (int)(p-s));
 }
 //---------------------------------------------------------------------------
-
 
 
 
@@ -1011,8 +1009,6 @@ extern ttstr TVPChopStorageExt(const ttstr & name)
 	return name;
 }
 //---------------------------------------------------------------------------
-
-
 
 
 
@@ -1182,8 +1178,67 @@ struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
 } static TVPClearAutoPathCacheCallback;
 static bool TVPClearAutoPathCacheCallbackInit = false;
 //---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// KRKR-ns: the launcher's selected entry archive is "the game"; the other
+// archives of the same folder are resource packages.  A title that ships its
+// localisation as a second archive adds auto paths for its *original* package
+// directories from its own startup script (dtcn's initialize.tjs adds
+// data.xp3>scenario/ and friends), and because a later auto path wins, those
+// would shadow the entry's own copies -- the log showed title.ks, config.tjs
+// and mainwindow.tjs all resolving into data.xp3 while initialize.tjs, which
+// was resolved before those adds, came from dtcn.xp3.  The entry therefore
+// keeps a basename -> in-archive path map of its own and wins those lookups,
+// whatever order the paths were added in.
+// ---------------------------------------------------------------------------
+static std::unordered_map<std::string, ttstr> krkrns_primary_archive_names;
+static ttstr krkrns_primary_archive_path;
+
+void krkrns_set_primary_archive(const ttstr & archive_autopath)
+{
+	krkrns_primary_archive_names.clear();
+	// The auto path form carries the archive delimiter ("...dtcn.xp3>"); the
+	// cache is keyed by the bare archive name.
+	krkrns_primary_archive_path = TVPNormalizeStorageName(archive_autopath);
+	ttstr archive_name = krkrns_primary_archive_path;
+	{
+		const tjs_char * sharp = TJS_strchr(archive_name.c_str(), TVPArchiveDelimiter);
+		if(sharp) archive_name = ttstr(archive_name.c_str(), (int)(sharp - archive_name.c_str()));
+	}
+	try
+	{
+		tTVPArchive *arc = TVPArchiveCache.Get(archive_name);
+		const tjs_uint count = arc->GetCount();
+		for(tjs_uint i = 0; i < count; i++)
+		{
+			ttstr name = arc->GetName(i);
+			ttstr key = TVPExtractStorageName(name);
+			key.ToLowerCase();
+			krkrns_primary_archive_names[krkrns_utf8_of_path(key)] = name;
+		}
+		arc->Release();
+		KRKRNS_LOG("[entry] primary archive %s with %u file(s)",
+			krkrns_utf8_of_path(krkrns_primary_archive_path).c_str(), (unsigned)count);
+	}
+	catch(...)
+	{
+		KRKRNS_LOG("[entry] primary archive enumeration failed: %s",
+			krkrns_utf8_of_path(archive_autopath).c_str());
+	}
+}
+
+void krkrns_clear_primary_archive()
+{
+	krkrns_primary_archive_names.clear();
+	krkrns_primary_archive_path = ttstr();
+}
+
 void TVPAddAutoPath(const ttstr & name)
 {
+	// Probe (temporary): who appends what, and in which order.
+	{
+		static unsigned addSeq = 0;
+		KRKRNS_LOG("[autopath-add] #%u %s", ++addSeq, krkrns_utf8_of_path(name).c_str());
+	}
 	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
 
 	tjs_char lastchar = name.GetLastChar();
@@ -1406,29 +1461,6 @@ static tjs_uint TVPRebuildAutoPathTable()
 // to the path it was found under, so a stale entry silently serves assets from a
 // finished game.  A session teardown logs this before and after dropping the
 // game's paths; `table` must fall back to just the compat/patch entries.
-// UTF-8 view of a storage path for the SD log (ttstr is UTF-16, and game
-// directory names are non-ASCII, so AsNarrowStdString() is not usable here).
-static std::string krkrns_utf8_of_path(const ttstr &s)
-{
-	std::string out;
-	for (tjs_uint i = 0; i < s.GetLen() && i < 200; ++i)
-	{
-		tjs_uint32 ch = static_cast<tjs_uint32>(s[i]);
-		if (ch < 0x80) out += static_cast<char>(ch);
-		else if (ch < 0x800)
-		{
-			out += static_cast<char>(0xC0 | (ch >> 6));
-			out += static_cast<char>(0x80 | (ch & 0x3F));
-		}
-		else
-		{
-			out += static_cast<char>(0xE0 | (ch >> 12));
-			out += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
-			out += static_cast<char>(0x80 | (ch & 0x3F));
-		}
-	}
-	return out;
-}
 
 // Caller holds TVPCreateStreamCS.
 static tjs_int TVPRemoveAutoPathsUnderLocked(const ttstr &prefix)
@@ -1534,7 +1566,6 @@ void krkrsdl2_reset_auto_paths()
 
 
 
-
 //---------------------------------------------------------------------------
 // TVPGetPlacedPath
 //---------------------------------------------------------------------------
@@ -1576,6 +1607,50 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 	{
 		// found in table
 		ttstr found = result->FilePath + storagename;
+		// The selected entry archive overrides the sibling *resource* packages
+		// (see krkrns_set_primary_archive): a title's own startup script re-adds
+		// the original package's directories, which would otherwise win every
+		// name the localisation archive also carries.  Two kinds of winner must
+		// be left alone, because the ecosystem puts them on top on purpose:
+		// the engine's compat/patch override layers (our Switch shims shadow
+		// the desktop copies the games ship) and patch-style archives
+		// (patch.xp3, *patch*.xp3 -- "apply after the base data" is what those
+		// names mean).
+		bool winner_is_override = false;
+		{
+			// Storage names are normalized to lower case (the log printed
+			// ".../switch/krkr-ns/patch/..."), so these literals must be lower
+			// case too or StartsWith never matches.
+			const tjs_char * overridePrefixes[] = {
+				TJS_W("file://?/romfs:/"),
+				TJS_W("file://?/sdmc:/switch/krkr-ns/patch/"),
+				NULL
+			};
+			for(int oi = 0; overridePrefixes[oi]; oi++)
+				if(found.StartsWith(overridePrefixes[oi])) winner_is_override = true;
+			// the archive part of the winner ("<dir>/<name>.xp3>" + in-archive path)
+			ttstr winnerArchive = found;
+			const tjs_char * sharp = TJS_strchr(winnerArchive.c_str(), TVPArchiveDelimiter);
+			if(sharp) winnerArchive = ttstr(winnerArchive.c_str(),
+				(int)(sharp - winnerArchive.c_str()));
+			winnerArchive = TVPExtractStorageName(winnerArchive);
+			winnerArchive.ToLowerCase();
+			if(TJS_strstr(winnerArchive.c_str(), TJS_W("patch"))) winner_is_override = true;
+		}
+		if(!winner_is_override && !krkrns_primary_archive_names.empty() &&
+		   !found.StartsWith(krkrns_primary_archive_path))
+		{
+			std::unordered_map<std::string, ttstr>::iterator pi =
+				krkrns_primary_archive_names.find(krkrns_utf8_of_path(storagename));
+			if(pi != krkrns_primary_archive_names.end())
+			{
+				ttstr primary = krkrns_primary_archive_path + pi->second;
+				KRKRNS_LOG("[entry] %s: %s -> %s", krkrns_utf8_of_path(storagename).c_str(),
+					krkrns_utf8_of_path(found).c_str(), krkrns_utf8_of_path(primary).c_str());
+				TVPAutoPathCache.Add(name, primary);
+				return primary;
+			}
+		}
 		TVPAutoPathCache.Add(name, found);
 		return found;
 	}
@@ -1635,7 +1710,6 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 
 
 
-
 //---------------------------------------------------------------------------
 /**
  * TVPGetPlacedPath
@@ -1663,7 +1737,6 @@ ttstr TVPGetPlacedPath(const ttstr & name, const ttstr& extlist )
 //---------------------------------------------------------------------------
 
 
-
 //---------------------------------------------------------------------------
 // TVPSearchPlacedPath
 //---------------------------------------------------------------------------
@@ -1677,7 +1750,6 @@ ttstr TVPSearchPlacedPath(const ttstr & name)
 
 
 
-
 //---------------------------------------------------------------------------
 // TVPIsExistentStorage
 //---------------------------------------------------------------------------
@@ -1686,7 +1758,6 @@ bool TVPIsExistentStorage(const ttstr &name)
 	return !TVPGetPlacedPath(name).IsEmpty();
 }
 //---------------------------------------------------------------------------
-
 
 
 //---------------------------------------------------------------------------
@@ -1710,7 +1781,6 @@ iTJSDispatch2* TVPGetFilePropertyNoAddRef( const ttstr& name )
 	}
 	return nullptr;
 }
-
 
 //---------------------------------------------------------------------------
 // TVPCreateStream
@@ -1856,8 +1926,6 @@ tTJSBinaryStream * TVPCreateStream(const ttstr & _name, tjs_uint32 flags)
 
 
 
-
-
 //---------------------------------------------------------------------------
 // TVPClearStorageCaches
 //---------------------------------------------------------------------------
@@ -1873,7 +1941,6 @@ void TVPClearStorageCaches()
 	TVPClearAutoPathLookupCache();
 }
 //---------------------------------------------------------------------------
-
 
 
 
@@ -2473,7 +2540,10 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 	// Write-only property" and the second launch fails).
 	{
 		TVPExecuteScript(TJS_W(
-			"if (typeof(global.kirikiriz) == \"undefined\") global.kirikiriz = 1;\n"
+			// kirikiriz is deliberately NOT defined here: see ScriptMgnIntf.cpp.
+			// Defining it makes KAGEX titles take their KRKRZ branches, which
+			// expect WindowEx (minimize/MenuItemEx bitmaps) that only the
+			// Windows plugin provides.
 			"if (typeof(global.debugwin) == \"undefined\") global.debugwin = 0;\n"
 			"if (typeof(global.inXP3archivePacked) == \"undefined\") global.inXP3archivePacked = 1;\n"
 			"if (typeof(global.convertMode) == \"undefined\") global.convertMode = 0;\n"
@@ -2587,7 +2657,25 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 			KRKRNS_LOG("[launcher] compat stub execution failed");
 		}
 		TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat_reinstall.tjs")));
-		TVPExecuteStorage(entry);
+		// The reference marks the startup script as (in)complete around this
+		// call, and System.exit()/terminate() are inert until it completes
+		// (see TVPStartupSuccess in ScriptMgnIntf.cpp).  A localisation whose
+		// product-key check fails and calls System.exit() keeps booting instead
+		// of dropping back to the launcher.
+		{
+			extern void TVPSetStartupSuccess(bool);
+			TVPSetStartupSuccess(false);
+			try
+			{
+				TVPExecuteStorage(entry);
+			}
+			catch(...)
+			{
+				TVPSetStartupSuccess(true);
+				throw;
+			}
+			TVPSetStartupSuccess(true);
+		}
 		KRKRNS_STAGE("game startup returned");
 		KRKRNS_LOG("[launcher] game startup returned");
 	}
@@ -2706,6 +2794,5 @@ tTJSNativeInstance * tTJSNC_Storages::CreateNativeInstance()
 	return NULL;
 }
 //---------------------------------------------------------------------------
-
 
 

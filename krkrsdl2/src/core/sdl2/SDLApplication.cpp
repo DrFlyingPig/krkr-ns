@@ -306,9 +306,18 @@ void krkrsdl2_prof_accum_upload(double ms, unsigned bytes)
 	g_krkrns_prof.update_frames++;
 }
 
+// Monotonic count of presented frames.  The eval-storm guard in
+// ScriptMgnIntf.cpp uses it to tell a slow synchronous load (no frames, but it
+// finishes) from a runaway loop that keeps running while frames are still
+// being presented.
+static tjs_uint64 krkrns_frame_counter_value = 0;
+void krkrsdl2_frame_tick() { krkrns_frame_counter_value++; }
+tjs_uint64 krkrsdl2_frame_counter() { return krkrns_frame_counter_value; }
+
 void krkrsdl2_prof_accum_present(double ms)
 {
 	g_krkrns_prof.present_ms += ms;
+	krkrsdl2_frame_tick();
 }
 
 void krkrsdl2_prof_emote_progress(double ms)
@@ -1048,9 +1057,38 @@ static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
 // themselves).  Anything else is presented whole, letterboxed.  Both call
 // sites read this one predicate so an upload optimization cannot skip rows the
 // present path actually samples.
-static bool krkrsdl2_present_crops(int texW, int texH, int winW, int winH, int *visibleH)
+/* How many rows of the paint box the screen shows.
+ *
+ * The reference model (Kirikiroid2's MainScene): the form's content size is
+ * what the game declared through setSize/setInnerSize -- the VISIBLE SCREEN in
+ * the game's own pixel space -- while the draw sprite carries the whole paint
+ * box.  The declared area is what gets scaled into the view, so everything
+ * below the declared height is clipped.  A KAGEX square-screen stage declares
+ * scWidth x scHeight (1280x720) but its paint box is exWidth x exHeight
+ * (1280x960, the extension meant for 4:3 displays); the earlier geometry
+ * heuristic ("canvas wider than the window?") could not tell that apart from a
+ * classic 4:3 title whose canvas IS the whole screen, and stretched the
+ * 1280x960 canvas into a 16:9 window.
+ *
+ * Returns false (show the whole canvas, SDL letterboxes it) when the game
+ * declared nothing or declared the full canvas; otherwise *visibleH is the
+ * number of rows to present, in paint-box pixels. */
+static bool krkrsdl2_present_crops(int texW, int texH, int declW, int declH,
+                                   int winW, int winH, int *visibleH)
 {
-	if (texW <= 0 || texH <= 0 || winW <= 0 || winH <= 0) return false;
+	if (visibleH) *visibleH = texH;
+	if (texW <= 0 || texH <= 0) return false;
+	if (declW > 0 && declH > 0 && declH < texH)
+	{
+		int visH = (int)(((int64_t)texW * declH) / declW);
+		if (visH > texH) visH = texH;
+		if (visH < 1) visH = 1;
+		if (visibleH) *visibleH = visH;
+		return visH < texH;
+	}
+	if (winW <= 0 || winH <= 0) return false;
+	// No declaration to go by: keep the old square-canvas heuristic, which at
+	// least covers the 1920x1440-in-1920x1080 case this port was verified on.
 	int visH = (int)(((int64_t)winH * texW) / winW);
 	if (visH > texH) visH = texH;
 	if (visH < 1) visH = 1;
@@ -1101,6 +1139,18 @@ protected:
 #endif
 	int lastMouseX;
 	int lastMouseY;
+	/* The client size the game itself declared (Window.setSize / setInnerSize
+	   from script).  The reference player keeps the form's content size for
+	   this and clips the paint box to it: Kirikiroid2's PrimaryLayerArea has
+	   the declared size while its draw sprite carries the WHOLE paint box, so
+	   the rows below the declared height are cut off and the declared area is
+	   scaled into the view.  A KAGEX square-screen stage declares
+	   scWidth x scHeight (e.g. 1280x720) while its paint box is
+	   exWidth x exHeight (1280x960, the extension used by 4:3 displays), and
+	   that is what makes the difference between "show the visible band" and
+	   "letterbox the whole canvas" -- geometry alone cannot tell them apart. */
+	tjs_int declaredClientW;
+	tjs_int declaredClientH;
 	/* Pointer buttons that arrived together with a cursor jump wait for the
 	   game's own per-frame logic to see the new position (see the button case in
 	   window_receive_event_input).  frameStartMouse* is the cursor as the last
@@ -1139,6 +1189,7 @@ public:
 	virtual void SetPaintBoxSize(tjs_int w, tjs_int h) override;
 	void TranslateWindowToDrawArea(int &x, int &y);
 	void TranslateDrawAreaToWindow(int &x, int &y);
+	void NoteDeclaredClientSize(tjs_int w, tjs_int h);
 #ifdef __SWITCH__
 	/* KRKR-ns diagnostic: dump the engine layer tree to the log.  Comparing the
 	   tree of a working session with one where art is missing says whether the
@@ -1354,6 +1405,8 @@ TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 	this->fileDropArrayCount = 0;
 	this->lastMouseX = 0;
 	this->lastMouseY = 0;
+	this->declaredClientW = 0;
+	this->declaredClientH = 0;
 	this->deferredPointerDue = 0;
 	this->frameStartMouseX = 0;
 	this->frameStartMouseY = 0;
@@ -2273,6 +2326,7 @@ void TVPWindowWindow::SetHeight(tjs_int h)
 }
 void TVPWindowWindow::SetSize(tjs_int w, tjs_int h)
 {
+	this->NoteDeclaredClientSize(w, h);
 #ifndef KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE
 	if (this->window)
 	{
@@ -3135,7 +3189,8 @@ const int sw = this->surface->w;
 									// received those rows.
 									int vwinW = 0, vwinH = 0, visH = 0;
 									SDL_GetWindowSize(this->window, &vwinW, &vwinH);
-									if (krkrsdl2_present_crops(sw, sh, vwinW, vwinH, &visH))
+									if (krkrsdl2_present_crops(sw, sh, this->declaredClientW,
+									                           this->declaredClientH, vwinW, vwinH, &visH))
 										rect.h = visH;
 								}
 								if (!fFullFrameMode)
@@ -3349,7 +3404,9 @@ const int sw = this->surface->w;
 								// The upload path reads the same predicate to
 								// decide whether the rows below the band may be
 								// skipped.
-								bool crop = krkrsdl2_present_crops(tw, th, winW, winH, &visibleH);
+								bool crop = krkrsdl2_present_crops(tw, th,
+									this->declaredClientW, this->declaredClientH,
+									winW, winH, &visibleH);
 								static int lastCropState = -1;
 								static int lastLogW = 0, lastLogH = 0;
 								if (crop != (lastCropState == 1) || tw != lastLogW || th != lastLogH)
@@ -3357,9 +3414,11 @@ const int sw = this->surface->w;
 									lastCropState = crop ? 1 : 0;
 									lastLogW = tw;
 									lastLogH = th;
-									KRKRNS_LOG("[win] present: texture=%dx%d window=%dx%d visibleH=%d%s",
-										tw, th, winW, winH, visibleH,
-										crop ? " crop=top" : " stretch");
+									KRKRNS_LOG("[win] present: texture=%dx%d window=%dx%d declared=%dx%d visibleH=%d%s",
+										tw, th, winW, winH,
+										(int)this->declaredClientW, (int)this->declaredClientH,
+										visibleH,
+										crop ? " crop=top" : " whole");
 								}
 								if (crop)
 								{
@@ -3942,6 +4001,19 @@ void TVPWindowWindow::SetInnerSize(tjs_int w, tjs_int h)
 	this->UpdateActualZoom();
 #endif
 	this->SetSize(w, h);
+}
+
+void TVPWindowWindow::NoteDeclaredClientSize(tjs_int w, tjs_int h)
+{
+	// Only a game's own declaration matters; the engine calls the setters
+	// during window setup with the launcher's size, which is then replaced by
+	// the paint box NoticeSrcResize reports.  First script-driven call wins so
+	// the value cannot be shadowed by a later engine-side resize.
+	if(w <= 0 || h <= 0) return;
+	if(this->declaredClientW == w && this->declaredClientH == h) return;
+	this->declaredClientW = w;
+	this->declaredClientH = h;
+	KRKRNS_LOG("[win] game declared client %dx%d (paintBox will follow)", (int)w, (int)h);
 }
 
 tjs_int TVPWindowWindow::GetInnerWidth()
@@ -5618,6 +5690,13 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 
 void krkrsdl2_mount_xp3_resources()
 {
+	// The launcher's entry archive is the game itself; tell the storage layer
+	// so its files win over the sibling resource packages (see
+	// krkrns_set_primary_archive in StorageIntf.cpp).
+	extern void krkrns_set_primary_archive(const ttstr & archive_autopath);
+	if (!krkrsdl2_game_autopaths.empty())
+		krkrns_set_primary_archive(krkrsdl2_game_autopaths.back());
+
 	// Keep the existing resource priority: siblings first, selected entry last.
 	for (const auto &path : krkrsdl2_game_autopaths)
 		TVPAddAutoPath(path);
@@ -6005,11 +6084,16 @@ static void krkrsdl2_reinitialize_engine()
 	KRKRNS_STAGE("reinit: begin");
 	KRKRNS_LOG("[reinit] ===== restarting engine in-process =====");
 
-	// The window list lives in the Application object, so drop it first: the
-	// windows are script objects owned by the engine we are about to shut down.
-	KRKRNS_LOG("[reinit] step 1: destroy application (windows)");
-	delete ::Application;
-	::Application = nullptr;
+	// KRKR-ns: Application is NOT destroyed here.  It owns the window list,
+	// but the windows are script objects of the engine that is still alive, and
+	// its destructor is not the only thing that runs: TJS finalizers executed
+	// by step 5 log through Application->PrintConsole, and with Application
+	// already gone that call crashed (guest dump: PrintConsole ->
+	// tTJSString::~tTJSString, address 0).  The reference order is engine
+	// teardown first, application last.  Only the window registry is cleared
+	// here, which is what the original comment was after.
+	KRKRNS_LOG("[reinit] step 1: detach windows from the application");
+	krkrsdl2_release_leftover_windows();
 
 	// Release the engine-side caches that hold decoded/parsed data.  Doing this
 	// before the script engine shuts down keeps every owner alive while its
@@ -6081,6 +6165,12 @@ static void krkrsdl2_reinitialize_engine()
 		extern void krkrsdl2_reset_script_engine_for_restart();
 		krkrsdl2_reset_script_engine_for_restart();
 	}
+	// The script engine is down, so nothing can log through it any more: this
+	// is the first point at which Application (and the windows it owns) may go
+	// away without a finalizer calling into it.  See the note on step 1.
+	KRKRNS_LOG("[reinit] step 5b: destroy application");
+	delete ::Application;
+	::Application = nullptr;
 
 	// Rebuild, mirroring the startup path in main().  Only the engine part is
 	// repeated: romfs/socket/heartbeat stay as brought up once at process start.
@@ -6093,6 +6183,10 @@ static void krkrsdl2_reinitialize_engine()
 	krkrsdl2_game_mode = false;
 	krkrsdl2_session_saved = false;
 	krkrsdl2_game_autopaths.clear();
+	{
+		extern void krkrns_clear_primary_archive();
+		krkrns_clear_primary_archive();
+	}
 	krkrsdl2_game_dir = ttstr(KRKRNS_BASE_U TJS_W("/Game/"));
 	TVPProjectDir = ttstr(TJS_W("file://?/romfs:/"));
 	TVPNativeProjectDir = tjs_string(TJS_W("romfs:/"));

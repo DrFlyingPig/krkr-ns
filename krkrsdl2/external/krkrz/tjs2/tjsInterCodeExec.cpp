@@ -817,9 +817,56 @@ void TJSVariantArrayStackCompactNow()
 //---------------------------------------------------------------------------
 // tTJSInterCodeContext ( class definitions are in tjsInterCodeGen.h )
 //---------------------------------------------------------------------------
+// KRKR-ns: a runaway recursion used to exhaust the thread stack and take the
+// process with it (guest crash dumps showed a repeating
+// ExecuteAsFunction -> FuncCall -> ExecuteCode chain with a tTJSString
+// destructor on top; seen when a title's own exit script kept re-entering
+// itself while the engine was being torn down).  Count the depth per thread,
+// report the script call stack once, and raise a normal script error so the
+// TJS side can unwind instead.
+#ifdef __SWITCH__
+static thread_local tjs_int krkrns_tjs_call_depth = 0;
+static const tjs_int krkrns_tjs_call_depth_limit = 3000;
+#endif
+
 void tTJSInterCodeContext::ExecuteAsFunction(iTJSDispatch2 *objthis,
 	tTJSVariant **args, tjs_int numargs, tTJSVariant *result, tjs_int start_ip)
 {
+#ifdef __SWITCH__
+	++krkrns_tjs_call_depth;
+	if(krkrns_tjs_call_depth > krkrns_tjs_call_depth_limit)
+	{
+		krkrns_tjs_call_depth = 0; // do not spam while the error unwinds
+		{
+			ttstr trace = TJSGetStackTraceString(12);
+			std::string u8;
+			for(tjs_uint i = 0; i < trace.GetLen() && i < 800; ++i)
+			{
+				tjs_uint32 ch = static_cast<tjs_uint32>(trace[i]);
+				if(ch < 0x80) u8 += static_cast<char>(ch);
+				else if(ch < 0x800)
+				{
+					u8 += static_cast<char>(0xC0 | (ch >> 6));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+				else
+				{
+					u8 += static_cast<char>(0xE0 | (ch >> 12));
+					u8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+			}
+			KRKRNS_LOG("[tjs] call depth %d exceeded, unwinding. trace: %s",
+				(int)krkrns_tjs_call_depth_limit, u8.c_str());
+		}
+		throw eTJSScriptError(ttstr(TJS_W("KRKRNS: script recursion limit exceeded")),
+			Block, start_ip);
+	}
+	struct krkrns_depth_guard_t
+	{
+		~krkrns_depth_guard_t() { --krkrns_tjs_call_depth; }
+	} krkrns_depth_guard;
+#endif
 	tjs_int num_alloc = MaxVariableCount + VariableReserveCount + 1 + MaxFrameCount;
 	TJSVariantArrayStackAddRef();
 //	AddRef();
@@ -987,6 +1034,15 @@ void tTJSInterCodeContext::DisplayExceptionGeneratedCode(tjs_int codepos,
 	const tTJSVariant *ra)
 {
 	tTJS *tjs = Block->GetTJS();
+	// KRKR-ns: during the engine teardown the finalizers still run and can
+	// throw, but the code context this dump walks is already being destroyed
+	// (the crash landed in a tTJSString destructor here).  Say so and return
+	// without formatting anything.
+	if(tjs && tjs->ShuttingDown)
+	{
+		tjs->OutputToConsole(TJS_W("==== script exception while the engine is shutting down (dump suppressed) ===="));
+		return;
+	}
 	ttstr info(
 		TJS_W("==== An exception occured at ") +
 		GetPositionDescriptionString(codepos) +

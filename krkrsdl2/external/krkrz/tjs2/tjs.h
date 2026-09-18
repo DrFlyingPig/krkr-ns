@@ -108,6 +108,13 @@ public:
 
 	void Shutdown();
 
+	// KRKR-ns: true while Shutdown() is tearing the engine down.  Finalizers
+	// still run then and may throw, and the exception dump walks a code
+	// context that is already being destroyed (the crash landed in a
+	// tTJSString destructor under DisplayExceptionGeneratedCode), so the dump
+	// checks this and stays out of the way.
+	bool ShuttingDown;
+
 private:
 	tTJSPPMap * PPValues;
 

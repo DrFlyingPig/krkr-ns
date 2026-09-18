@@ -444,7 +444,14 @@ void TVPAddLog(const ttstr &line, bool appendtoimportant)
 #endif	// ENABLE_DEBUGGER
 
 #if 1
-	Application->PrintConsole( line.c_str(), line.GetLen(), appendtoimportant );
+	// KRKR-ns: Application is torn down (and set to null) before the script
+	// engine on the "end game -> back to launcher" rebuild, while TJS
+	// finalizers can still log; an unconditional Application->PrintConsole
+	// crashed there (stack: PrintConsole -> tTJSString::~tTJSString).  The SD
+	// log below does not depend on Application, so skipping the console mirror
+	// while it is gone loses nothing that matters.
+	if(Application)
+		Application->PrintConsole( line.c_str(), line.GetLen(), appendtoimportant );
 #else
 #ifdef TVP_LOG_TO_COMMANDLINE_CONSOLE
 	Application->PrintConsole( buf.c_str(), buf.length(), appendtoimportant );
