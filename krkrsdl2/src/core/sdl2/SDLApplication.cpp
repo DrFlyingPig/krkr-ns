@@ -609,6 +609,21 @@ static void ns_gp_push_mouse_motion(SDL_Window *window, int x, int y)
 	SDL_PushEvent(&ev);
 }
 
+static void ns_gp_push_mouse_motion_if_moved(SDL_Window *window, int x, int y)
+{
+	// The pad drives a virtual cursor, and this used to announce its position
+	// every frame even when nothing moved.  Those repeats overwrite the cursor
+	// the engine tracks for the real mouse, and KAG dialogs decide which input
+	// device is in charge by comparing that value against their own key-driven
+	// position -- so a parked pad cursor (0,y) kept every dialog locked in pad
+	// mode and mouse clicks stopped registering at all.
+	static int lastX = -1, lastY = -1;
+	if(x == lastX && y == lastY) return;
+	lastX = x;
+	lastY = y;
+	ns_gp_push_mouse_motion(window, x, y);
+}
+
 static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 button)
 {
 	g_krkrns_prof.gp_push_button++;
@@ -4590,7 +4605,7 @@ void TVPWindowWindow::switch_process_gamepad_input()
 		SDL_GetWindowSize(window, &w, &h);
 		ns_gp.mouse_x = (w > 0) ? w / 2 : 640;
 		ns_gp.mouse_y = (h > 0) ? h / 2 : 360;
-		ns_gp_push_mouse_motion(window, ns_gp.mouse_x, ns_gp.mouse_y);
+		ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
 	}
 	Uint16 buttons = 0;
 	int ax = 0, ay = 0;
@@ -4624,7 +4639,7 @@ void TVPWindowWindow::switch_process_gamepad_input()
 			if (ns_gp.mouse_y < 0) ns_gp.mouse_y = 0;
 			else if (ns_gp.mouse_y >= h) ns_gp.mouse_y = h - 1;
 		}
-		ns_gp_push_mouse_motion(window, ns_gp.mouse_x, ns_gp.mouse_y);
+		ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
 	}
 	// dpad -> cursor nudge with auto-repeat
 	Uint32 now = SDL_GetTicks();
@@ -4640,7 +4655,7 @@ void TVPWindowWindow::switch_process_gamepad_input()
 				{
 					ns_gp.mouse_x += step_x[d] * NS_GP_DPAD_STEP;
 					ns_gp.mouse_y += step_y[d] * NS_GP_DPAD_STEP;
-					ns_gp_push_mouse_motion(window, ns_gp.mouse_x, ns_gp.mouse_y);
+					ns_gp_push_mouse_motion_if_moved(window, ns_gp.mouse_x, ns_gp.mouse_y);
 					ns_gp.dpad_repeat_until[d] = now + NS_GP_DPAD_REPEAT_MS;
 				}
 			}
