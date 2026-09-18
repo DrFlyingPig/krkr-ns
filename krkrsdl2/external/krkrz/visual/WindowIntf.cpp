@@ -14,6 +14,7 @@
 #include <algorithm>
 #include "MsgIntf.h"
 #include "WindowIntf.h"
+#include "KrkrNSLog.h"
 #include "LayerIntf.h"
 #include "DebugIntf.h"
 #include "EventIntf.h"
@@ -479,6 +480,18 @@ void tTJSNI_BaseWindow::OnMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 			3, arg);
 	}
 	if(DrawDevice) DrawDevice->OnMouseMove(x, y, flags);
+	// KRKR-ns probe: KAG dialogs hand control back to the mouse only when
+	// the primary layer's cursorX/cursorY differ from their own key-driven
+	// position, so both the window value and the layer value have to move.
+	{
+		static int probeCount = 0;
+		if((++probeCount % 60) == 0)
+		{
+			tTJSNI_BaseLayer * pri = DrawDevice ? DrawDevice->GetPrimaryLayer() : NULL;
+			KRKRNS_LOG("[cursor] window=(%d,%d) primaryLayer=(%d,%d)",
+				(int)x, (int)y, pri ? (int)pri->GetCursorX() : -1, pri ? (int)pri->GetCursorY() : -1);
+		}
+	}
 }
 //---------------------------------------------------------------------------
 void tTJSNI_BaseWindow::OnTouchDown( tjs_real x, tjs_real y, tjs_real cx, tjs_real cy, tjs_uint32 id ) {
