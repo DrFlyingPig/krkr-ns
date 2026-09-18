@@ -8,6 +8,38 @@
 
 ## 已应用补丁 (源码层)
 
+### P83: 老 KAG 作品的影片（OP/logo）可播且播完不再闪退 — FFmpeg 子集缺 MPEG-PS + 音频排空越界（2026-09-18）
+
+- **现象**：KAGEX 作品的 `movie/logo.mpg`、`movie/opening.mpg` 不播放，日志 `[movie] avformat_open_input failed code=-1094995529 (Invalid data found)`，游戏随后抛 `Error in krmovie.dll : Invalid video size` 跳过影片；加入解码器后影片能播，但**播完立刻卡死闪退**。
+- **根因一（能力缺口）**：这些影片是 MPEG-1 系统流（签名 `000001ba`，内含 MPEG-1 视频 + MP2 音频），而本移植链接的私有最小 FFmpeg 子集里**没有 `mpegps` 解复用器与 MPEG-1/2 解码器**（当初只为 WMV/MP4 编）。参照实现里 Windows 侧的影片由 `krmovie.dll`（DirectShow，系统解码器）播放，移植必须自带解码器——这属于引擎侧能力缺口。
+- **根因二（易漏点）**：只开 `mpegps` 仍报 `probed stream 0 failed` / `Could not find codec parameters ... unknown codec`。因为 `mpegps` 按设计**不给基本流填 codec**，`avformat_find_stream_info()` 是拿 `libavformat/demux.c` 的 `fmt_id_type` 表登记的**同名解复用器**（`mpegvideo`→MPEG2VIDEO、`mp3`→MP3）去探测识别的；只开同名*解析器*不够。另：`av_find_input_format()` 认的名字是 **`"mpeg"`** 而非 configure 名 `"mpegps"`，命名不中改为回退自动探测而不是直接失败。
+- **根因三（纯移植 bug，"播完闪退"的真因）**：`FeedAudio(flush=true)`——**每部影片结束时都走**——把整个 PCM 环（最大 1 MB）当作长度 `memcpy` 进一块 `kAudioBlockBytes`（16 KB）的缓冲 → **堆越界**；损坏在几秒后的 `CloseAudio()` `delete[]` 上炸，堆栈恰好落在 `SwitchMovieOverlay::CloseAudio()`，极易误判成"销毁顺序/生命周期"问题。
+- **修复**：`tools/build_ffmpeg_switch.sh` 增加 `--enable-demuxer=asf,mov,mpegps,mpegvideo,mp3`、`--enable-decoder=...,mpeg1video,mpeg2video,mp2,mp3`、`--enable-parser=...,mpegvideo,mpegaudio`；本机无 MSVC，host 编译器改用交叉 gcc（hardcoded tables 默认开，构建期不跑 host 程序）。`SwitchMovieOverlay.cpp`：按签名把 `000001ba..` 指定为 `mpeg`；`FeedAudio` 拷贝量钳到块大小，结尾 flush 改为逐块排空的有界循环；并按参照顺序把 `Stop()` 改成**先摘音频源再 join 解码线程**，销毁各步加日志（下次失败可指出死在哪一步）。
+- 验证（模拟器）：`[movie] ready 1280x720 fps=30.00 frames=105` → `complete frames=105` → stop/close 各步全过、模拟器日志无 `InvalidAccess`，影片后游戏继续正常（用户确认）。
+
+### P82: 存档删除真正可用 — 本地路径前导斜杠 + TJS 层重新发布（2026-09-18）
+
+- **现象**：存档界面点删除、确认框也出现，但文件始终不消失，日志无任何引擎侧痕迹。
+- **根因一（路径）**：解析出的本地路径 `TVPGetLocalName` 形如 `/sdmc:/...`（设备名带前导斜杠），fsdev 无法寻址，`unlink()` 返回 `ENODEV`。照 `StorageImpl` 打开文件时的既有规范化规则处理（前导 `/` + `字母:` → 去掉前导斜杠），并改用 `TVPGetLocalName` 的**返回值**而不是存储名。
+- **根因二（调用到不了引擎）**：同一构建 A/B 实证——**没有 TJS 层属性时，游戏那次 `Storages.deleteFile(...)` 根本到不了引擎**（引擎入口日志一次不打）；重新发布为 TJS 函数转发原生实现后，文件真的被删（`savedata019.bmp` 从磁盘消失）。该包装是**承重代码**，`compat-patches/system/k2compat.tjs` 里已注明不要当诊断删除。
+- **自测**：compat 层带一个由测试脚手架触发的删除自测（存在 `sdmc:/switch/KRKR-ns/krkrns-delete-probe.bmp` 时删除并打日志），证据行 `delete probe -> 1 exists_after=0`。
+- 验证：模拟器删除成功（用户确认），探针自测通过。
+
+### P81: 点击按自身位置判定 — 位置跳变的点击延后投递（2026-09-18）
+
+- **现象**：确认框里点「是」被判成「否」（对话框关闭、什么都没发生、无异常无日志）；触摸屏与模拟器鼠标（宿主鼠标映射为触摸）都如此。
+- **根因**：KAG 的点击处理用**上一帧**的命中结果（`CheckDialog.LeftMouseUpAction` 读 `DefaultAction` 上一帧算出的 `MapRes`），而确认框打开时会把光标自动移到「否」；触摸/模拟器的「位置与按压同时到达」使这一帧的判定仍停在「否」→ 点「是」等于点「否」。
+- **修复**（`SDLApplication.cpp`）：位置与"游戏上一帧看到的光标"不同的指针按钮事件**延后 20ms**（>最细 16ms 定时器）投递，让游戏先跑一次自己的每帧判定；光标本就在点击处（普通鼠标）不延迟。标记文件 `sdmc:/switch/KRKR-ns/no-click-delay.txt` 可关闭延迟做 A/B。
+- **配套探针**：`[click] down/up pos=(x,y) gameCursor=(x,y)` 与按变化记录的 `[province] xy=(x,y) -> N`（后者由 `getProvincePixel` 的**带参数**形式打出——KAGEX 只调这一种，无参形式从不触发，此前据此误判"命中判定没在跑"）。
+- 验证：日志显示点击时命中判定读取到的正是点击位置（`-> 1` 即「是」），删除随即可用（用户确认）。
+
+### P80: 手柄可以操作游戏 — 真移 SDL 光标 + 十字键走 KAG 键盘导航（2026-09-18）
+
+- **现象**：手柄"完全没办法操作游戏"：光标不动、点击无效。
+- **根因**：手柄的合成鼠标事件用 `SDL_PushEvent` 投递，**不更新 SDL 鼠标状态**；而 `Window.getCursorPos` 读的是 `SDL_GetMouseState`，KAG 的命中判定又只读 `MainWnd.PrimaryLayer.cursorX/Y`（从不看事件坐标）→ 手柄的"光标"谁也没动，判定一直停在最后一次真实鼠标/触摸留下的位置。
+- **修复**（`SDLApplication.cpp`）：左摇杆改为 `SDL_WarpMouseInWindow` 真移 SDL 光标（与脚本自身的 `setCursorPos` 同一条路），十字键改发**方向键**走 KAG 自带的键盘导航（`MainWindow.onKeyUp → ActiveObj.KeyUpAction`：对话框左右切换「是/否」、Enter/A 确认、存档页选择移动），面键维持 A=左键确认、B=右键返回、X=空格、Y=回车、Start=Esc、L3=Ctrl、Select=F5、R3=F7、L/R=滚轮。
+- 验证（模拟器）：摇杆推动后 `[cursor] layerCursor=(x,y)` 连续跟随、`[province]` 读到对应区域值（用户确认可操作）。
+
 ### P79: 二次窗口 / 模态确认框（KAG3 的 `askYesNo`）在 Switch 上可用（2026-09-18）
 
 - **背景**：KAG3 的确认框是货真价实的第二个 `Window`（游戏自带 `script/CustomDialogWindow.tjs`：`class YesNoDialogWindow extends Window` + `win.showModal()`）。Switch 的 SDL 驱动只允许一个窗口，`SDL_CreateWindow` 直接失败 → 构造函数抛异常 → 快速存/读档等动作被整体跳过（不崩，但什么也不做）。
