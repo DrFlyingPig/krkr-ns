@@ -8,6 +8,45 @@
 
 ## 已应用补丁 (源码层)
 
+### P79: 二次窗口 / 模态确认框（KAG3 的 `askYesNo`）在 Switch 上可用（2026-09-18）
+
+- **背景**：KAG3 的确认框是货真价实的第二个 `Window`（游戏自带 `script/CustomDialogWindow.tjs`：`class YesNoDialogWindow extends Window` + `win.showModal()`）。Switch 的 SDL 驱动只允许一个窗口，`SDL_CreateWindow` 直接失败 → 构造函数抛异常 → 快速存/读档等动作被整体跳过（不崩，但什么也不做）。
+- **寄宿**（`SDLApplication.cpp`）：拿不到自有 SDL 窗口的次要窗口改为**寄宿在主窗口内**——借用主窗口的 `SDL_Window` 与 renderer，自带 `surface` / `texture`（图层树独立合成）；`SetVisible` / `SetPosition` / `SetPaintBoxSize` 对寄宿窗口不再触碰共享窗口（否则会隐藏/移动整个游戏、或把宿主 renderer 的逻辑尺寸改掉），位置改为记录；析构绝不销毁借用的 window / renderer。
+- **呈现**：`TickBeat` 的 Switch 呈现分支对寄宿窗口走叠加路径——先画宿主那一帧（SDL 不保留 backbuffer），再按**宿主逻辑（paint box）空间**把自己的 quad 画上去、**居中**放置（KAG 脚本构造时设的 (0,0)、以及它那句 `with(kag) setPos(...)` 其实指向主窗口，照做会停在左上角）；宿主在自身存在模态子窗口时跳过呈现，保证子窗口最后落屏。
+- **模态与输入**：`ShowWindowAsModal` 原先在 `KRKRSDL2_WINDOW_SIZE_IS_LAYER_SIZE` 下无条件抛 "Showing window as modal is not supported"（日志实证：`askYesNo` 每次都在 `showModal` 处抛异常，点击后停在半途状态）→ 现在只对"需要自有 OS 窗口"的窗口抛，寄宿窗口放行模态循环（引擎模态机制会把当前窗口指向对话框，循环内继续 pump 事件即可）。输入路由无需改动，只需把事件坐标按叠加矩形原点平移。
+- 验证（模拟器，KAG3 作品）：对话框出现在屏幕正中、游戏在其后冻结、鼠标/手柄均可选择、选完关闭并执行存/读档（用户确认）。
+
+### P78: 菜单 API 回到「没有 menu.dll」的语义（KAGEX 启动失败回归）
+
+- **现象**：`永不枯萎的世界与终焉之花`、LimeLight 等自带 Kirikiroid2 兼容层的作品在启动期报 `Please specity MenuItem class object.` 并终止（前者进入"失败→回启动器→再失败"的 24000 次重启循环）。
+- **根因**：kirikiri2 里 `MenuItem` 类与 `Window.menu` 属性**属于 menu.dll**；没有该插件时脚本看不到它们，作品回落到自己的 TJS 菜单模型（自带兼容层正是为此删除这两个名字）。我们无条件注册了原生类并把原生根挂成 `Window.menu` → 原生根只接受原生实例（`CastFromVariant` 走 `NativeInstanceSupport(NIS_GETINSTANCE)`），KAGEX 的菜单项是纯 TJS 对象 → 启动期即抛。
+- **修复**：`ScriptMgnIntf.cpp` 不再注册原生 `MenuItem`（实现保留在 `external/krkrz/visual/MenuItem*`，默认不暴露）；`MenuItemImpl.cpp` 不再把原生根装成 `Window.menu`。脚本侧菜单模型由 compat 桩提供、且**只发给不带兼容层的作品**；`Window.mainWindow`（kirikiri2 核心成员，非 menu.dll）保持提供。
+- **顺带**：不再执行发行版自带的 `k2compat/k2compat.tjs`（当初为让它删除原生菜单 API 而引入）——那层会装 `stayOnTop` 等依赖本移植没有的成员的机制（读 `Window.mainWindow` 时炸），而它要删的对象现在本就不存在。KAG3 作品从不调用 `k2compat.tjs`，因此 compat 桩改由 `launchXP3` 在游戏 startup 前主动执行一次（幂等守卫保证重复加载无害）。
+- 验证（模拟器）：两款 KAGEX 作品与 KAG3 作品均正常启动（用户确认）。
+
+### P77: TJS 寄存器区栈改为每线程一份（音频线程执行脚本时的崩溃）
+
+- **现象**：游戏中点选后进程猝死；模拟器 guest 栈显示崩溃在**音频线程**：`VorbisWaveDecoder → XP3ArchiveStream::Read → xp3filter 回调 → tTJSInterCodeContext::FuncCall`，PC 落在 `tTJSObjectProxy::Release()`、`X[0]=0`（对空对象调用 Release）。
+- **根因**：上游 TJS2 的 `tTJSVariantArrayStack`（函数寄存器区分配栈）是**进程级全局单例 + 非原子引用计数**（单引擎单线程前提）。本移植里加密包的解码引擎跑在音频线程、主线程同时在跑游戏脚本 → 两线程从同一栈领到重叠的寄存器区、互相写坏（此前日志里 `[xp3filter] callback threw ... Member "166" does not exist` / `Cannot convert ... to int/real` 都是同一症状）→ 收尾清理时释放到已被写坏的 variant。
+- **修复**（`tjs2/tjsInterCodeExec.cpp`，照 Kirikiroid2 的做法——它把栈从全局移交给引擎）：全局指针改 `thread_local`，线程退出时由函数内 thread_local holder 释放；去掉按调用次数的 AddRef/Release（继续按调用释放会释放上层仍在使用的寄存器区）；`CompactNow` 只压缩调用线程自己的栈。本移植每个 `tTJS` 都在单线程创建与使用，故"每线程一份"="每引擎一份"。
+- 验证：崩溃消失（用户确认）。
+
+### P76: 呈现与上传共用同一裁剪判定（4:3 作品下半屏黑带）
+
+- **现象**：经典 4:3 画布的作品（1024×768 放进 1920×1080 窗口）只显示上半部分内容、下方黑带，但黑带处点击仍命中真实按钮。
+- **根因**：TickBeat 的 full-frame 上传里有一段"只上传按宽度铺满时可见的那几行"的优化（当初为 KAGEX 方屏画布写的，假定 present 从不采样下面的行）；而 present 侧此前把裁剪条件收紧成"画布高于可见高 && 画布宽≥窗口宽"后，4:3 画布走**整幅 letterbox**、会采样全部行 → 纹理底部 192 行从未上传、永远黑（`[comp]` 日志显示 surface 完整、`present ... stretch`，证明内容在、只有 GPU 纹理缺行）。
+- **修复**（`SDLApplication.cpp`）：抽出 `krkrsdl2_present_crops()`，上传与 present 读同一谓词——只有真会被顶部裁剪的方屏画布才允许少传行。
+- 验证：该作品整幅显示、消息窗口可见（用户确认）；LimeLight 等方屏画布仍按顶部可见区呈现。
+
+### P75: KAG3 作品（ここは好きなだけ…）的启动链补齐（2026-09-17/18）
+
+- 该作品为 KAG 3.29，启动期连续踩到三处缺口，逐个按参照实现修：
+  1. **`-debugwin` 自重启**：krkiri2 经典「隐藏调试控制台」分支——`System.getArgument("-debugwin") != "no"` 时游戏会 `shellExecute(自己, "-debugwin=no")` 再 `exit()`，在 Switch 上表现为"黑屏一下就被打回启动器"。修复：`launchXP3` 在 KAG boot globals 之前注入 `TVPSetCommandLine("-debugwin","no")`（项目既有 `-deffont` 注入的同款先例）。
+  2. **菜单模型**：见 P78（`class KAGMenuItem extends MenuItem` 需要该名字存在）。
+  3. **`AlphaMovie` 缺失**：`script/alphamovie.ks` 头部守卫 `@if typeof(global.alphamovie_object)=='undefined'` 包住整段，而 `class AlphaMoviePlayer extends AlphaMovie` 需要基类 → 缺基类时抛致命错误（Switch 上不可见的错误框＝黑屏）。修复：`k2compat_reinstall.tjs` 预定义 model-only `class AlphaMovie`（`numOfFrame=1`、`showNextImage` 返回末帧 → 播放约 1 秒后玩家的完成回调正常触发，剧情不卡在等影片）。
+- **附带**：启动器列表翻页越界回绕导致 8 款游戏只显示 7 款——`data/startup.tjs` 的 `pageRail` 前向越界改为钳到最后一款。
+- 验证（模拟器）：该作品可完整启动并游玩（用户确认）。
+
 ### P74: 帧节奏归因完成 — 主循环与渲染耦合是「到处都卡」的根因（2026-09-15，埋点常驻）
 
 - 新增 `[prof] tjs:` 行（每 60 帧）：`deliv`（连续事件投递）/`calls`（TJS 回调）/`lim`（限速线程节拍）/`win post`（重绘请求）/`win deliver`（实际出画）/`emote prog/draw`（E-mote API 调用率）。埋点分布：`EventIntf.cpp`（投递/回调/窗口更新）、`EventImpl.cpp`（限速线程）、`emoteplayerclass.cpp`（E-mote 调用）。

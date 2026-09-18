@@ -53,12 +53,15 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 **引擎兼容与适配**
 
 - KAG2 / KAG3 兼容层（Switch 桩替换桌面版插件脚本，自动维持优先级）
+- KAG3 的二次窗口确认框可用：对话框寄宿在主窗口内呈现（居中叠加），输入坐标换算到对话框自身坐标系，并支持模态循环——快速存/读档等确认框不再中断动作
+- 菜单 API 与 `menu.dll` 语义对齐：没有该插件时不向脚本暴露原生 `MenuItem` / `Window.menu`（KAGEX 作品保持自己的 TJS 菜单模型，KAG3 需要的脚本侧菜单模型只发给不带兼容层的作品）
+- TJS 引擎多线程安全：每线程独立寄存器区栈（加密包的解码引擎在音频线程执行脚本时，不再与主线程互相踩坏寄存器）
 - 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等；游戏对插件的文件存在性探测对内置插件生效，E-mote 等子系统正常启用
 - 内置插件再扩充：`dirlist`（getDirList）、`getabout`、`getsample`（唇同步 / 波形采样）、`savestruct`（文本存档格式）、`varfile`（`var://`）、`win32dialog`、`addfont`、`fftgraph`、`wutcwf`（TCWF 音频解码）
 - 文本编码探测：无 BOM 文本按 UTF-8 → Shift-JIS → GBK 依次尝试，中文重编码脚本不再中断启动
 - 引擎 API 补齐：`Layer.affinePile`、`Layer.stitchWrappedCopy`、`Font.doUserSelect`；缺失转场自动回落 crossfade
 - 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密，附原生 XOR 快路径）
-- KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现
+- KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现；经典 4:3 画布（1024×768 等）整幅 letterbox 显示，消息窗口不再被裁掉（两种呈现共用同一判定，纹理上传的行带与之保持一致）
 - 缺失资源垫图、`Layer.loadImages` 容错、脚本异常记录并继续（风暴熔断）
 
 **图形与性能**
@@ -66,7 +69,7 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 - E-mote 立绘动画：隔离 GL 后端 + 驱动自检（异常驱动自动回退 CPU）、脏区回读、半分辨率可选
 - simde SIMD 混合内核（NEON）、4 核绘制线程池
 - GPU 呈现链直通（FBO blit）、XP3 段缓存、增量资源索引、解码图像缓存（上限 96 MiB）
-- 帧内归因埋点（`[prof] frame:` / `[prof] blt:`）、合成层脏区上传、上传统一只传可见行带
+- 帧内归因埋点（`[prof] frame:` / `[prof] blt:`）、合成层脏区上传、上传统一行带与呈现裁剪共用同一判定
 - 菜单公共路径优化：字体度量按需缓存、存档缓冲写入、PSB 共享资源、固实 7z 解压块复用
 - 启动器重绘优化：文本宽度缓存 + 按样式分组绘制，无输入时不重绘
 - 大位图独立内存区复用；修复文字对象销毁影响其他字体、选项文字垂直居中的问题
