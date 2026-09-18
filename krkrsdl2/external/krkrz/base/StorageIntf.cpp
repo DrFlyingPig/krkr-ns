@@ -18,6 +18,7 @@
 #include <vector>
 #include "StorageIntf.h"
 #include "BinaryStream.h"
+#include "CharacterSet.h"
 #include "tjsUtils.h"
 #include "MsgIntf.h"
 #include "EventIntf.h"
@@ -1877,64 +1878,304 @@ void TVPClearStorageCaches()
 //---------------------------------------------------------------------------
 // tTJSNC_Storages
 //---------------------------------------------------------------------------
-// Storages.fstat / Storages.getTime
+// Storages.fstat / getTime / deleteFile / copyFile / dirlist / dirlistEx
 //
-// Ported from krkrsdl3's plugins/fstat.cpp, the ncbind plugin that kirikiri
-// exposes as fstat.dll.  Titles use it to learn a file's size -- a KAG BASE ADV
-// SYSTEM title (v1_KR_Xmoe_晴菜花) calls it unconditionally while recording a
-// jump point, so its absence threw "Member \"fstat\" does not exist" inside the
-// message-draw routine and left the game wedged.
+// Ported from krkrsdl3's plugins/fstat.cpp, the ncbind plugin kirikiri exposes
+// as fstat.dll.  A KAG BASE ADV SYSTEM title (v1_KR_Xmoe_晴菜花) leans on it in
+// normal play: fstat while recording a jump point on every finished line, and
+// deleteFile / copyFile / dirlistEx from its save screen (deleting or copying a
+// save slot).  Each missing member threw inside the game's own event handler --
+// "Member ... does not exist" -- and left the game wedged where it stood, so the
+// whole set is provided here instead of one member at a time.
 //
-// Faithful to the reference for the read-only part it exposes:
-//   * a name that resolves into an archive reports only `size` (the reference
-//     opens the member and uses its stream size);
-//   * a local name reports `size` too -- the reference stats the file instead,
-//     which yields the same number for a regular file and, like this, no size
-//     for a directory or a name that does not resolve;
-//   * `mtime` / `ctime` / `atime` are present but empty, exactly as the
-//     reference behaves on its SDL2 target (its platform layer reports no
-//     timestamps; only its OHOS port fills them).
+// Faithful to the reference:
+//   * `fstat` reports `size`, taken from the file's stream (an archive member's
+//     uncompressed size, a local file's file size), and omits it for a
+//     directory; a locally accessible name also gets mtime / ctime / atime;
+//   * timestamps are real Date objects in milliseconds, because that is the
+//     contract titles read them back with (`dirlistEx`'s mtime is consumed as
+//     `FileArr[i]["mtime"].getTime()`); the reference's OHOS port fills the same
+//     fields from stat, its SDL2 port leaves them empty;
+//   * `deleteFile` only removes files that have a local form (an archive member
+//     cannot be deleted) and clears the storage caches on success;
+//   * `copyFile` resolves source and destination the way the reference does and
+//     also clears the caches;
+//   * `dirlist` returns names (directories with a trailing '/'), `dirlistEx`
+//     returns %[name, size, attrib, mtime, atime, ctime] and, like the
+//     reference, insists on a trailing '/' in the directory name and throws
+//     when the directory is missing;
+//   * attrib uses the reference's mapping: 0xFFFF when stat fails, 0x10 for a
+//     directory, 0x01 when the file is not writable.
 //
-// The plugin's mutating half (setTime, exportFile, deleteFile, dirtree, md5,
-// temporary files) is deliberately not part of this port: nothing needs it yet,
-// and those are the calls that can touch a player's files.
+// The rest of the plugin (setTime, exportFile, truncateFile, moveFile, dirtree,
+// md5, temporary files, file selector) stays out of this port: nothing asks for
+// it yet, and those are the calls that can rewrite a player's files.
+#ifdef _WIN32
+// The reference's POSIX paths (stat / unlink / opendir) have no direct MSVC
+// counterpart and this port is built for the Switch; these helpers simply
+// report "no local form" there.
+static bool TVPStoragesLocalPath(const ttstr & name, std::string & out)
+{
+	(void)name; (void)out;
+	return false;
+}
+#else
+#include <sys/stat.h>
+#include <unistd.h>
+#include <dirent.h>
+// A storage name in the encoding the platform's file calls want (UTF-8 here).
+// `out` receives a path only when the name has a local form: an archive member
+// never does, which is exactly what the reference tests for.
+static bool TVPStoragesLocalPath(const ttstr & name, std::string & out)
+{
+	ttstr local = TVPGetLocallyAccessibleName(name);
+	if(local.IsEmpty()) return false;
+	tjs_string wide(local.c_str());
+	return TVPUtf16ToUtf8(out, wide);
+}
+#endif
+
+// A Date for a POSIX timestamp, or nothing when there is no timestamp.  The
+// Date class is looked up per call rather than cached: an in-process engine
+// restart replaces the whole global object set, and a cached dispatcher would
+// survive it as a dangling pointer.
+static void TVPStoragesStoreDate(tTJSVariant & store, tjs_int64 seconds)
+{
+	if(seconds <= 0) return;
+	iTJSDispatch2 * global = TVPGetScriptDispatch();
+	if(!global) return;
+	tTJSVariant cls;
+	if(TJS_FAILED(global->PropGet(0, TJS_W("Date"), nullptr, &cls, global))) return;
+	iTJSDispatch2 * datecls = cls.AsObjectNoAddRef();
+	if(!datecls) return;
+	iTJSDispatch2 * obj = nullptr;
+	if(TJS_FAILED(datecls->CreateNew(0, nullptr, nullptr, &obj, 0, nullptr, datecls)) || !obj) return;
+	tTJSVariant setter_v;
+	iTJSDispatch2 * setter = nullptr;
+	if(TJS_SUCCEEDED(datecls->PropGet(0, TJS_W("setTime"), nullptr, &setter_v, datecls)))
+		setter = setter_v.AsObjectNoAddRef();
+	if(setter)
+	{
+		tTJSVariant ms((tjs_int64)seconds * 1000);
+		tTJSVariant * param[] = { &ms };
+		setter->FuncCall(0, nullptr, nullptr, nullptr, 1, param, obj);
+	}
+	store = tTJSVariant(obj, obj);
+	obj->Release();
+}
+
+struct TVPStoragesFileInfo
+{
+	bool ok = false;
+	bool isdir = false;
+	tjs_int64 size = 0;
+	tjs_int64 mtime = 0, ctime = 0, atime = 0;
+	tjs_uint16 attrib = 0xFFFF;
+};
+
+static void TVPStoragesStat(const std::string & path, TVPStoragesFileInfo & info)
+{
+#ifndef _WIN32
+	struct stat st;
+	if(stat(path.c_str(), &st) != 0) return;
+	info.ok = true;
+	info.isdir = S_ISDIR(st.st_mode) != 0;
+	if(S_ISREG(st.st_mode)) info.size = (tjs_int64)st.st_size;
+	info.mtime = (tjs_int64)st.st_mtime;
+	info.ctime = (tjs_int64)st.st_ctime;
+	info.atime = (tjs_int64)st.st_atime;
+	info.attrib = 0;
+	if(info.isdir) info.attrib |= 0x10;                       // FILE_ATTRIBUTE_DIRECTORY
+	if(access(path.c_str(), W_OK) != 0) info.attrib |= 0x01;   // FILE_ATTRIBUTE_READONLY
+#else
+	(void)path; (void)info;
+#endif
+}
+
 static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
 {
 	iTJSDispatch2 * dict = TJSCreateDictionaryObject();
 	if(!dict) return nullptr;
 
-	if(want_size)
+	ttstr placed = TVPGetPlacedPath(name);
+	std::string path8;
+	const bool local = !placed.IsEmpty() && TVPStoragesLocalPath(placed, path8);
+
+	if(local)
 	{
-		ttstr path = TVPGetPlacedPath(name);
-		if(!path.IsEmpty())
+		TVPStoragesFileInfo info;
+		TVPStoragesStat(path8, info);
+		if(want_size && !info.isdir)
 		{
-			tTJSBinaryStream * in = nullptr;
-			try
-			{
-				in = TVPCreateBinaryStreamForRead(path, TJS_W(""));
-			}
-			catch(...)
-			{
-				in = nullptr;
-			}
-			if(in)
-			{
-				tTJSVariant size((tjs_int64)in->GetSize());
-				dict->PropSet(TJS_MEMBERENSURE, TJS_W("size"), nullptr, &size, dict);
-				delete in;
-			}
+			// The reference stats the file; a stat failure reports 0, which is
+			// what a title sees when the name does not resolve.
+			tTJSVariant size(info.ok ? info.size : (tjs_int64)0);
+			dict->PropSet(TJS_MEMBERENSURE, TJS_W("size"), nullptr, &size, dict);
+		}
+		tTJSVariant mtime, ctime, atime;
+		TVPStoragesStoreDate(mtime, info.mtime);
+		TVPStoragesStoreDate(ctime, info.ctime);
+		TVPStoragesStoreDate(atime, info.atime);
+		dict->PropSet(TJS_MEMBERENSURE, TJS_W("mtime"), nullptr, &mtime, dict);
+		dict->PropSet(TJS_MEMBERENSURE, TJS_W("ctime"), nullptr, &ctime, dict);
+		dict->PropSet(TJS_MEMBERENSURE, TJS_W("atime"), nullptr, &atime, dict);
+	}
+	else if(want_size && !placed.IsEmpty())
+	{
+		// Archive member: the reference reports only its size, from the stream.
+		tTJSBinaryStream * in = nullptr;
+		try
+		{
+			in = TVPCreateBinaryStreamForRead(placed, TJS_W(""));
+		}
+		catch(...)
+		{
+			in = nullptr;
+		}
+		if(in)
+		{
+			tTJSVariant size((tjs_int64)in->GetSize());
+			dict->PropSet(TJS_MEMBERENSURE, TJS_W("size"), nullptr, &size, dict);
+			delete in;
 		}
 	}
 
-	// Key set matches the reference even though the values stay empty (see
-	// above): a title that probes typeof(dict.mtime) sees the same "undefined"
-	// it would see on the reference's SDL2 build.
-	tTJSVariant none;
-	dict->PropSet(TJS_MEMBERENSURE, TJS_W("mtime"), nullptr, &none, dict);
-	dict->PropSet(TJS_MEMBERENSURE, TJS_W("ctime"), nullptr, &none, dict);
-	dict->PropSet(TJS_MEMBERENSURE, TJS_W("atime"), nullptr, &none, dict);
-
 	return dict;
+}
+
+static bool TVPStoragesDeleteFile(const ttstr & file)
+{
+	ttstr placed = TVPGetPlacedPath(file);
+	if(placed.IsEmpty()) return false;
+	std::string path8;
+	if(!TVPStoragesLocalPath(placed, path8)) return false; // in-archive: not deletable
+#ifndef _WIN32
+	if(unlink(path8.c_str()) != 0)
+	{
+		TVPAddLog(ttstr(TJS_W("deleteFile : ")) + placed + TJS_W("Failed"));
+		return false;
+	}
+	TVPClearStorageCaches();
+	return true;
+#else
+	return false;
+#endif
+}
+
+static bool TVPStoragesCopyFile(const ttstr & from, const ttstr & to)
+{
+	try
+	{
+		ttstr src = TVPGetPlacedPath(from);
+		if(src.IsEmpty()) return false;
+		ttstr dst = TVPNormalizeStorageName(to);
+		std::string dst8;
+		if(!TVPStoragesLocalPath(dst, dst8)) return false;
+
+		tTJSBinaryStream * in = TVPCreateBinaryStreamForRead(src, TJS_W(""));
+		if(!in) return false;
+		tTJSBinaryStream * out = nullptr;
+		try
+		{
+			out = TVPCreateBinaryStreamForWrite(dst, TJS_W(""));
+		}
+		catch(...)
+		{
+			delete in;
+			throw;
+		}
+		if(!out)
+		{
+			delete in;
+			return false;
+		}
+		tjs_uint8 buffer[1024 * 16];
+		tjs_int32 size;
+		while((size = in->Read(buffer, sizeof buffer)) > 0)
+		{
+			out->Write(buffer, size);
+		}
+		delete out;
+		delete in;
+		TVPClearStorageCaches();
+		return true;
+	}
+	catch(...)
+	{
+		return false;
+	}
+}
+
+// dirlist / dirlistEx share everything but what they put in the array: names
+// (directories with a trailing '/') versus %[name, size, attrib, times].
+static tTJSVariant TVPStoragesDirList(const ttstr & dir, bool with_info)
+{
+	ttstr d = TVPNormalizeStorageName(dir);
+	if(d.GetLastChar() != TJS_W('/'))
+		TVPThrowExceptionMessage(TJS_W("'/' must be specified at the end of given directory name."));
+
+	iTJSDispatch2 * array = TJSCreateArrayObject();
+	tTJSVariant result(array, array);
+	if(array) array->Release();
+
+	std::string path8;
+	if(!TVPStoragesLocalPath(d, path8)) return result;
+
+#ifndef _WIN32
+	DIR * dp = opendir(path8.c_str());
+	if(!dp) TVPThrowExceptionMessage(TJS_W("Directory not found."));
+	tjs_int count = 0;
+	while(struct dirent * ent = readdir(dp))
+	{
+		const char * name = ent->d_name;
+		if(strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
+
+		TVPStoragesFileInfo info;
+		TVPStoragesStat(path8 + name, info);
+		if(with_info)
+		{
+			iTJSDispatch2 * dict = TJSCreateDictionaryObject();
+			if(dict)
+			{
+				tjs_string wname;
+				TVPUtf8ToUtf16(wname, std::string(name));
+				ttstr entry_name(wname);
+				tTJSVariant vname(entry_name);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("name"), nullptr, &vname, dict);
+				// size only for a regular file, as the reference does
+				tTJSVariant vsize(info.isdir ? (tjs_int64)0 : info.size);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("size"), nullptr, &vsize, dict);
+				tTJSVariant vattr((tjs_int32)info.attrib);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("attrib"), nullptr, &vattr, dict);
+				tTJSVariant mtime, ctime, atime;
+				TVPStoragesStoreDate(mtime, info.mtime);
+				TVPStoragesStoreDate(ctime, info.ctime);
+				TVPStoragesStoreDate(atime, info.atime);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("mtime"), nullptr, &mtime, dict);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("ctime"), nullptr, &ctime, dict);
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("atime"), nullptr, &atime, dict);
+				tTJSVariant entry(dict, dict);
+				array->PropSetByNum(0, count, &entry, array);
+				dict->Release();
+				count++;
+			}
+		}
+		else
+		{
+			tjs_string wname;
+			TVPUtf8ToUtf16(wname, std::string(name));
+			ttstr entry_name(wname);
+			if(info.isdir) entry_name += TJS_W("/");
+			tTJSVariant ventry(entry_name);
+			array->PropSetByNum(0, count, &ventry, array);
+			count++;
+		}
+	}
+	closedir(dp);
+#else
+	(void)with_info;
+#endif
+	return result;
 }
 //---------------------------------------------------------------------------
 tjs_uint32 tTJSNC_Storages::ClassID = -1;
@@ -2387,6 +2628,37 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getTime) {
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getTime )
+//----------------------------------------------------------------------
+// The save-screen half of the same plugin (see the notes above).
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/deleteFile) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	if( result ) *result = TVPStoragesDeleteFile( *param[0] );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/deleteFile )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/copyFile) {
+	if( numparams < 2 ) return TJS_E_BADPARAMCOUNT;
+	// The reference's copyFile takes two arguments; KAG titles call it with a
+	// third (failIfExist) that this port ignores, like the plugin would.
+	if( result ) *result = TVPStoragesCopyFile( *param[0], *param[1] );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/copyFile )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirlist) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	if( result ) *result = TVPStoragesDirList( *param[0], false );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/dirlist )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirlistEx) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	if( result ) *result = TVPStoragesDirList( *param[0], true );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/dirlistEx )
 //----------------------------------------------------------------------
 	TJS_END_NATIVE_MEMBERS
 }
