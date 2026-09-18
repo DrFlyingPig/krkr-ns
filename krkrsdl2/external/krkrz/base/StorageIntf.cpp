@@ -1988,6 +1988,25 @@ static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
 	return dict;
 }
 
+// fsdev cannot address a path that carries a leading slash in front of a
+// device spec ("/sdmc:/...") and answers ENODEV for it, so the save screen's
+// delete reached unlink and failed there with the file still in place.  The
+// storage layer normalizes exactly this for every file it opens (see
+// StorageImpl's note), so do the same before handing a path to the C library.
+static ttstr TVPStoragesNativePath(const ttstr & name)
+{
+	ttstr p = name;
+	if(!p.IsEmpty() && p.c_str()[0] == TJS_W('/'))
+	{
+		const tjs_char * s = p.c_str() + 1;
+		const tjs_char * q = s;
+		while(*q && ((*q >= TJS_W('a') && *q <= TJS_W('z')) ||
+		             (*q >= TJS_W('A') && *q <= TJS_W('Z')))) q++;
+		if(*q == TJS_W(':')) p = ttstr(s);
+	}
+	return p;
+}
+
 static bool TVPStoragesDeleteFile(const ttstr & file)
 {
 	ttstr placed = TVPStoragesPlacedName(file);
@@ -1997,20 +2016,22 @@ static bool TVPStoragesDeleteFile(const ttstr & file)
 		krkrns_utf8_of_path(placed).c_str());
 	if(placed.IsEmpty()) return false;
 	// A name inside an archive has no local form and cannot be deleted.
+	ttstr local = placed;
 	try
 	{
-		TVPGetLocalName(placed);
+		TVPGetLocalName(local); // in-place: turns a storage name into a local one
 	}
 	catch(...)
 	{
 		KRKRNS_LOG("[fstat] deleteFile: no local form for %s", krkrns_utf8_of_path(placed).c_str());
 		return false;
 	}
-	tjs_string wide(placed.c_str());
+	ttstr native = TVPStoragesNativePath(local);
+	tjs_string wide(native.c_str());
 	std::string path8;
 	if(!TVPUtf16ToUtf8(path8, wide))
 	{
-		KRKRNS_LOG("[fstat] deleteFile: cannot convert %s", krkrns_utf8_of_path(placed).c_str());
+		KRKRNS_LOG("[fstat] deleteFile: cannot convert %s", krkrns_utf8_of_path(native).c_str());
 		return false;
 	}
 	if(unlink(path8.c_str()) != 0)
