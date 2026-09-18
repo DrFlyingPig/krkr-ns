@@ -2665,6 +2665,26 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirlistEx) {
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/dirlistEx )
 //----------------------------------------------------------------------
+// kirikiroid2.dll publishes these two on Storages, and Chinese localisations
+// call Storages.setTextEncoding("gbk") from patch.tjs before anything else
+// runs; without the member the whole launch aborts on
+// "Member \"setTextEncoding\" does not exist".  The encoding is handed to both
+// the script reader and the default text-stream reader, and TextStream.cpp's
+// probe order honours it (its GBK branch).
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/setTextEncoding) {
+	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	TVPSetScriptTextEncoding(*param[0]);
+	TVPSetDefaultReadEncoding(*param[0]);
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/setTextEncoding )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getTextEncoding) {
+	if(result) *result = TVPGetScriptTextEncoding();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getTextEncoding )
+//----------------------------------------------------------------------
 	TJS_END_NATIVE_MEMBERS
 }
 //---------------------------------------------------------------------------

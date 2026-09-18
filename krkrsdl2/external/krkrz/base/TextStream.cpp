@@ -87,12 +87,42 @@ static size_t TVPDecodeMbcsAs(const char * in, tjs_char * out, tTVPMbcsEncoding 
 	}
 }
 
+// Kirikiroid2's kirikiroid2.dll publishes Storages.setTextEncoding, and the
+// Chinese localisations call it with "gbk" before anything else.  Names are
+// matched case-insensitively (the callers write "gbk", our own default is the
+// upper-case spelling) and the GBK family aliases are accepted.
+static bool TVPMbcsIsGBKName(const ttstr & encoding)
+{
+	const tjs_char * s = encoding.c_str();
+	if(!s || !*s) return false;
+	tjs_char buf[16];
+	int i = 0;
+	for(; s[i] && i < 15; i++)
+	{
+		tjs_char c = s[i];
+		if(c >= TJS_W('A') && c <= TJS_W('Z')) c = (tjs_char)(c - TJS_W('A') + TJS_W('a'));
+		buf[i] = c;
+	}
+	buf[i] = 0;
+	ttstr lower(buf);
+	return lower == TJS_W("gbk") || lower == TJS_W("gb2312") ||
+	       lower == TJS_W("cp936") || lower == TJS_W("ms936") ||
+	       lower == TJS_W("gb18030") || lower == TJS_W("936");
+}
+
 static size_t TVPDecodeMbcs(const char * in, tjs_char * out, const ttstr & encoding)
 {
 	tTVPMbcsEncoding order[3] = { mbcsUTF8, mbcsShiftJIS, mbcsGBK };
 	if(encoding == TJS_W("Shift_JIS"))
 	{
 		order[0] = mbcsShiftJIS;
+		order[1] = mbcsUTF8;
+	}
+	else if(TVPMbcsIsGBKName(encoding))
+	{
+		// Shift-JIS accepts nearly every GBK byte pair, so without putting GBK
+		// first the probe decodes a Chinese localisation as Shift-JIS mojibake.
+		order[0] = mbcsGBK;
 		order[1] = mbcsUTF8;
 	}
 	for(int i = 0; i < 3; i++)

@@ -130,6 +130,12 @@ static std::string krkrns_utf8_of(const ttstr &s, tjs_uint maxlen)
 tTJS *TVPScriptEngine = NULL;
 ttstr TVPStartupScriptName(TJS_W("startup.tjs"));
 static ttstr TVPScriptTextEncoding(TJS_W("UTF-8"));
+
+// Accessors for the other translation units (the Storages.setTextEncoding
+// members live in StorageIntf.cpp; see TextStream.cpp for how the encoding is
+// honoured when probing a BOM-less text asset).
+void TVPSetScriptTextEncoding(const ttstr & encoding) { TVPScriptTextEncoding = encoding; }
+const ttstr & TVPGetScriptTextEncoding() { return TVPScriptTextEncoding; }
 //---------------------------------------------------------------------------
 
 
@@ -338,9 +344,28 @@ void TVPInitScriptEngine()
 #if 1
 	dsp = new tTJSNC_BasicDrawDevice();
 	val = tTJSVariant(dsp);
+	// Kirikiroid2 publishes the very same class object under the name
+	// Window.PassThroughDrawDevice ("compatible for old version kr2") and its
+	// dt* drawer constants ride along on that shared object; KAGEX's
+	// override.tjs reads both (Window.PassThroughDrawDevice, and the constants
+	// through a `with` block).  Mirror it here.
+	{
+		static const struct { const tjs_char * name; tjs_int value; } dtEnums[] = {
+			{ TJS_W("dtNone"), 0 }, { TJS_W("dtDrawDib"), 1 }, { TJS_W("dtDBGDI"), 2 },
+			{ TJS_W("dtDBDD"), 3 }, { TJS_W("dtDBD3D"), 4 },
+		};
+		for(int i = 0; i < 5; i++)
+		{
+			tTJSVariant enumValue((tjs_int64)dtEnums[i].value);
+			dsp->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|TJS_STATICMEMBER,
+				dtEnums[i].name, NULL, &enumValue, dsp);
+		}
+	}
 	dsp->Release();
 	windowclass->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|TJS_STATICMEMBER,
 		TJS_W("BasicDrawDevice"), NULL, &val, windowclass);
+	windowclass->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|TJS_STATICMEMBER,
+		TJS_W("PassThroughDrawDevice"), NULL, &val, windowclass); // compatible for old version kr2
 #endif
 	// MenuItem is deliberately NOT registered as a native class.
 	//

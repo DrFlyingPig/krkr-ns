@@ -1012,6 +1012,24 @@ TJS_BEGIN_NATIVE_PROP_DECL(interface)
 }
 TJS_END_NATIVE_PROP_DECL(interface)
 //----------------------------------------------------------------------
+// Kirikiroid2's draw device exposes the drawer type, and KAGEX's override.tjs
+// reads it as `win.drawDevice.drawer` to decide how it patches menu drawing.
+// This port has no drawer backends (the compose/upload path is the only one),
+// so report dtNone -- the "no drawer" case, which leaves the drawer-specific
+// patching idle.
+TJS_BEGIN_NATIVE_PROP_DECL(drawer)
+{
+	TJS_BEGIN_NATIVE_PROP_GETTER
+	{
+		*result = (tjs_int64)0; // dtNone
+		return TJS_S_OK;
+	}
+	TJS_END_NATIVE_PROP_GETTER
+
+	TJS_DENY_NATIVE_PROP_SETTER
+}
+TJS_END_NATIVE_PROP_DECL(drawer)
+//----------------------------------------------------------------------
 	TJS_END_NATIVE_MEMBERS
 }
 //---------------------------------------------------------------------------
