@@ -19,6 +19,7 @@
 #include "tjsArray.h"
 #include "KrkrNSLog.h"
 #include "LayerIntf.h"
+#include "WindowIntf.h"
 #include "MsgIntf.h"
 #include "LayerBitmapIntf.h"
 #include "LayerTreeOwner.h"
@@ -2699,6 +2700,28 @@ tjs_int tTJSNI_BaseLayer::GetProvincePixel(tjs_int x, tjs_int y) const
 		y >= (tjs_int)ProvinceImage->GetHeight()) return 0;
 
 	return ProvinceImage->GetPoint(x, y);
+}
+//---------------------------------------------------------------------------
+tjs_int tTJSNI_BaseLayer::GetProvincePixelAtCursor() const
+{
+	// Classic kirikiri2 semantics for the no-argument form: read the province
+	// at the mouse cursor.  KAG map hit tests call it that way -- e.g. the
+	// confirm dialog of v1_KR_Xmoe_晴菜花 does "MapRes = BaseBord.GetProvincePixel()"
+	// -- and registering only the two-argument form made that call fail, so
+	// the dialog's buttons answered nothing at all.
+	iTVPLayerTreeOwner * owner = GetLayerTreeOwner();
+	if(!owner) return 0;
+	// The cursor position lives on the window interface, which a layer reaches
+	// through its layer-tree owner.
+	tTJSNI_BaseWindow * window = dynamic_cast<tTJSNI_BaseWindow *>(owner);
+	if(!window) return 0;
+	tjs_int x = 0, y = 0;
+	static_cast<iTVPWindow *>(window)->GetCursorPos(x, y);
+	// The owner reports primary-layer coordinates; the province image belongs
+	// to this layer, so drop this layer's own offset.
+	x -= ImageLeft;
+	y -= ImageTop;
+	return GetProvincePixel(x, y);
 }
 //---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::SetProvincePixel(tjs_int x, tjs_int y, tjs_int n)
@@ -7141,9 +7164,17 @@ TJS_END_NATIVE_METHOD_DECL(/*func. name*/setMaskPixel)
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getProvincePixel)
 {
 	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Layer);
-	if(numparams < 2) return TJS_E_BADPARAMCOUNT;
-	if(result) *result = _this->GetProvincePixel(*param[0], *param[1]);
-	return TJS_S_OK;
+	if(numparams >= 2)
+	{
+		if(result) *result = _this->GetProvincePixel(*param[0], *param[1]);
+		return TJS_S_OK;
+	}
+	if(numparams == 0)
+	{
+		if(result) *result = _this->GetProvincePixelAtCursor();
+		return TJS_S_OK;
+	}
+	return TJS_E_BADPARAMCOUNT;
 }
 TJS_END_NATIVE_METHOD_DECL(/*func. name*/getProvincePixel)
 //----------------------------------------------------------------------

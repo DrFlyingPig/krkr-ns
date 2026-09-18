@@ -476,6 +476,8 @@ public:
 	tjs_int GetMaskPixel(tjs_int x, tjs_int y) const;
 	void SetMaskPixel(tjs_int x, tjs_int y, tjs_int mask);
 	tjs_int GetProvincePixel(tjs_int x, tjs_int y) const;
+	// kirikiri2's no-argument form: the province pixel under the cursor.
+	tjs_int GetProvincePixelAtCursor() const;
 	void SetProvincePixel(tjs_int x, tjs_int y, tjs_int n);
 
 	const void * GetMainImagePixelBuffer() const;
