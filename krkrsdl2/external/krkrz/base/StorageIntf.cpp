@@ -18,6 +18,7 @@
 #include <vector>
 #include "StorageIntf.h"
 #include "BinaryStream.h"
+#include <errno.h>
 #include "CharacterSet.h"
 #include "tjsUtils.h"
 #include "MsgIntf.h"
@@ -1939,12 +1940,24 @@ static void TVPStoragesStoreDate(tTJSVariant & store, tjs_int64 seconds)
 	obj->Release();
 }
 
+// Resolve a storage name the way the engine's own file paths do: the auto-path
+// table first, then the file media -- which in game mode resolves a bare name
+// ("savedata019.bmp", the shape KAG hands to these members) under the game
+// directory.  Those bare names are not in the auto-path table, so asking the
+// table alone silently resolves to nothing.
+static ttstr TVPStoragesPlacedName(const ttstr & name)
+{
+	ttstr placed = TVPGetPlacedPath(name);
+	if(placed.IsEmpty()) placed = TVPNormalizeStorageName(name);
+	return placed;
+}
+
 static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
 {
 	iTJSDispatch2 * dict = TJSCreateDictionaryObject();
 	if(!dict) return nullptr;
 
-	ttstr placed = TVPGetPlacedPath(name);
+	ttstr placed = TVPStoragesPlacedName(name);
 	if(!placed.IsEmpty() && want_size)
 	{
 		tTJSBinaryStream * in = nullptr;
@@ -1977,7 +1990,7 @@ static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
 
 static bool TVPStoragesDeleteFile(const ttstr & file)
 {
-	ttstr placed = TVPGetPlacedPath(file);
+	ttstr placed = TVPStoragesPlacedName(file);
 	if(placed.IsEmpty()) return false;
 	// A name inside an archive has no local form and cannot be deleted.
 	try
@@ -1986,16 +1999,24 @@ static bool TVPStoragesDeleteFile(const ttstr & file)
 	}
 	catch(...)
 	{
+		KRKRNS_LOG("[fstat] deleteFile: no local form for %s", krkrns_utf8_of_path(placed).c_str());
 		return false;
 	}
 	tjs_string wide(placed.c_str());
 	std::string path8;
-	if(!TVPUtf16ToUtf8(path8, wide)) return false;
+	if(!TVPUtf16ToUtf8(path8, wide))
+	{
+		KRKRNS_LOG("[fstat] deleteFile: cannot convert %s", krkrns_utf8_of_path(placed).c_str());
+		return false;
+	}
 	if(unlink(path8.c_str()) != 0)
 	{
+		const int err = errno;
+		KRKRNS_LOG("[fstat] deleteFile: unlink(%s) failed, errno=%d", path8.c_str(), err);
 		TVPAddLog(ttstr(TJS_W("deleteFile : ")) + placed + TJS_W("Failed"));
 		return false;
 	}
+	KRKRNS_LOG("[fstat] deleteFile: removed %s", path8.c_str());
 	TVPClearStorageCaches();
 	return true;
 }
@@ -2004,7 +2025,7 @@ static bool TVPStoragesCopyFile(const ttstr & from, const ttstr & to)
 {
 	try
 	{
-		ttstr src = TVPGetPlacedPath(from);
+		ttstr src = TVPStoragesPlacedName(from);
 		if(src.IsEmpty()) return false;
 		ttstr dst = TVPNormalizeStorageName(to);
 
