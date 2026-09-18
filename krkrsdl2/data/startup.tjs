@@ -1186,14 +1186,23 @@ function runAction(action) {
 
 function pageRail(delta) {
     if (games.count == 0) return;
-    var index = selectedFolder + delta * VISIBLE_ROWS;
-    // A forward page step that overshoots the end must land ON the last
-    // folder.  selectFolder() wraps out-of-range values, so the old code
-    // stepped from index 6 to 12 (= count for 8 folders), wrapped to 0 and
-    // reset the view to the top: the last folder could never be shown by
-    // paging, and the list looked like it was missing an entry.  Backward
-    // paging keeps its wrap (top -> bottom) because it always lands in range.
-    if (delta > 0 && index >= games.count) index = games.count - 1;
+    // Page the VIEW by a whole page: the window's top moves VISIBLE_ROWS and
+    // the selection lands on the new page (its first row going forward, its
+    // last row going back).  The previous version moved only the SELECTION by
+    // VISIBLE_ROWS and let keepSelectionVisible() nudge the window just far
+    // enough to reveal it, so one page step brought in a single new game --
+    // with 9 games and 6 rows that read as 1-6 -> 2-7 -> 4-9, and the tail of
+    // the library never showed up in one step.
+    var maxTop = games.count - VISIBLE_ROWS;
+    if (maxTop < 0) maxTop = 0;
+    var top = listTop + delta * VISIBLE_ROWS;
+    if (top > maxTop) top = maxTop;
+    if (top < 0) top = 0;
+    if (top == listTop) return; // the whole list already fits: nothing to page
+    listTop = top;
+    var index = (delta > 0) ? top : top + VISIBLE_ROWS - 1;
+    if (index >= games.count) index = games.count - 1;
+    if (index < 0) index = 0;
     selectFolder(index);
     redraw();
 }
