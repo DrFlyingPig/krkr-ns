@@ -17,6 +17,7 @@
 #include <set>
 #include <vector>
 #include "StorageIntf.h"
+#include "BinaryStream.h"
 #include "tjsUtils.h"
 #include "MsgIntf.h"
 #include "EventIntf.h"
@@ -1876,6 +1877,66 @@ void TVPClearStorageCaches()
 //---------------------------------------------------------------------------
 // tTJSNC_Storages
 //---------------------------------------------------------------------------
+// Storages.fstat / Storages.getTime
+//
+// Ported from krkrsdl3's plugins/fstat.cpp, the ncbind plugin that kirikiri
+// exposes as fstat.dll.  Titles use it to learn a file's size -- a KAG BASE ADV
+// SYSTEM title (v1_KR_Xmoe_晴菜花) calls it unconditionally while recording a
+// jump point, so its absence threw "Member \"fstat\" does not exist" inside the
+// message-draw routine and left the game wedged.
+//
+// Faithful to the reference for the read-only part it exposes:
+//   * a name that resolves into an archive reports only `size` (the reference
+//     opens the member and uses its stream size);
+//   * a local name reports `size` too -- the reference stats the file instead,
+//     which yields the same number for a regular file and, like this, no size
+//     for a directory or a name that does not resolve;
+//   * `mtime` / `ctime` / `atime` are present but empty, exactly as the
+//     reference behaves on its SDL2 target (its platform layer reports no
+//     timestamps; only its OHOS port fills them).
+//
+// The plugin's mutating half (setTime, exportFile, deleteFile, dirtree, md5,
+// temporary files) is deliberately not part of this port: nothing needs it yet,
+// and those are the calls that can touch a player's files.
+static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
+{
+	iTJSDispatch2 * dict = TJSCreateDictionaryObject();
+	if(!dict) return nullptr;
+
+	if(want_size)
+	{
+		ttstr path = TVPGetPlacedPath(name);
+		if(!path.IsEmpty())
+		{
+			tTJSBinaryStream * in = nullptr;
+			try
+			{
+				in = TVPCreateBinaryStreamForRead(path, TJS_W(""));
+			}
+			catch(...)
+			{
+				in = nullptr;
+			}
+			if(in)
+			{
+				tTJSVariant size((tjs_int64)in->GetSize());
+				dict->PropSet(TJS_MEMBERENSURE, TJS_W("size"), nullptr, &size, dict);
+				delete in;
+			}
+		}
+	}
+
+	// Key set matches the reference even though the values stay empty (see
+	// above): a title that probes typeof(dict.mtime) sees the same "undefined"
+	// it would see on the reference's SDL2 build.
+	tTJSVariant none;
+	dict->PropSet(TJS_MEMBERENSURE, TJS_W("mtime"), nullptr, &none, dict);
+	dict->PropSet(TJS_MEMBERENSURE, TJS_W("ctime"), nullptr, &none, dict);
+	dict->PropSet(TJS_MEMBERENSURE, TJS_W("atime"), nullptr, &none, dict);
+
+	return dict;
+}
+//---------------------------------------------------------------------------
 tjs_uint32 tTJSNC_Storages::ClassID = -1;
 tTJSNC_Storages::tTJSNC_Storages() : inherited(TJS_W("Storages"))
 {
@@ -2297,6 +2358,35 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getFileProperty) {
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getFileProperty )
+//----------------------------------------------------------------------
+// See TVPStoragesFstatDict above: the read-only half of fstat.dll.
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/fstat) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+
+	if( result ) {
+		iTJSDispatch2* dic = TVPStoragesFstatDict( *param[0], true );
+		if( dic ) {
+			*result = tTJSVariant( dic, dic );
+			dic->Release();
+		}
+	}
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/fstat )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getTime) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+
+	if( result ) {
+		iTJSDispatch2* dic = TVPStoragesFstatDict( *param[0], false );
+		if( dic ) {
+			*result = tTJSVariant( dic, dic );
+			dic->Release();
+		}
+	}
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getTime )
 //----------------------------------------------------------------------
 	TJS_END_NATIVE_MEMBERS
 }

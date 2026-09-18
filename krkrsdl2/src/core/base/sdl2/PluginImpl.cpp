@@ -575,7 +575,12 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("getsample.dll") ||
 		short_name == TJS_W("wutcwf.dll") ||
 		short_name == TJS_W("win32dialog.dll") ||
-		short_name == TJS_W("savestruct.dll"))
+		short_name == TJS_W("savestruct.dll") ||
+		// fstat.dll: the read-only half of krkrsdl3's plugins/fstat.cpp is
+		// implemented on the Storages class itself (see TVPStoragesFstatDict in
+		// StorageIntf.cpp), so the probe answer has to match what a title gets
+		// when it links the real plugin on desktop.
+		short_name == TJS_W("fstat.dll"))
 		return true;
 	return TVPHasSwitchBuiltin(short_name);
 }
