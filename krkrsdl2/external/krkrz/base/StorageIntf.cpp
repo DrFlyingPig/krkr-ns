@@ -1991,6 +1991,10 @@ static iTJSDispatch2 * TVPStoragesFstatDict(const ttstr & name, bool want_size)
 static bool TVPStoragesDeleteFile(const ttstr & file)
 {
 	ttstr placed = TVPStoragesPlacedName(file);
+	// Entry log: a save screen that reports "nothing happened" has to be
+	// distinguishable from one that never called this at all.
+	KRKRNS_LOG("[fstat] deleteFile('%s') -> '%s'", krkrns_utf8_of_path(file).c_str(),
+		krkrns_utf8_of_path(placed).c_str());
 	if(placed.IsEmpty()) return false;
 	// A name inside an archive has no local form and cannot be deleted.
 	try
@@ -2026,6 +2030,8 @@ static bool TVPStoragesCopyFile(const ttstr & from, const ttstr & to)
 	try
 	{
 		ttstr src = TVPStoragesPlacedName(from);
+		KRKRNS_LOG("[fstat] copyFile('%s' -> '%s')", krkrns_utf8_of_path(from).c_str(),
+			krkrns_utf8_of_path(to).c_str());
 		if(src.IsEmpty()) return false;
 		ttstr dst = TVPNormalizeStorageName(to);
 
@@ -2094,6 +2100,9 @@ static tTJSVariant TVPStoragesDirList(const ttstr & dir, bool with_info)
 		lister.names.clear();
 	}
 	const std::vector<ttstr> & names = lister.names;
+
+	KRKRNS_LOG("[fstat] dirlist%s('%s') -> %u name(s)", with_info ? "Ex" : "",
+		krkrns_utf8_of_path(d).c_str(), (unsigned)names.size());
 
 	tjs_int count = 0;
 	for(size_t i = 0; i < names.size(); i++)
