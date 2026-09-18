@@ -7171,18 +7171,20 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getProvincePixel)
 		tjs_int hit = _this->GetProvincePixel(*param[0], *param[1]);
 		// Probe: this two-argument form is the one the KAGEX scripts really
 		// call -- BaseLayer.GetProvincePixel() passes the cursor-derived point
-		// on to getProvincePixel(x, y) -- so a run that never logs this line
-		// means the hit test was never asked, while a line answering 0 for a
-		// point inside the province image means the province image itself is
-		// what is wrong.
-		static int probeCount = 0;
-		if((++probeCount % 30) == 0)
+		// on to getProvincePixel(x, y) -- and it is the value the game's click
+		// handlers decide with.  Log every change of the triple plus a slow
+		// heartbeat, so a run shows both what the hit test is asked and what it
+		// answers at the moment a button is pressed.
+		static int last_x = -100000, last_y = -100000, last_hit = -100000, unchanged = 0;
+		if((int)*param[0] != last_x || (int)*param[1] != last_y || (int)hit != last_hit || unchanged >= 240)
 		{
-			tTVPBaseBitmap * prov = _this->GetProvinceImage();
-			KRKRNS_LOG("[province] xy=(%d,%d) -> %d (province=%dx%d)",
-				(int)*param[0], (int)*param[1], (int)hit,
-				prov ? (int)prov->GetWidth() : -1, prov ? (int)prov->GetHeight() : -1);
+			last_x = (int)*param[0];
+			last_y = (int)*param[1];
+			last_hit = (int)hit;
+			unchanged = 0;
+			KRKRNS_LOG("[province] xy=(%d,%d) -> %d", last_x, last_y, last_hit);
 		}
+		else unchanged++;
 		if(result) *result = hit;
 		return TJS_S_OK;
 	}

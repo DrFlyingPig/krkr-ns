@@ -302,6 +302,23 @@ if (typeof(System.inputString) == "undefined") {
 	} incontextof global;
 }
 
+// The save screen's delete needs a TJS-level property on the class object to
+// reach the engine.  Without it the call the game makes silently does nothing:
+// the dialog answers, the page refreshes, no file is deleted and no error is
+// raised anywhere (checked against the same build with and without this
+// wrapper -- with it, savedata019.bmp left the disk, without it the engine's
+// deleteFile entry log never fired).  So the member is re-published as a plain
+// TJS function that forwards to the native one, and every call is logged.
+if (typeof(Storages.deleteFile) != "undefined" && typeof(global.__krkrns_deletefile_wrapped) == "undefined")
+{
+	global.__krkrns_deletefile_wrapped = true;
+	global.__krkrns_deletefile_native = Storages.deleteFile;
+	&Storages.deleteFile = function (name) {
+		System.inform("Storages.deleteFile(" + name + ")");
+		return global.__krkrns_deletefile_native(name);
+	} incontextof global;
+}
+
 // Self-test (temporary): prove the whole delete path on a scratch file the
 // test harness drops next to the launcher, so the fix can be checked without
 // clicking through the save screen.  System.inform is a log channel here.
