@@ -1923,14 +1923,33 @@ static bool TVPStoragesLocalPath(const ttstr & name, std::string & out)
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dirent.h>
-// A storage name in the encoding the platform's file calls want (UTF-8 here).
-// `out` receives a path only when the name has a local form: an archive member
-// never does, which is exactly what the reference tests for.
+// A storage name as a path the platform's file calls can open (UTF-8 bytes
+// here).  `out` receives a path only when the name has a local form: an archive
+// member never does, which is exactly what the reference tests for.
+//
+// The media this port builds is the Win32 one, whose locally accessible name is
+// UNC-ish ("\\sdmc:/...").  The engine's own POSIX-side file layer drops that
+// prefix and normalizes separators before touching a path, so do the same:
+// otherwise stat/open/opendir get a name the filesystem cannot resolve, which
+// is what made dirlistEx report "Directory not found." for an existing folder.
 static bool TVPStoragesLocalPath(const ttstr & name, std::string & out)
 {
 	ttstr local = TVPGetLocallyAccessibleName(name);
 	if(local.IsEmpty()) return false;
-	tjs_string wide(local.c_str());
+
+	const tjs_char * ptr = local.c_str();
+	if(*ptr == TJS_W('.')) ptr++;
+	while((*ptr == TJS_W('/') || *ptr == TJS_W('\\')) &&
+	      (ptr[1] == TJS_W('/') || ptr[1] == TJS_W('\\'))) ptr++;
+	ttstr clean(ptr);
+	tjs_char * pp = clean.Independ();
+	while(*pp)
+	{
+		if(*pp == TJS_W('\\')) *pp = TJS_W('/');
+		pp++;
+	}
+
+	tjs_string wide(clean.c_str());
 	return TVPUtf16ToUtf8(out, wide);
 }
 #endif
