@@ -2717,6 +2717,8 @@ tjs_int tTJSNI_BaseLayer::GetProvincePixelAtCursor() const
 	if(!window) return 0;
 	tjs_int x = 0, y = 0;
 	static_cast<iTVPWindow *>(window)->GetCursorPos(x, y);
+	KRKRNS_LOG("[province] cursor=(%d,%d) offset=(%d,%d) province=%d",
+		(int)x, (int)y, (int)ImageLeft, (int)ImageTop, ProvinceImage ? 1 : 0);
 	// The owner reports primary-layer coordinates; the province image belongs
 	// to this layer, so drop this layer's own offset.
 	x -= ImageLeft;
@@ -7171,7 +7173,11 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getProvincePixel)
 	}
 	if(numparams == 0)
 	{
-		if(result) *result = _this->GetProvincePixelAtCursor();
+		// Probe: KAG map hit tests answer nothing when this returns 0, and a
+		// silent wrong answer is the hardest thing to see from a log.
+		tjs_int hit = _this->GetProvincePixelAtCursor();
+		KRKRNS_LOG("[province] cursor hit=%d (layer=%p)", (int)hit, (void *)_this);
+		if(result) *result = hit;
 		return TJS_S_OK;
 	}
 	return TJS_E_BADPARAMCOUNT;
