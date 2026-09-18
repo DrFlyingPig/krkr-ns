@@ -8,6 +8,14 @@
 
 ## 已应用补丁 (源码层)
 
+### P85: 启动器"入口归档"选择持久化（2026-09-18）
+
+- **背景**：汉化版常常是**独立归档**（如 `dtcn.xp3` 与原版 `data.xp3` 并列），入口要靠启动器的"启动文件"（X 键）手动选；而 `pickDefaultEntry` 每次扫描都按 `ENTRY_PREFERENCE` 重新推默认值，选择**不跨重启保留**，用户每次开机都要重选。
+- **修复**：引擎在 `krkrsdl2_prepare_xp3_game` 里把本次挂载的入口写进 `saves/<游戏目录>/entry.txt`；新增 `Storages.getPreferredGameEntry(folder)`（`StorageIntf.cpp` 原生静态成员，后端 `krkrsdl2_game_entry_preference` 在 `SDLApplication.cpp`）读回；启动器的交互路径、autocycle 测试路径统一走新的 `resolvedEntryIndex()`（**记忆的入口 → ENTRY_PREFERENCE → 第一个 xp3**），并在启动时逐目录打印 `[launcher] entry #<i> -> <file> (<remembered|default>)`（纯 ASCII，避免中文目录名在日志里被截断）。
+- **优先级不变**：入口仍是最后加入 auto-path 者（哈希表后加入者覆盖先加入者），因此入口归档的文件优先于同级资源包。
+- 验证（模拟器）：`[launcher] entry #9 -> dtcn.xp3 (remembered)` 且 `executing game startup: .../dtcn.xp3>startup.tjs`；`saves/*/entry.txt` 在多次启动后被正确写入。
+- **已知限制（不是本补丁的缺陷）**：`dtcn.xp3` 这类汉化包若把脚本放在**归档根**（`title.ks`/`config.tjs`）而游戏按 `scenario/*.ks`、`system/*.tjs` 请求，则只有恰好同名的 `startup.tjs`/`initialize.tjs` 会命中汉化包，其余仍从原版包读取 —— 需要在打包侧补齐 KAG 目录前缀，或由引擎新增"入口归档内 basename 回退"规则。
+
 ### P84: 汉化作品启动所需的两个 Kirikiroid2 API（Storages.setTextEncoding / Window.PassThroughDrawDevice）（2026-09-18）
 
 - **现象**：新加的汉化作品 `[kr][汉化] 蝶之毒 华之锁 特别篇`（Kirikiroid2 时代、xp3filter 加密）启动即被拦下：先是 `patch.tjs(90) Storages.setTextEncoding("gbk")` 抛 `Member "setTextEncoding" does not exist`；修掉后又在 `override.tjs(720)` 读 `global.Window.PassThroughDrawDevice` 抛 `Member "PassThroughDrawDevice" does not exist` → 引擎回启动器（用户看到的"亮个标题就闪退"）。
