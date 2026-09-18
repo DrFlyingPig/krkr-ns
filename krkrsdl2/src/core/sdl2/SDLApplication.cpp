@@ -4356,8 +4356,22 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 	// ended up answering no and no save was ever deleted.  Hold the click back
 	// until the game has had a frame with the new position; a click that lands
 	// where the cursor already was (an ordinary mouse) stays immediate.
-	if (!this->redispatchingPointer &&
-		(event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) &&
+	const bool isPointerButton = (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP);
+	if (isPointerButton)
+	{
+		// Probe: a click that does nothing is the hardest thing to read from a
+		// log, so record the position the game's per-frame logic has seen
+		// (frameStartMouse*) next to the one the click carries.
+		KRKRNS_LOG("[click] %s btn=%d pos=(%d,%d) gameCursor=(%d,%d)",
+			event.type == SDL_MOUSEBUTTONDOWN ? "down" : "up", (int)event.button.button,
+			(int)event.button.x, (int)event.button.y,
+			(int)this->frameStartMouseX, (int)this->frameStartMouseY);
+	}
+	// Marker sdmc:/switch/KRKR-ns/no-click-delay.txt disables the delay, so the
+	// behaviour can be told apart from a game's own problem in one run.
+	static const bool clickDelayDisabled =
+		TVPIsExistentStorage(ttstr(TJS_W("sdmc:/switch/KRKR-ns/no-click-delay.txt")));
+	if (!clickDelayDisabled && !this->redispatchingPointer && isPointerButton &&
 		(!this->deferredPointerButtons.empty() ||
 		 event.button.x != this->frameStartMouseX || event.button.y != this->frameStartMouseY))
 	{

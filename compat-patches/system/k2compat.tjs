@@ -286,5 +286,47 @@ Scripts.hasObjectKey = function(object, key) { return Dictionary.contains(object
 // equivalent archive-aware FreeType implementation as Font.addFont.
 System.addFont = function(storage) { return Font.addFont(storage); };
 
+// win32dialog.dll is unavailable on Switch, and the titles that use it ship
+// Kirikiroid2's TJS replacement inside the very layer these compat files stand
+// in for, so the call has to exist here.  KAG's data-comment editor called
+// System.inputString and died on "Member inputString does not exist": the
+// button next to "delete" on the save screen did nothing at all.  There is no
+// on-screen editor to type into yet, so hand back the stored comment and let
+// the caller write its page -- the comment stays as it was instead of the
+// whole action failing.  (The property-reference form is what TJS wants when
+// the target member lives on a class object.)
+if (typeof(System.inputString) == "undefined") {
+	&System.inputString = function (caption, prompt, initial) {
+		if (typeof(initial) == "undefined") return "";
+		return initial;
+	} incontextof global;
+}
+
+// Self-test (temporary): prove the whole delete path on a scratch file the
+// test harness drops next to the launcher, so the fix can be checked without
+// clicking through the save screen.  System.inform is a log channel here.
+if (typeof(global.__krkrns_diag_delete_probe) == "undefined")
+{
+	global.__krkrns_diag_delete_probe = true;
+	try
+	{
+		var probe = "file://sdmc:/switch/KRKR-ns/krkrns-delete-probe.bmp";
+		if (Storages.isExistentStorage(probe))
+		{
+			var ok = Storages.deleteFile(probe);
+			System.inform("KRKR-ns diag: delete probe -> " + ok
+				+ " exists_after=" + Storages.isExistentStorage(probe));
+		}
+		else
+		{
+			System.inform("KRKR-ns diag: delete probe file not present");
+		}
+	}
+	catch (e)
+	{
+		System.inform("KRKR-ns diag: delete probe threw: " + e.message);
+	}
+}
+
 
 } // __krkrns_compat_k2compat (install once per process)
