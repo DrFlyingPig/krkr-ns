@@ -8,6 +8,13 @@
 
 ## 已应用补丁 (源码层)
 
+### P84: 汉化作品启动所需的两个 Kirikiroid2 API（Storages.setTextEncoding / Window.PassThroughDrawDevice）（2026-09-18）
+
+- **现象**：新加的汉化作品 `[kr][汉化] 蝶之毒 华之锁 特别篇`（Kirikiroid2 时代、xp3filter 加密）启动即被拦下：先是 `patch.tjs(90) Storages.setTextEncoding("gbk")` 抛 `Member "setTextEncoding" does not exist`；修掉后又在 `override.tjs(720)` 读 `global.Window.PassThroughDrawDevice` 抛 `Member "PassThroughDrawDevice" does not exist` → 引擎回启动器（用户看到的"亮个标题就闪退"）。
+- **参照**：两个名字都来自 **kirikiroid2.dll**（社区私有插件，源码未公开），但 Kirikiroid2 引擎自身留有可循的挂点：`ScriptMgnIntf.cpp` 里 `Window.PassThroughDrawDevice` 就是与 `Window.BasicDrawDevice` **同一个类对象**的别名（原注释 `compatible for old version kr2`），`dt*` 常量挂在该共享对象上；文本侧 Kirikiroid2 只是把 encoding 传进文本读取链，而本移植的 `tTVPTextReadStream` 此前已具备 `mbcsGBK` 探测。
+- **修复**：①`Storages.setTextEncoding` / `getTextEncoding`（`StorageIntf.cpp`）= 同时设置脚本编码与默认文本流编码（经 `TextStream.h` 新增的 `TVPSetScriptTextEncoding` / `TVPGetScriptTextEncoding` 访问器落到 `ScriptMgnIntf.cpp` 的 `TVPScriptTextEncoding`）；②`TextStream.cpp` 的 BOM-less 探测对显式 GBK 请求（大小写不敏感，接受 gbk/gb2312/cp936/ms936/gb18030/936）改为 GBK 优先——Shift-JIS 几乎接受全部 GBK 字节对，不抢先就会把汉化脚本解成乱码；③`Window.PassThroughDrawDevice` 别名 + 五个 `dtNone..dtDBD3D` 只读常量（0..4，照 Kirikiroid2 枚举）；④设备实例补 `drawer` 属性：本移植没有 drawer 后端，返回 `dtNone`，让脚本里按 drawer 分支的菜单补丁空转而不是失败。
+- 验证（模拟器）：作品启动到自己的 800×600 画布、约 48fps，`Movie.tjs` / `GFX_Movie.tjs` 子系统加载正常（用户确认）。
+
 ### P83: 老 KAG 作品的影片（OP/logo）可播且播完不再闪退 — FFmpeg 子集缺 MPEG-PS + 音频排空越界（2026-09-18）
 
 - **现象**：KAGEX 作品的 `movie/logo.mpg`、`movie/opening.mpg` 不播放，日志 `[movie] avformat_open_input failed code=-1094995529 (Invalid data found)`，游戏随后抛 `Error in krmovie.dll : Invalid video size` 跳过影片；加入解码器后影片能播，但**播完立刻卡死闪退**。
