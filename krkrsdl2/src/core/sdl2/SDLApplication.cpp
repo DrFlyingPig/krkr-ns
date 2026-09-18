@@ -5183,6 +5183,9 @@ void krkrsdl2_set_own_path(const char* path)
 	KRKRNS_LOG("[launcher] own path=%s next-load=%d",
 		krkrsdl2_own_path.empty() ? "(none)" : krkrsdl2_own_path.c_str(),
 		(int)envHasNextLoad());
+	// Build stamp: a log then says by itself which binary produced it, so a
+	// fix can never be judged against a run of the previous NRO.
+	KRKRNS_LOG("[launch] build %s %s", __DATE__, __TIME__);
 }
 
 // Some hosts (the emulator) hand the application no argv, so fall back to the
