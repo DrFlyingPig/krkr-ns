@@ -73,13 +73,13 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 - 菜单公共路径优化：字体度量按需缓存、存档缓冲写入、PSB 共享资源、固实 7z 解压块复用
 - 启动器重绘优化：文本宽度缓存 + 按样式分组绘制，无输入时不重绘
 - 大位图独立内存区复用；修复文字对象销毁影响其他字体、选项文字垂直居中的问题
-- 手柄 → 鼠标/键盘事件合成（NS 物理键位语义：B 确认 / A 取消等）
+- 手柄：左摇杆直接移动引擎光标（游戏命中判定读的就是它）、十字键发送方向键走 KAG 自带的键盘导航（对话框左右切换、Enter 确认）；面键 = 左键确认（NS A）/ 右键返回（NS B）/ 空格 / 回车，Start=Esc、L3=Ctrl 快进、L/R=滚轮
 
 **视频播放**
 
-- FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 容器按签名自动识别，支持归档内与目录式视频源
+- FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 / **MPEG-PS（老 KAG 作品的 OP·logo）** 容器按签名自动识别，支持归档内与目录式视频源；子集构成见 `tools/build_ffmpeg_switch.sh`
 - 独立解码线程（4 MiB 栈）+ 双缓冲帧；**layer / overlay / mixer 三种模式均可上屏**（overlay 按脚本设定区域叠画在场景上方）
-- 音轨解码：WMA / AAC 等经 swresample 下混为 S16，通过引擎音频设备（FAudio）输出；视频结束事件等待声音播完，音量可调
+- 音轨解码：WMA / AAC / MP2 / MP3 等经 swresample 下混为 S16，通过引擎音频设备（FAudio）输出；视频结束事件等待声音播完（逐块排空 PCM 环），音量可调
 
 **诊断基建**
 
