@@ -4576,6 +4576,54 @@ void tTJSNI_BaseLayer::AffinePile(const tTVPPointD *points, tTJSNI_BaseLayer *sr
 	}
 }
 //---------------------------------------------------------------------------
+void tTJSNI_BaseLayer::PileRect(tjs_int dx, tjs_int dy, tTJSNI_BaseLayer *src,
+	const tTVPRect &srcrect, tjs_int opacity)
+{
+	// Obsoleted in kirikiri2 (OperateRect is the modern one), but older KAG
+	// systems still call it: a rectangle blit whose blend mode comes from THIS
+	// layer's DrawFace (dfAlpha honours the destination alpha, dfOpaque treats
+	// it as fully opaque), while the source layer's own type is ignored.
+	// Ported from the reference's tTJSNI_BaseLayer::PileRect, the same shape as
+	// PiledCopy above.
+	if(DrawFace != dfAlpha && DrawFace != dfOpaque)
+		TVPThrowExceptionMessage(TVPNotDrawableFaceType, TJS_W("pileRect"));
+
+	tTVPRect rect;
+	if(!ClipDestPointAndSrcRect(dx, dy, rect, srcrect)) return; // out of the clipping rect
+
+	switch(DrawFace)
+	{
+		case dfAlpha:
+			if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+			if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+			ImageModified = MainImage->Blt(dx, dy, src->MainImage, rect,
+				bmAlphaOnAlpha, opacity, HoldAlpha) || ImageModified;
+			break;
+
+		case dfOpaque:
+			if(!MainImage) TVPThrowExceptionMessage(TVPNotDrawableLayerType);
+			if(!src->MainImage) TVPThrowExceptionMessage(TVPSourceLayerHasNoImage);
+			ImageModified = MainImage->Blt(dx, dy, src->MainImage, rect,
+				bmAlpha, opacity, HoldAlpha) || ImageModified;
+			break;
+
+		default:
+			break;
+	}
+
+	tTVPRect ur = rect;
+	ur.set_offsets(dx, dy);
+	if(ImageLeft != 0 || ImageTop != 0)
+	{
+		ur.add_offsets(ImageLeft, ImageTop);
+		Update(ur);
+	}
+	else
+	{
+		Update(ur);
+	}
+}
+//---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::OperateRect(tjs_int dx, tjs_int dy, tTVPBaseBitmap *src,
 		const tTVPRect &srcrect, tTVPBlendOperationMode mode,
 			tjs_int opacity)
@@ -7337,6 +7385,37 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/piledCopy)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_METHOD_DECL(/*func. name*/piledCopy)
+//----------------------------------------------------------------------
+// pileRect(dleft, dtop, src, sleft, stop, swidth, sheight, opacity = 255):
+// the obsolete rectangle blit older KAG systems use (see PileRect above).
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/pileRect)
+{
+	TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_Layer);
+	if(numparams < 7) return TJS_E_BADPARAMCOUNT;
+
+	tTJSNI_BaseLayer * src = NULL;
+	tTJSVariantClosure clo = param[2]->AsObjectClosureNoAddRef();
+	if(clo.Object)
+	{
+		if(TJS_FAILED(clo.Object->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+			tTJSNC_Layer::ClassID, (iTJSNativeInstance**)&src)))
+			TVPThrowExceptionMessage(TVPSpecifyLayer);
+	}
+	if(!src) TVPThrowExceptionMessage(TVPSpecifyLayer);
+
+	tTVPRect rect(*param[3], *param[4], *param[5], *param[6]);
+	rect.right += rect.left;
+	rect.bottom += rect.top;
+
+	tjs_int opa = 255;
+	if(numparams >= 8 && param[7]->Type() != tvtVoid)
+		opa = (tjs_int)*param[7];
+
+	_this->PileRect((tjs_int)*param[0], (tjs_int)*param[1], src, rect, opa);
+
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_METHOD_DECL(/*func. name*/pileRect)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/copyRect)
 {

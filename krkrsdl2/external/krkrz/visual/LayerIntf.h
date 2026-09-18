@@ -743,6 +743,9 @@ public:
 	void PiledCopy(tjs_int dx, tjs_int dy, tTJSNI_BaseLayer *src,
 		const tTVPRect &rect);
 
+	void PileRect(tjs_int dx, tjs_int dy, tTJSNI_BaseLayer *src,
+		const tTVPRect &rect, tjs_int opacity);
+
 	void CopyRect(tjs_int dx, tjs_int dy, tTVPBaseBitmap *src, tTVPBaseBitmap *provincesrc,
 		const tTVPRect &rect);
 	
