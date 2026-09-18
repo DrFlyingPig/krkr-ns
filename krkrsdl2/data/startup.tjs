@@ -479,6 +479,27 @@ function pickDefaultEntry(files) {
     return files.count > 0 ? 0 : -1;
 }
 
+// The archive the engine mounted as the entry last time for this folder.  A
+// Chinese localisation ships as its own archive (e.g. dtcn.xp3 next to the
+// original data.xp3) and is otherwise re-selected on every boot, so the choice
+// is remembered engine-side and simply wins over the default preference list.
+function rememberedEntryIndex(files, preferred) {
+    if (preferred == "") return -1;
+    var lower = preferred.toLowerCase();
+    for (var f = 0; f < files.count; f++) {
+        if (files[f].toLowerCase() == lower) return f;
+    }
+    return -1;
+}
+
+function resolvedEntryIndex(files, folder) {
+    var preferred = "";
+    try { preferred = Storages.getPreferredGameEntry(folder); } catch (e) { preferred = ""; }
+    var remembered = rememberedEntryIndex(files, preferred);
+    if (remembered >= 0) return remembered;
+    return pickDefaultEntry(files);
+}
+
 function buildGame(folder) {
     var files = Storages.getGameFileList(folder);
     var packs = 0;
@@ -492,9 +513,23 @@ function buildGame(folder) {
         packs: packs,
         name: name,
         initial: initialOf(name),
-        entry: pickDefaultEntry(files),
+        entry: resolvedEntryIndex(files, folder),
         seed: coverSeed(folder, files)
     ];
+}
+
+// Which archive each folder resolved to, and where that came from: the one
+// remembered by the engine, the preference list, or the first xp3.
+function logResolvedEntry(index, game) {
+    var preferred = "";
+    try { preferred = Storages.getPreferredGameEntry(game.folder); } catch (e) { preferred = ""; }
+    if (game.entry < 0 || game.files.count == 0) {
+        Debug.message("[launcher] entry #" + index + " -> (none)");
+        return;
+    }
+    var source = rememberedEntryIndex(game.files, preferred) >= 0 ? "remembered" : "default";
+    Debug.message("[launcher] entry #" + index + " -> " + game.files[game.entry]
+        + " (" + source + ")");
 }
 
 function rescanLibrary() {
@@ -1375,6 +1410,7 @@ bootMark("firstpaint");
 launcherWindow.visible = true;
 Debug.message("[launcher] ready, folders=" + games.count
     + " files=" + (currentGame() != null ? currentGame().files.count : 0));
+for (var gi = 0; gi < games.count; gi++) logResolvedEntry(gi, games[gi]);
 
 // Test harness, inert unless the marker exists: rotate through the game
 // folders, booting one archive each pass, so the session hand-over (end game ->
@@ -1388,12 +1424,9 @@ if (Storages.isExistentStorage("sdmc:/switch/KRKR-ns/autocycle.txt")) {
         selectedFolder = Storages.getAutocycleRound() % games.count;
         loadSelectedFiles();
         var game = currentGame();
-        var found = -1;
-        for (var p = 0; p < ENTRY_PREFERENCE.length; p++) {
-            for (var f = 0; f < game.files.count; f++) {
-                if (game.files[f].toLowerCase() == ENTRY_PREFERENCE[p]) found = f;
-            }
-        }
+        // Same resolution the interactive path uses, so the harness exercises
+        // the remembered entry too.
+        var found = resolvedEntryIndex(game.files, game.folder);
         if (found >= 0) selectedFile = found;
         if (selectedFile >= 0 && entryIsLaunchable(game)) {
             Debug.message("[autocycle] launching " + game.folder + "/" + game.files[selectedFile]);

@@ -5407,6 +5407,30 @@ std::vector<ttstr> krkrsdl2_list_game_directories()
 	return krkrsdl2_sorted_names(entries);
 }
 
+// The entry archive remembered for a game folder (see prepare_xp3_game).
+// Returns an empty string when nothing valid is stored.
+ttstr krkrsdl2_game_entry_preference(const ttstr &game_directory)
+{
+	std::string directory8;
+	if(!TVPUtf16ToUtf8(directory8, game_directory.AsStdString()) ||
+	   !krkrsdl2_safe_path_component(directory8))
+		return ttstr();
+	const std::string path = std::string(KRKRNS_BASE_A) + "/saves/" + directory8 + "/entry.txt";
+	FILE * f = fopen(path.c_str(), "rb");
+	if(!f) return ttstr();
+	std::string data;
+	char buf[256];
+	size_t n;
+	while((n = fread(buf, 1, sizeof buf, f)) > 0 && data.size() < 512) data.append(buf, n);
+	fclose(f);
+	while(!data.empty() && (data.back() == 10 || data.back() == 13)) data.pop_back();
+	if(data.empty() || data.size() > 256) return ttstr();
+	if(!krkrsdl2_safe_path_component(data) || !krkrsdl2_has_extension(data, ".xp3")) return ttstr();
+	tjs_string utf16;
+	if(!TVPUtf8ToUtf16(utf16, data)) return ttstr();
+	return ttstr(utf16);
+}
+
 std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory)
 {
 	std::string directory8;
@@ -5554,6 +5578,19 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	mkdir(KRKRNS_BASE_A "/saves", 0777);
 	const std::string native_save = KRKRNS_BASE_A "/saves/" + directory8;
 	mkdir(native_save.c_str(), 0777);
+	// Remember the archive that was mounted as the entry: a Chinese
+	// localisation ships as its own archive next to the original data.xp3 and
+	// would otherwise have to be picked again on every boot.  The launcher
+	// reads this back through Storages.getPreferredGameEntry().
+	{
+		FILE * entryFile = fopen((native_save + "/entry.txt").c_str(), "wb");
+		if(entryFile)
+		{
+			fwrite(selected8.c_str(), 1, selected8.size(), entryFile);
+			fputc(10, entryFile);
+			fclose(entryFile);
+		}
+	}
 	tjs_string save16;
 	if (!TVPUtf8ToUtf16(save16, native_save + "/"))
 		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));

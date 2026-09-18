@@ -37,6 +37,7 @@
 
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
 extern std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory);
+extern ttstr krkrsdl2_game_entry_preference(const ttstr &game_directory);
 extern bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name);
 extern unsigned krkrsdl2_autocycle_round_count();
 extern ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &selected);
@@ -2367,6 +2368,15 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGameFileList)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getGameFileList)
+//----------------------------------------------------------------------
+// The entry archive the launcher mounted last time for this folder (see the
+// writer in krkrsdl2_prepare_xp3_game).  "" when nothing is remembered.
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getPreferredGameEntry) {
+	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	if(result) *result = krkrsdl2_game_entry_preference(*param[0]);
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getPreferredGameEntry )
 //----------------------------------------------------------------------
 #ifdef __SWITCH__
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getAutocycleRound)
