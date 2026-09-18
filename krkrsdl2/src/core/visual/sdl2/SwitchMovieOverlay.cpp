@@ -63,6 +63,18 @@ int SwitchMovieOverlay::AvioRead2(void * opaque, uint8_t * dst, int size)
         KRKRNS_LOG("[movie] storage read failed at %d/%d", total, size);
         return total > 0 ? total : AVERROR(EIO);
     }
+    // Probe (temporary): a demuxer that ends up with "unknown codec" has to be
+    // told apart from an AVIO that hands it the wrong bytes, so log the first
+    // few reads and seeks with what they returned.
+    {
+        static thread_local int probeReads = 0;
+        if (probeReads < 4 && total > 0)
+        {
+            probeReads += 1;
+            KRKRNS_LOG("[movie] avio read#%d size=%d got=%d head=%02x%02x%02x%02x",
+                       probeReads, size, total, dst[0], dst[1], dst[2], dst[3]);
+        }
+    }
     return total > 0 ? total : AVERROR_EOF;
 }
 
@@ -117,6 +129,19 @@ int64_t SwitchMovieOverlay::AvioSeek2(void * opaque, int64_t offset, int whence)
         if (pos > static_cast<tjs_uint64>(
                       std::numeric_limits<int64_t>::max()))
             return AVERROR(EINVAL);
+        // Probe (temporary, see AvioRead2): a seek that does not land where it
+        // was asked to is silent otherwise, and the demuxer's probing fails
+        // only through its own "unknown codec" symptom.
+        {
+            static thread_local int probeSeeks = 0;
+            if (probeSeeks < 8)
+            {
+                probeSeeks += 1;
+                KRKRNS_LOG("[movie] avio seek#%d off=%lld whence=%d -> landed=%lld want=%lld",
+                           probeSeeks, static_cast<long long>(offset), whence & 0xFFFF,
+                           static_cast<long long>(pos), static_cast<long long>(target));
+            }
+        }
         if (static_cast<int64_t>(pos) != target)
             return AVERROR(EIO);
         return target;
@@ -200,6 +225,15 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
         else if (signatureSize >= sizeof(asfGuid) &&
                  std::memcmp(signature, asfGuid, sizeof(asfGuid)) == 0)
             demuxerName = "asf";
+        else if (signatureSize >= 4 && signature[0] == 0x00 &&
+                 signature[1] == 0x00 && signature[2] == 0x01 &&
+                 signature[3] == 0xba)
+            // MPEG-1/2 program stream: what the older KAGEX titles ship as
+            // movie/logo.mpg and movie/opening.mpg, pack header first.  The
+            // name is the one av_find_input_format() answers to, which is not
+            // the configure name (that one is "mpegps", and asking for it just
+            // reports the demuxer as unavailable).
+            demuxerName = "mpeg";
 
         KRKRNS_LOG("[movie] storage ready size=%lld container=%s sig=%02x%02x%02x%02x/%02x%02x%02x%02x",
                    static_cast<long long>(streamSize_),
@@ -246,9 +280,11 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
         ? av_find_input_format(demuxerName) : nullptr;
     if (demuxerName && !ifmt)
     {
-        KRKRNS_LOG("[movie] demuxer unavailable: %s", demuxerName);
-        CloseCodecs();
-        return false;
+        // A name that does not resolve must not cost the file: the subset's
+        // configure name and the registered one can differ, so fall back to
+        // the auto probe instead of failing the open.
+        KRKRNS_LOG("[movie] demuxer %s unavailable, falling back to probe", demuxerName);
+        demuxerName = nullptr;
     }
     const int openResult = avformat_open_input(&format_, "", ifmt, nullptr);
     if (openResult < 0)
@@ -372,18 +408,26 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
 
 void SwitchMovieOverlay::CloseCodecs()
 {
+    // The decode thread must be gone before any FFmpeg context is released:
+    // a frame buffer released after the context that owns its pool is a use
+    // after free (av_buffer_pool_uninit -> pool_release_buffer -> flush).
+    KRKRNS_LOG("[movie] close: decoding=%d thread=%p",
+               decoding_.load() ? 1 : 0, (void *)thread_);
     if (sws_)
         sws_freeContext(sws_), sws_ = nullptr;
+    KRKRNS_LOG("[movie] close: sws freed");
     if (swrResample_)
         swr_free(&swrResample_), swrResample_ = nullptr;
     if (audioCodec_)
         avcodec_free_context(&audioCodec_);
+    KRKRNS_LOG("[movie] close: audio codec freed");
     audioStream_ = -1;
     audioRate_ = 0;
     audioEof_ = false;
     pcmRead_ = pcmWrite_ = 0;
     if (videoCodec_)
         avcodec_free_context(&videoCodec_);
+    KRKRNS_LOG("[movie] close: video codec freed");
     if (format_)
     {
         // avio is attached manually: detach so avformat_close_input does
@@ -391,13 +435,16 @@ void SwitchMovieOverlay::CloseCodecs()
         if (format_->pb == avio_) format_->pb = nullptr;
         avformat_close_input(&format_);
     }
+    KRKRNS_LOG("[movie] close: format closed");
     if (avio_)
         avio_context_free(&avio_);
+    KRKRNS_LOG("[movie] close: avio freed");
     if (stream_)
     {
         delete stream_;
         stream_ = nullptr;
     }
+    KRKRNS_LOG("[movie] close: storage stream released");
     streamSize_ = 0;
     videoStream_ = -1;
     durationSec_ = 0;
@@ -464,6 +511,17 @@ void SwitchMovieOverlay::Play()
 void SwitchMovieOverlay::Stop()
 {
     quit_.store(true);
+    // Reference order (WA2-ns VideoPlayer::Stop, krkrsdl3's player teardown):
+    // take the audio source down *before* the decode thread is joined, so no
+    // callback can still be running against a player whose decoder is about to
+    // go away, and only then join.  Joining first would leave the audio output
+    // feeding from a teardown-in-progress.
+    if (audioOut_)
+    {
+        KRKRNS_LOG("[movie] stop: audio detach");
+        audioOut_->StopStream();
+    }
+    KRKRNS_LOG("[movie] stop: join decode thread");
     // The player owns all FFmpeg contexts used by the worker.  Keep the SDL
     // handle joinable so CloseCodecs can never race a detached decoder.
     SDL_Thread *thread = thread_;
@@ -472,11 +530,7 @@ void SwitchMovieOverlay::Stop()
     {
         SDL_WaitThread(thread, nullptr);
     }
-    if (audioOut_)
-    {
-        // stop and drop whatever buffered sound is left over
-        audioOut_->StopStream();
-    }
+    KRKRNS_LOG("[movie] stop: joined");
     decoding_.store(false);
     status_.store(vsStopped);
 }
@@ -745,8 +799,18 @@ void SwitchMovieOverlay::DecodeLoop()
         // queued), bounded so a stuck device cannot stall the movie end.
         if (audioOut_)
         {
-            FeedAudio(true);
+            // Drain the ring a block at a time (FeedAudio only ever copies one
+            // block), waiting for the device to hand a block back between
+            // passes, so the tail of the audio is actually sent.  Bounded so a
+            // stuck device cannot stall the movie end.
             int waited = 0;
+            while (!quit_.load() && waited < 4000)
+            {
+                FeedAudio(true);
+                if (pcmRead_ == pcmWrite_) break;
+                SDL_Delay(8);
+                waited += 8;
+            }
             while (!quit_.load() && audioFreeBlocks_.load() < kAudioBlocks &&
                    waited < 4000)
             {
@@ -874,11 +938,13 @@ void SwitchMovieOverlay::CloseAudio()
 {
     if (audioOut_)
     {
+        KRKRNS_LOG("[movie] closeaudio: detach + delete output");
         audioOut_->StopStream();
         audioOut_->SetCallback(nullptr, nullptr);
         delete audioOut_;
         audioOut_ = nullptr;
     }
+    KRKRNS_LOG("[movie] closeaudio: done");
     for (auto & b : audioBlocks_)
         delete[] b;
     audioBlocks_.clear();
@@ -995,8 +1061,13 @@ void SwitchMovieOverlay::FeedAudio(bool flush)
     const size_t cap = pcmRing_.size();
     const size_t available = pcmWrite_ - pcmRead_;
     if (available == 0) return;
-    const size_t n = (available >= kAudioBlockBytes && !flush)
-        ? kAudioBlockBytes : available;
+    // One block is kAudioBlockBytes.  The flush path used to hand the whole
+    // ring over as the copy length, which wrote up to a megabyte past a 16 KB
+    // allocation and corrupted the heap: the flush runs at the movie's end, so
+    // the damage surfaced as the crash in CloseAudio's delete[] right after
+    // playback completed.  Bound the copy here and let the caller drain the
+    // rest in block-sized pieces.
+    const size_t n = std::min(available, kAudioBlockBytes);
     if (!flush && n < kAudioBlockBytes) return;
     if (audioFreeBlocks_.load() <= 0) return;
     if ((int)audioOut_->GetQueuedCount() >= kAudioBlocks - 1) return;

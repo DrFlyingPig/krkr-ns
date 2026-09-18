@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 # Build the KRKR-ns private FFmpeg 7.1 subset for Nintendo Switch.
 # Supports the source-faithful movie cases currently observed:
-#   ASF/WMV/VC-1/WMA and MOV/MP4/H.264/AAC.
+#   ASF/WMV/VC-1/WMA, MOV/MP4/H.264/AAC and MPEG-PS with MPEG-1/2 video -- the
+#   last one is what the older KAGEX titles ship as movie/logo.mpg.  Without the
+#   mpegps demuxer avformat_open_input answered AVERROR_INVALIDDATA and the game
+#   reported "Invalid video size" instead of playing its opening.
+#
+#   mpegps leaves the codec of its elementary streams unset (that is how it
+#   reports "Video: none" for a file it just demuxed), and avformat_find_stream_info()
+#   then identifies them by running the *demuxer* probes of the fmt_id_type table
+#   in libavformat/demux.c: "mpegvideo" -> MPEG2VIDEO and "mp3" -> MP3.  Those
+#   two demuxers (not the parser that shares the name) are what turn a demuxed
+#   MPEG-PS into decodable streams, so a build without them fails later with
+#   "probed stream 0 failed / unknown codec" even though mpegps itself works.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,7 +22,12 @@ prefix="$root/out/ffmpeg_switch"
 archive_default="$root/../WA2-ns/out/ffmpeg-7.1.tar.xz"
 archive="${FFMPEG_ARCHIVE:-$archive_default}"
 patch_file="$root/tools/ffmpeg-horizon.patch"
-host_cc="$root/tools/ffmpeg_host_cl_wrapper.sh"
+# The original subset was configured with the MSVC wrapper (ffmpeg_host_cl_wrapper.sh),
+# but this machine has no cl.exe.  FFmpeg's hardcoded tables are on by default,
+# so nothing is compiled for the *host* and then run -- the C11 configure check
+# is the only place the host compiler is exercised, and the cross compiler
+# satisfies it.  Set FFMPEG_HOST_CC to override (e.g. back to the MSVC wrapper).
+host_cc="${FFMPEG_HOST_CC:-${DEVKITA64:-D:/devkitPro/devkitA64}/bin/aarch64-none-elf-gcc}"
 make_bin_default="$root/../WA2-ns/out/msys_make/usr/bin/make.exe"
 make_bin="${FFMPEG_MAKE:-$make_bin_default}"
 expected_sha256=40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
@@ -92,9 +108,9 @@ cd "$src"
   --enable-avutil \
   --enable-swscale \
   --enable-swresample \
-  --enable-demuxer=asf,mov \
-  --enable-decoder=wmv3,vc1,wmav1,wmav2,wmapro,wmavoice,h264,aac \
-  --enable-parser=vc1,h264,aac \
+  --enable-demuxer=asf,mov,mpegps,mpegvideo,mp3 \
+  --enable-decoder=wmv3,vc1,wmav1,wmav2,wmapro,wmavoice,h264,aac,mpeg1video,mpeg2video,mp2,mp3 \
+  --enable-parser=vc1,h264,aac,mpegvideo,mpegaudio \
   --enable-protocol=file \
   --enable-pthreads \
   --enable-asm \
