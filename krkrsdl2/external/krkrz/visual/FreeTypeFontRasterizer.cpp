@@ -15,12 +15,25 @@
 
 extern FontSystem* TVPFontSystem;
 
+// KRKR-ns: glyph-level fallback to the default font, ported from Kirikiroid2
+// (src/core/visual/FreeTypeFontRasterizer.cpp).  Titles select an embedded
+// Japanese font (e.g. 9-nine 桜空漢化 MTLc3m.ttf) whose JIS glyph set lacks
+// simplified-Chinese characters; without this the text loses those glyphs.
+static bool isUnicodeSpace(char16_t ch)
+{
+	return  (ch >= 0x0009 && ch <= 0x000D) || ch == 0x0020 || ch == 0x0085 || ch == 0x00A0 || ch == 0x1680
+		|| (ch >= 0x2000 && ch <= 0x200A) || ch == 0x2028 || ch == 0x2029 || ch == 0x202F
+		|| ch == 0x205F || ch == 0x3000;
+}
+
 FreeTypeFontRasterizer::FreeTypeFontRasterizer() : RefCount(0), Face(NULL), LastBitmap(NULL) {
 	AddRef();
 }
 FreeTypeFontRasterizer::~FreeTypeFontRasterizer() {
 	if( Face ) delete Face;
 	Face = NULL;
+	if( FaceFallback ) delete FaceFallback;
+	FaceFallback = NULL;
 	// Other rasterizers (including TextRender instances) still own FT_Faces.
 	// The shared library is released by the engine's final cleanup hook.
 }
@@ -34,6 +47,8 @@ void FreeTypeFontRasterizer::Release() {
 	if( RefCount == 0 ) {
 		if( Face ) delete Face;
 		Face = NULL;
+		if( FaceFallback ) delete FaceFallback;
+		FaceFallback = NULL;
 
 		delete this;
 	}
@@ -117,6 +132,45 @@ void FreeTypeFontRasterizer::ApplyFont( const tTVPFont& font ) {
 	LastBitmap = NULL;
 }
 //---------------------------------------------------------------------------
+// KRKR-ns: ported from Kirikiroid2 FreeTypeFontRasterizer::ApplyFallbackFace.
+// Lazily opens a second face of the default font and mirrors the current
+// style/size onto it, so glyphs missing from a title's embedded font can be
+// pulled from the default font in GetBitmap.
+void FreeTypeFontRasterizer::ApplyFallbackFace() {
+	if( !FaceFallback && Face && Face->GetFontName() != TVPFontSystem->GetDefaultFontName() ) {
+		std::vector<tjs_string> faces;
+		faces.push_back( tjs_string( TVPFontSystem->GetDefaultFontName() ) );
+		tjs_uint32 opt = 0;
+		opt |= (CurrentFont.Flags & TVP_TF_ITALIC) ? TVP_TF_ITALIC : 0;
+		opt |= (CurrentFont.Flags & TVP_TF_BOLD) ? TVP_TF_BOLD : 0;
+		opt |= (CurrentFont.Flags & TVP_TF_UNDERLINE) ? TVP_TF_UNDERLINE : 0;
+		opt |= (CurrentFont.Flags & TVP_TF_STRIKEOUT) ? TVP_TF_STRIKEOUT : 0;
+		FaceFallback = new tFreeTypeFace( faces, opt );
+	}
+	if( !FaceFallback ) return;
+	FaceFallback->SetHeight( CurrentFont.Height < 0 ? -CurrentFont.Height : CurrentFont.Height );
+	if( CurrentFont.Flags & TVP_TF_ITALIC ) {
+		FaceFallback->SetOption( TVP_TF_ITALIC );
+	} else {
+		FaceFallback->ClearOption( TVP_TF_ITALIC );
+	}
+	if( CurrentFont.Flags & TVP_TF_BOLD ) {
+		FaceFallback->SetOption( TVP_TF_BOLD );
+	} else {
+		FaceFallback->ClearOption( TVP_TF_BOLD );
+	}
+	if( CurrentFont.Flags & TVP_TF_UNDERLINE ) {
+		FaceFallback->SetOption( TVP_TF_UNDERLINE );
+	} else {
+		FaceFallback->ClearOption( TVP_TF_UNDERLINE );
+	}
+	if( CurrentFont.Flags & TVP_TF_STRIKEOUT ) {
+		FaceFallback->SetOption( TVP_TF_STRIKEOUT );
+	} else {
+		FaceFallback->ClearOption( TVP_TF_STRIKEOUT );
+	}
+}
+//---------------------------------------------------------------------------
 void FreeTypeFontRasterizer::GetTextExtent(tjs_char ch, tjs_int &w, tjs_int &h) {
 	if( Face ) {
 		tGlyphMetrics metrics;
@@ -151,6 +205,24 @@ tTVPCharacterData* FreeTypeFontRasterizer::GetBitmap( const tTVPFontAndCharacter
 		//Face->ClearOption( TVP_FACE_OPTIONS_FORCE_AUTO_HINTING );
 	}
 	tTVPCharacterData* data = Face->GetGlyphFromCharcode(font.Character);
+	// KRKR-ns: Kirikiroid2 glyph fallback -- a glyph missing from the selected
+	// (e.g. title-embedded Japanese) face is retried against the default font.
+	bool fromFallback = false;
+	if( data == NULL && !isUnicodeSpace(font.Character) ) {
+		ApplyFallbackFace();
+		if( FaceFallback ) {
+			data = FaceFallback->GetGlyphFromCharcode(font.Character);
+			fromFallback = data != NULL;
+		}
+	}
+	if( data != NULL && fromFallback && Face ) {
+		// KRKR-ns: the glyph origin was computed with the fallback face's own
+		// baseline (GlyphMetricsCache.baseline == that face's ascent), but the
+		// line lays text out on the primary face's baseline -- without this the
+		// fallback glyphs ride visibly higher or lower than the surrounding
+		// text.  Kirikiroid2 does not compensate; we align by the ascent diff.
+		data->OriginY += Face->GetAscent() - FaceFallback->GetAscent();
+	}
 	if( data == NULL ) {
 		data = Face->GetGlyphFromCharcode( Face->GetDefaultChar() );
 	}

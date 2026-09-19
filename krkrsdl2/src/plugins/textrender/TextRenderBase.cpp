@@ -3,6 +3,8 @@
 
 #include "FreeTypeFontRasterizer.h"
 #include "KrkrNSLog.h"
+
+
 #include "tjsArray.h"
 #include "tjsDictionary.h"
 #include "tvpfontstruc.h"
@@ -298,7 +300,12 @@ class NI_TextRenderBase : public tTJSNativeInstance
 		for (const auto &ch : Buffer)
 		{
 			Characters.push_back(ch);
-			State.RenderText += ch.Text;
+			// KRKR-ns: renderText must grow as soon as a character is rendered,
+			// not on flush.  KAGEX titles (永不枯萎 xmoe localisation) read the
+			// renderText property right after render() to feed the backlog
+			// (HistoryTextStore.storeRender); the krkrsdl3 reference only
+			// accumulates on flush, which returned an empty string there.
+			// The accumulation therefore happens in PushCharacter/PushGraph.
 		}
 		Buffer.clear();
 	}
@@ -323,6 +330,7 @@ class NI_TextRenderBase : public tTJSNativeInstance
 		info.HasShadow = State.Shadow;
 		info.ShadowColor = State.ShadowColor;
 		info.Text = ttstr(&code, 1);
+		State.RenderText += info.Text;
 		Buffer.push_back(info);
 		BeginningOfLine = false;
 	}
@@ -338,6 +346,7 @@ class NI_TextRenderBase : public tTJSNativeInstance
 		info.Size = State.FontSize;
 		info.Color = State.Color;
 		info.Text = name;
+		State.RenderText += name;
 		Buffer.push_back(info);
 		BeginningOfLine = false;
 	}
@@ -587,13 +596,13 @@ public:
 			return value;
 		}
 		if (SameName(name, TJS_W("renderCount"))) return static_cast<tjs_int>(State.RenderText.length());
+		if (SameName(name, TJS_W("renderText"))) return State.RenderText;
 		if (SameName(name, TJS_W("renderLeft"))) return RenderLeft;
 		if (SameName(name, TJS_W("renderRight"))) return RenderRight;
 		if (SameName(name, TJS_W("renderTop"))) return RenderTop;
 		if (SameName(name, TJS_W("renderBottom"))) return RenderBottom;
 		if (SameName(name, TJS_W("renderOver"))) return static_cast<tjs_int>(State.RenderOver);
 		if (SameName(name, TJS_W("renderDelay"))) return State.RenderDelay;
-		if (SameName(name, TJS_W("renderText"))) return State.RenderText;
 		if (SameName(name, TJS_W("vertical"))) return static_cast<tjs_int>(Vertical);
 		if (SameName(name, TJS_W("bold"))) return static_cast<tjs_int>(State.Bold);
 		if (SameName(name, TJS_W("italic"))) return static_cast<tjs_int>(State.Italic);
@@ -677,13 +686,15 @@ public:
 	}
 
 	tjs_int CharacterCount() const { return static_cast<tjs_int>(Characters.size()); }
-};
+
+	};
 
 static iTJSNativeInstance *TJS_INTF_METHOD Create_NI_TextRenderBase()
 {
 	KRKRNS_LOG("[textrender] TextRenderBase instance created");
 	return new NI_TextRenderBase();
 }
+
 } // namespace
 
 #ifdef TJS_NATIVE_CLASSID_NAME
