@@ -76,7 +76,7 @@ KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintend
 
 **视频播放**
 
-- FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 / **MPEG-PS（老 KAG 作品的 OP·logo）** 容器按签名自动识别，支持归档内与目录式视频源；子集构成见 `tools/build_ffmpeg_switch.sh`
+- FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 / MPEG-PS 容器按签名自动识别，支持归档内与目录式视频源；子集构成见 `tools/build_ffmpeg_switch.sh`
 - 独立解码线程（4 MiB 栈）+ 双缓冲帧；**layer / overlay / mixer 三种模式均可上屏**（overlay 按脚本设定区域叠画在场景上方）
 - 音轨解码：WMA / AAC / MP2 / MP3 等经 swresample 下混为 S16，通过引擎音频设备（FAudio）输出；视频结束事件等待声音播完（逐块排空 PCM 环），音量可调
 
