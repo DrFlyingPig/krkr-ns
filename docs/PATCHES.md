@@ -8,6 +8,24 @@
 
 ## 已应用补丁 (源码层)
 
+### P89: 换游戏字体会话隔离 — 修复同名字体冲突与退出黑屏（2026-09-21）
+
+- **原始故障**：KRKR-ns 的启动器在同一进程内连续运行多个标题；不同游戏可能携带同名 `SourceHanSansJP-*.otf`。FreeType 私有字体目录却是进程全局状态，导致后启动的“九次九日九重色”把另一游戏的同名文件误判为已加载，最终在 `PreRenderFontEx.getTextWidth` 报 `Font ... cannot be used`。
+- **首版修复的回归与定位**：仅在引擎重启时删除私有字体目录，会让仍跨会话存活的全局 `FreeTypeFontRasterizer` 保留悬空字体流；退出游戏后的启动器第一次绘字即在 `tGenericFreeTypeFace::IoFunc` 空指针访问，表现为黑屏。Ryujinx 客体栈与 `addr2line` 精确落到 `FreeType.cpp` 的流回调，排除了呈现层问题。
+- **最终修复**：引擎会话重建时先清空字形缓存并销毁全局 rasterizer/`FontSystem`，允许下一会话重新初始化；再清理私有字体目录。活动 `tGenericFreeTypeFace` 不再借用 `FontInfo` 的裸流指针，而是按 Kirikiroid2 的生命周期各自打开并持有流，避免目录清理造成悬空引用。
+- **运行验证**：Nextendo/Ryujinx 日志 `krkrsdl2_debug_1789985369.log` 连续完成 5 个标题的“启动 → 退出 → 返回启动器”，每轮均出现 `font rasterizers reset`、`private game fonts cleared`、`launcher ready` 与新的 `present`；“九次九日九重色”到达 `game startup returned`，不再出现字体错误。对应 Ryujinx 日志无 `Invalid memory access`、Guest stack trace 或未处理异常；用户确认画面与退出流程正常。
+- **产物**：`build-switch/krkrsdl2.nro` 28,331,285 bytes，SHA-256 `4FB98B023EC49CE2FC0FB917BEEA53495FDEAD43606543D6572BBE2EBD12DF94`；现有主机测试 5/5 通过。
+
+### P88: Kirikiroid2 优先项 1/2 — XP3 filter 完整契约与 Layer 四个公共方法（2026-09-21）
+
+- **来源**：2026-09-19 对 `.zcode/upstream-kirikiroid2` 的独立源码审计确认两处高优先级误判：项目此前虽然让 `xp3filter.tjs` 能登记 `setXP3ArchiveContentFilter`，但归档底层没有调用它；`LayerIntf` 也缺少 K2 对脚本公开的 `blendRect/stretchPile/stretchBlend/affineBlend`。
+- **XP3 完整契约**：`tTVPXP3ExtractionFilterInfo` 增加 `FileName`；extraction native/TJS 链增加流级 context，TJS 参数从 4 个补为 `(hash, offset, buffer, length, fileName, context)`；新增 content-filter setter/回调 `(filepath, archiveName, fileSize) -> [action, context]`，action=1 时完整读取并过滤到内存流；私有 filter 引擎补回 K2 的 `Debug/System/Storages` 环境，并在换脚本时释放回调、清两个 hook、重置 XOR 快路径。带 content context 时强制走脚本，不能被既有 Yuzusoft XOR 优化绕过。
+- **Layer 公共 API**：按 K2 的 draw-face 语义增加四个 C++ 方法和全部 TJS 绑定：pile 使用 `bmAlphaOnAlpha/bmAlpha`，blend 使用 `bmCopyOnAlpha/bmCopy`；`affineBlend` 同时提供矩阵和三点重载；默认 opacity/stretch type 与废弃 hold-alpha 参数位置保持上游接口。
+- **构建与静态测试**：`tests/fixtures/core_port/startup.tjs` 增加四个方法的调用与像素断言，`tests/build_core_port_fixture.py` 生成独立测试 NRO；`tests/build_xp3_filter_fixture.py` 生成带加密 `startup.tjs`/`payload.tjs` 的 XP3 契约包。Switch 全量构建通过，主线产物 `build-switch/krkrsdl2.nro`（28,331,285 bytes，SHA-256 `4FB98B023EC49CE2FC0FB917BEEA53495FDEAD43606543D6572BBE2EBD12DF94`）；既有主机测试 5/5 通过；ELF 符号确认 content-filter 与四组 Layer 实现均已链接。
+- **Layer 运行验收**：修正夹具源像素为带 `0xff` alpha 的 ARGB 值（`stretchPile` 按上游语义使用源 alpha，首版透明测试色不构成有效断言）后，`build-core-port-fixture-v2/core-port.nro`（28,244,509 bytes，SHA-256 `44A54E5C5D472117CEFB4D63ECFCF548A0EA75D717A3D4D7EE5E6FBE98953E0D`）在 Ryujinx 运行。`krkrsdl2_debug_1789987281.log` 中 `blendRect`、`stretchPile`、`stretchBlend`、`affineBlend` 全部 PASS，最终 `COMPLETE checks=12`；色块画面是夹具预期输出。
+- **XP3 运行验收**：`contract.xp3`（17,700 bytes，SHA-256 `FCDBCE37BF3376BB3971DE0025980CFE8C2E08171F0FF6E44670D38B3F17E7A5`）及配套 `xp3filter.tjs` 在主线 NRO 下运行。`krkrsdl2_debug_1789993737.log` 确认 content 回调三参数、`[action, context]`、逐文件 context、action=1 全量 materialization、extraction 六参数与解密结果均正确，最终输出 `PAYLOAD PASS` 和 `STARTUP PASS`。
+- **回归与边界**：重新部署同一主线 NRO 后，用户确认普通游戏进入与运行正常。因此优先项 1、2 标记为完成；物理 Switch 验证仍是发布前独立步骤，本轮结论是 Ryujinx 运行验收通过。
+
 ### P87: 收回自造的 WindowEx 兼容面 — 以 Kirikiroid2 为准（2026-09-18）
 
 - **起因**：P86 修好 LimeLight 时，我按 krkr2 / krkrsdl3 的 **windowEx.dll 插件源码**补了一批成员，并自造了若干（`restmax`/`getScreenRect`/`setPrimarySize`/`pseudoFullScreened`/`isPseudoMode` …）。用户逐条追问"这些是 Kirikiroid2 里有的吗"。双向字节检索（ASCII + UTF-16）五棵参考树的结果：**`getNormalRect`/`getWindowRect`/`getClientRect`/`setClientRect`/`getPlacement`/`setPlacement`/`getMonitorInfo`/`getSystemMetrics`/`maximized`/`disableMove`/`MenuItem.bi*`/`bmpItem`/`rightJustify` 在 Kirikiroid2 里全部不存在**（只在 krkr2/krkrsdl3 的 Win32 插件里），自造的那批在任何参考树里都没有；只有 `Window.PassThroughDrawDevice` 别名与 `dt*` 常量是 Kirikiroid2 真有的。

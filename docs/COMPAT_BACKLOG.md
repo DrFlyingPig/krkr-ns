@@ -3,6 +3,8 @@
 > 盘点：2026-09-15。对照对象：**krkrsdl3**（SDL3 重写版），本地参考 `.zcode/upstream-krkrsdl3`（官方 main `c014d30`）。
 > 只列「对方有、我们没有」的能力，按对未修改商业标题的影响 × 实现成本排序。
 > 已核实持平的部分不在此列（文本编码探测、图像格式、FFmpeg 影片、基础插件族等，见文末「非差距」）。
+>
+> **注意**：这是历史 krkrsdl3 对照。Kirikiroid2 源码对齐的当前顺序与进度以 [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md) 为准。
 
 ## 优先级总表
 
@@ -12,7 +14,7 @@
 | 2 | **P0** | ZIP / TAR 压缩包 | 以 zip/tar 分发的标题 → 打不开数据包 | `plugins/Kirikiroid2/ZIPArchive.cpp`、`TARArchive.cpp` | 142 + 263 行 |
 | 3 | **P1** | extrans 转场（wave / mosaic / turn / rotatezoom / rotatevanish / rotateswap / ripple） | 用 extrans.dll 的标题 → 转场退化为 crossfade（魔女的夜宴等已命中） | `plugins/extrans/` | 约 9k 行（含 4.5k 表） |
 | 4 | **P1** | layerExDraw 的 GDI+ 模拟 | 靠 layerExDraw.dll 自绘 UI 的标题 → 界面画错/缺失 | `plugins/LayerExDraw/LayerExDraw.cpp` | 2851 行 |
-| 5 | **P1** | XP3 content filter + 6 字段 filter info（含 FileName） | 用 content filter 的加密/保护方案 → 解密失败 | `core/archive/XP3Archive.cpp:415`、`plugins/xp3filter.cpp` | 611 行 |
+| 5 | **P1** | ~~XP3 content filter + 6 字段 filter info（含 FileName）~~ **已完成** | content/extraction 契约保护包已通过 Ryujinx 运行验证 | `core/archive/XP3Archive.cpp:415`、`plugins/xp3filter.cpp` | 611 行 |
 | 6 | **P2** | perspectiveCopy（layerExPerspective.dll） | 少量特效调用；已确认自有标题无调用 | `plugins/LayerExPerspective.cpp` | 143 行 |
 | 7 | **P2** | LayerExMovie：`Layer.openMovie/startMovie/stopMovie` | 影片层；自有标题暂无调用（overlay/mixer 路径已通） | `plugins/LayerExMovie.cpp` | 353 行 |
 | 8 | **P2** | AlphaMovie（.amv 带 alpha 影片） | 用 .amv 的标题 → 影片不显示 | `plugins/AlphaMovie.cpp` | 2089 行 |
@@ -50,9 +52,9 @@
 - **验证**：命中该 dll 的标题进入自绘界面（设置页/画廊等）逐项对比截图。
 
 ### P1-5 XP3 content filter + filter info 6 字段
-- **现状**：仅 4 参 extraction filter（`(FileHash, Offset, Buffer, BufferSize)`），content filter 未接。
+- **现状（2026-09-21 更新）**：已补齐 content filter、`FileName`、流级 context 和六参数 extraction 回调；action=1 整文件路径也已接通。
 - **参考**：`.zcode/upstream-krkrsdl3/core/archive/XP3Archive.cpp:415`（content filter，可请求整包获取）、`plugins/xp3filter.cpp`（611 行）；info 结构 `{SizeOfSelf, Offset, Buffer, BufferSize, FileHash, FileName}`。
-- **验证**：使用 content filter 的保护方案包可正常解密进入；`[xp3]` 相关日志确认回调被调用。
+- **验证**：契约保护包在 Ryujinx 输出 `PAYLOAD PASS`、`STARTUP PASS`，content 三参数、context、action=1 全量数据和 extraction 六参数均有日志断言。
 
 ## P2 — 插件族长尾（遇到再移植，参考源码均已在本地）
 
@@ -67,7 +69,7 @@
 - `Storages.setTextEncoding`（对方为 native，`core/script/tjsNativeStorages.cpp:158`；我们只有 `-readencoding` 命令行开关）
 - `System.inputString`
 - `Storages.dirtree / dirlistEx / getMD5HashString / searchPath / getTemporaryName`（fstat 族）
-- `Layer.stretchPile / fetchImageSize`
+- ~~`Layer.stretchPile`~~（已按 Kirikiroid2 移植并通过像素夹具）；`fetchImageSize` 仍待补齐
 
 ## 非差距（两家都没有 / 我们反而领先，别追）
 

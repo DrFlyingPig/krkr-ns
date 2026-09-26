@@ -7,6 +7,8 @@
 | 文档 | 内容 |
 |---|---|
 | [PATCHES.md](PATCHES.md) | 全部源码层补丁记录（P1 起，含背景与验证方式） |
+| [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md) | 当前 Kirikiroid2 源码对齐优先级、完成定义与验证状态 |
+| [KIRIKIROID2_COMPARISON.md](KIRIKIROID2_COMPARISON.md) | KRKR-ns 与 Kirikiroid2 的架构、函数和插件差异审计 |
 | [COMPAT_BACKLOG.md](COMPAT_BACKLOG.md) | 兼容性缺口清单（对照 krkrsdl3，P0–P3 优先级与参考实现） |
 | [UPSTREAM_DELTA.md](UPSTREAM_DELTA.md) | 与两个上游基线的差异清单（`tools/upstream_delta.sh` 自动生成，勿手改） |
 

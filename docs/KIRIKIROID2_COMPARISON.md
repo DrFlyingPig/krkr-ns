@@ -4,6 +4,7 @@
 > 目的：回答「Kirikiroid2 能跑而我们不能（或行为不一致）」的标题到底差在哪些架构与代码点上。
 > 方法：目录/规模盘点、原生类成员逐项 diff（Window/Layer）、插件清单对照、以及 2026-09 会话中全部实机故障的根因回溯。
 > 注意：Kirikiroid2 的 APK 里还有一批**未公开源码的私有内置插件**（社区俗称「私有插件仓库」），公有树里看不到；本文件对这部分只能列「已知存在」清单。
+> 2026-09-21 起，实施顺序与逐项验收状态统一记录在 [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md)；本文件保留差异证据，不再单独维护另一套优先级。
 
 ---
 
@@ -147,14 +148,9 @@
 
 ---
 
-## 5. 差距修复建议（按收益排序）
+## 5. 差距修复顺序
 
-1. **TextRender 真机语义**（历史记录、以及一切 KAGEX+TextRender 标题的文本细节）：拿 Kirikiroid2 APK 提取 `libkirikiroid2.so`，逆向其 TextRenderBase 的 renderText/storeRender 协作语义；或运行时探针逐字段确认 HistoryTextStore 的条目结构。
-2. **extrans 转场**（krkrsdl3 有 9k 行参考实现）：魔女的夜宴等已命中。
-3. **LayerExDraw/layerExRaster**：自绘 UI 标题。
-4. **FFmpeg 音频解码接入 WaveIntf**（FFmpeg 已随影片路径集成，纯接线工作）。
-5. **Layer 缺失的 4 个成员**：affineBlend/blendRect/stretchBlend/stretchPile（K2 LayerIntf 有，我们没有；krkrsdl3 同样没有，需从 K2 移植）。
-6. **ARM NEON**：把 K2 的 tvpgl_arm 移植过来替换 simde 路径（纯性能，风险低）。
+权威顺序、完成定义和当前状态见 [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md)。2026-09-21 已完成其中第 1 项 XP3 filter 核心契约和第 2 项四个 Layer 公共方法的源码移植、Switch 构建与 Ryujinx 专项运行验收；XP3 契约保护包得到 `PAYLOAD PASS`/`STARTUP PASS`，Layer 像素夹具 12/12 通过，主线 NRO 的普通游戏回归也由用户确认正常。
 
 ---
 
@@ -167,10 +163,10 @@
 |---|---|---|---|
 | tjsString.cpp | `IndexOf` `SubString` **`Trim`** | **TJS String 原生方法**——脚本直接调用，缺失即脚本异常 | 高优：照 K2 补齐 |
 | tjsVariantString.cpp | `GetLength` | TJS String 内部方法 | 同上 |
-| LayerIntf.cpp | `AffineBlend` `BlendRect` `StretchBlend` `AssignTexture` `StretchPile` `DoUserFontSelect` `InternalComplete2_GPU` `InternalDrawNoCache_CPU` | Layer 原生成员（图像合成/字体选择） | 高优（合成类）；DoUserFontSelect 与字体选择相关 |
+| LayerIntf.cpp | ~~`AffineBlend` `BlendRect` `StretchBlend` `StretchPile`~~；`AssignTexture` `DoUserFontSelect` `InternalComplete2_GPU` `InternalDrawNoCache_CPU` | 四个脚本绘图成员已于 2026-09-21 移植并通过 12 项运行断言；其余是纹理/字体/内部管线差异 | 四个公共方法已验收；其余另行评估 |
 | LayerBitmapImpl.cpp | `AssignTexture` `InternalBlendText` `IsIndependent` `IsOpaque` | 位图纹理操作 | 中优 |
 | LayerManager.cpp | `CopyRect` `GetOrCreateDrawBuffer` `SetHoldAlpha` | 合成管线 API | 中优（与 GPU 合成改造相关） |
-| XP3Archive.cpp | `Create` `Init` `TVPSetXP3ArchiveContentFilter` | **TJS 可见的 XP3 归档对象 + content filter**（新版加密方案） | 高优（新型加密标题） |
+| XP3Archive.cpp | `Create` `Init`；~~`TVPSetXP3ArchiveContentFilter`~~ | content filter 与六参数 extraction 契约已于 2026-09-21 移植并通过契约保护包运行验证；`Create/Init` 属归档构造架构差异 | filter 已验收；再判断是否需要公开 Create/Init |
 | TextStream.cpp | `TVPStringEncode` `_TextStream_mbstowcs` | 文本编码转换 | 中优（编码类故障相关） |
 | VorbisWaveDecoder.cpp | `Render` `SetPosition` `SetStream` | Vorbis 解码器 seek/位置支持 | 低优 |
 | WaveFormatConverter.cpp | `PCMConvertLoopFloat32ToInt16_c` `PCMConvertLoopInt16ToFloat32_c` | float32 PCM 转换 | 低优 |
