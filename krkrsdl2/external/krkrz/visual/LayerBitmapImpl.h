@@ -18,6 +18,8 @@
 
 //---------------------------------------------------------------------------
 extern void TVPSetFontCacheForLowMem();
+// Drop process-global font rasterizer state at an in-process engine restart.
+extern void TVPResetFontRasterizersForEngineRestart();
 //---------------------------------------------------------------------------
 
 

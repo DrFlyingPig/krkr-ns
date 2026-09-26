@@ -10,6 +10,7 @@
 #include <thread>
 #include "WindowImpl.h"
 #include "LayerIntf.h"
+#include "LayerBitmapImpl.h"
 #include "DrawDevice.h"
 #include "VirtualKey.h"
 #include "Application.h"
@@ -6223,6 +6224,19 @@ static void krkrsdl2_reinitialize_engine()
 	KRKRNS_LOG("[reinit] step 5b: destroy application");
 	delete ::Application;
 	::Application = nullptr;
+	{
+		// Private fonts are process-global in the SDL FreeType backend, while
+		// Kirikiroid2's normal one-title process lifetime makes them game-local.
+		// The default rasterizer and its LastBitmap/Face state are also globals,
+		// so explicitly retire those before deleting the catalog streams.
+		TVPResetFontRasterizersForEngineRestart();
+		KRKRNS_LOG("[reinit] font rasterizers reset");
+		// Otherwise two games shipping different fonts under the same filename
+		// collide and the second title fails with "Font ... cannot be used".
+		extern void TVPClearPrivateFontsForEngineRestart();
+		TVPClearPrivateFontsForEngineRestart();
+		KRKRNS_LOG("[reinit] private game fonts cleared");
+	}
 
 	// Rebuild, mirroring the startup path in main().  Only the engine part is
 	// repeated: romfs/socket/heartbeat stay as brought up once at process start.

@@ -124,6 +124,7 @@ private:
 
 public:
 	~tTVPFreeTypeFaceList();
+	void ClearPrivateFonts();
 	bool LoadFont( tjs_string filename, std::vector<tjs_string>* faces );
 	void LoadSystemFont( std::string path, std::vector<tjs_string>* faces );
 	void GetSystemFontList( std::vector<tjs_string>& faces );
@@ -179,6 +180,13 @@ static inline void TVPInitializeFaceList() {
 static void TVPClearFaceList() { if( FreeTypeFaceList ) delete FreeTypeFaceList, FreeTypeFaceList = nullptr; }
 static tTVPAtExit TVPClearFaceListAtExit
 	(TVP_ATEXIT_PRI_SHUTDOWN, TVPClearFaceList);
+// KRKR-ns runs multiple titles in one process.  Kirikiroid2 normally gets a
+// fresh process per title, so fonts registered through System.addFont cannot
+// leak into the next game there.  Keep system fonts, but discard the finished
+// game's archive-backed private faces once all of its script objects are gone.
+void TVPClearPrivateFontsForEngineRestart() {
+	if( FreeTypeFaceList ) FreeTypeFaceList->ClearPrivateFonts();
+}
 //---------------------------------------------------------------------------
 bool TVPAddFontToFreeType( const ttstr& storage, std::vector<tjs_string>* faces ) {
 	TVPInitializeFaceList();
@@ -315,15 +323,19 @@ static void TVPLoadFont( FT_Open_Args& arg, std::vector<FontInfo*>& fonts, std::
 }
 //---------------------------------------------------------------------------
 tTVPFreeTypeFaceList::~tTVPFreeTypeFaceList() {
-	for( auto i = faces_.begin(); i != faces_.end(); i++ ) {
-		delete (*i);
-	}
-	faces_.clear();
+	ClearPrivateFonts();
 	for( auto i = systemfaces_.begin(); i != systemfaces_.end(); i++ ) {
 		delete (*i);
 	}
 	systemfaces_.clear();
 	systemfont_.clear();
+}
+//---------------------------------------------------------------------------
+void tTVPFreeTypeFaceList::ClearPrivateFonts() {
+	for( auto i = faces_.begin(); i != faces_.end(); i++ ) {
+		delete (*i);
+	}
+	faces_.clear();
 }
 //---------------------------------------------------------------------------
 bool tTVPFreeTypeFaceList::LoadFont( tjs_string filename, std::vector<tjs_string>* faces ) {
@@ -384,7 +396,11 @@ tBaseFreeTypeFace* tTVPFreeTypeFaceList::GetFace( const tjs_string& facename, tj
 		} );
 		if( f != faces_.end() ) {
 			FontInfo* font = *f;
-			return new tGenericFreeTypeFace( ttstr( font->filename ), TVP_FACE_OPTIONS_FACE_INDEX( font->index ), font->file.get() );
+			// Keep the stream lifetime tied to the live FT_Face.  The catalog is
+			// session-scoped in KRKR-ns and is cleared between launcher titles;
+			// borrowing FontInfo::file here would leave a surviving rasterizer
+			// with a dangling stream after that clear.
+			return new tGenericFreeTypeFace( ttstr( font->filename ), TVP_FACE_OPTIONS_FACE_INDEX( font->index ), nullptr );
 		}
 		// スタイル気にせず検索する
 		f = std::find_if( faces_.begin(), faces_.end(),
@@ -394,7 +410,7 @@ tBaseFreeTypeFace* tTVPFreeTypeFaceList::GetFace( const tjs_string& facename, tj
 		});
 		if( f != faces_.end() ) {
 			FontInfo* font = *f;
-			return new tGenericFreeTypeFace( ttstr( font->filename ), TVP_FACE_OPTIONS_FACE_INDEX( font->index ), font->file.get() );
+			return new tGenericFreeTypeFace( ttstr( font->filename ), TVP_FACE_OPTIONS_FACE_INDEX( font->index ), nullptr );
 		}
 	} else {
 		FaceKey key( facename, options&( TVP_TF_ITALIC | TVP_TF_BOLD ) );

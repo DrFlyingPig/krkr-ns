@@ -103,6 +103,7 @@ void TVPUninitializeFontRasterizers() {
 		delete TVPFontSystem;
 		TVPFontSystem = NULL;
 	}
+	TVPFontRasterizersInit = false;
 }
 static tTVPAtExit
 	TVPUninitializeFontRaster(TVP_ATEXIT_PRI_RELEASE, TVPUninitializeFontRasterizers);
@@ -272,6 +273,17 @@ void TVPSetFontCacheForLowMem()
 void TVPClearFontCache()
 {
 	TVPFontCache.Clear();
+}
+//---------------------------------------------------------------------------
+void TVPResetFontRasterizersForEngineRestart()
+{
+	// Both the glyph cache and FreeTypeFontRasterizer are process globals.
+	// A rebuilt script/application session must not retain a Face or LastBitmap
+	// belonging to the title that just closed.
+	TVPClearFontCache();
+	TVPUninitializeFontRasterizers();
+	TVPCurrentFontRasterizers = FONT_RASTER_FREE_TYPE;
+	TVPGlobalFontStateMagic++;
 }
 //---------------------------------------------------------------------------
 struct tTVPClearFontCacheCallback : public tTVPCompactEventCallbackIntf
