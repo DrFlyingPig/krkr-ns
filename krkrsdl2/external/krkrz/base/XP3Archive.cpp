@@ -45,6 +45,10 @@ void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter)
 {
 	TVPXP3ArchiveContentFilter = filter;
 }
+bool TVPHasXP3ArchiveFilters()
+{
+	return TVPXP3ArchiveExtractionFilter != nullptr || TVPXP3ArchiveContentFilter != nullptr;
+}
 //---------------------------------------------------------------------------
 
 

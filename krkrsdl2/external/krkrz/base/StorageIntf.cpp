@@ -36,6 +36,7 @@
 #include "tjsDictionary.h"
 #ifdef __SWITCH__
 #include "ScriptMgnIntf.h"
+#include "LauncherArtworkStorage.h"
 
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
 extern std::vector<ttstr> krkrsdl2_list_game_files(const ttstr &game_directory);
@@ -2497,6 +2498,47 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGameDirectoryList)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getGameDirectoryList)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/scanGameArtwork)
+{
+	if(numparams < 1) return TJS_E_BADPARAMCOUNT;
+	ttstr mode(TJS_W("game"));
+	if(numparams > 1 && param[1]->Type() != tvtVoid) mode = *param[1];
+	iTJSDispatch2 *value = krkrns_launcher_artwork::ScanGameArtwork(*param[0], mode);
+	try { if(result) *result = tTJSVariant(value, value); }
+	catch(...) { value->Release(); throw; }
+	value->Release();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/scanGameArtwork)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGameArtworkChoices)
+{
+	iTJSDispatch2 *value = krkrns_launcher_artwork::GetGameArtworkChoices();
+	try { if(result) *result = tTJSVariant(value, value); }
+	catch(...) { value->Release(); throw; }
+	value->Release();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getGameArtworkChoices)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/setGameArtworkChoice)
+{
+	if(numparams < 3) return TJS_E_BADPARAMCOUNT;
+	const bool saved = krkrns_launcher_artwork::SetGameArtworkChoice(*param[0], *param[1], *param[2]);
+	if(result) *result = saved;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/setGameArtworkChoice)
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/makeGameArtworkThumbnail)
+{
+	if(numparams < 3) return TJS_E_BADPARAMCOUNT;
+	const ttstr saved = krkrns_launcher_artwork::MakeGameArtworkThumbnail(*param[0], *param[1], *param[2]);
+	if(result) *result = saved;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/makeGameArtworkThumbnail)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getGameFileList)
 {

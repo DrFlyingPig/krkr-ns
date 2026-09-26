@@ -67,6 +67,8 @@ extern tTVPXP3ArchiveExtractionFilter TVPXP3ArchiveExtractionFilter;
 //---------------------------------------------------------------------------
 TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveExtractionFilter, (tTVPXP3ArchiveExtractionFilter filter));
 TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveContentFilter, (tTVPXP3ArchiveContentFilter filter));
+// Launcher image decoding must never invoke a game's archive callbacks.
+extern bool TVPHasXP3ArchiveFilters();
 //---------------------------------------------------------------------------
 
 

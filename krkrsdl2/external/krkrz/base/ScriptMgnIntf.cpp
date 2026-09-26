@@ -33,6 +33,7 @@
 #include "tjsDictionary.h"
 #include "ScriptMgnIntf.h"
 #include "StorageIntf.h"
+#include "XP3Archive.h"
 #include "DebugIntf.h"
 #include "WindowIntf.h"
 #include "LayerIntf.h"
@@ -464,6 +465,9 @@ void TVPRestartScriptEngine()
 // Clearing both latches is what makes a second, pristine engine possible.
 void krkrsdl2_reset_script_engine_for_restart()
 {
+	// A fresh launcher cannot retain the completed game's archive callbacks.
+	// In particular its independent artwork decoder never executes filter code.
+	TVPSetXP3FilterScript(ttstr());
 	KRKRNS_LOG("[reinit] script engine: uninit (init=%d uninit=%d engine=%p global=%p)",
 		(int)TVPScriptEngineInit, (int)TVPScriptEngineUninit,
 		(void *)TVPScriptEngine,
@@ -479,6 +483,9 @@ void krkrsdl2_reset_script_engine_for_restart()
 	{
 		KRKRNS_LOG("[reinit] script engine: uninit threw, continuing the restart");
 	}
+	// Script finalizers may register a callback during shutdown. The launcher
+	// begins with no completed game's archive filters, including that case.
+	TVPSetXP3FilterScript(ttstr());
 	TVPScriptEngineUninit = false; // re-arm the one-shot shutdown latch
 	TVPScriptEngineInit = false;   // and the one-shot init latch
 	KRKRNS_LOG("[reinit] script engine: latches cleared, next init builds a fresh engine");

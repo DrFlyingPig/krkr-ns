@@ -4722,6 +4722,7 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 #ifdef __SWITCH__
 void TVPWindowWindow::switch_process_gamepad_input()
 {
+	extern bool krkrsdl2_game_mode;
 	if (isBeingDeleted || !window || !hasDrawn)
 	{
 		return;
@@ -4787,6 +4788,12 @@ void TVPWindowWindow::switch_process_gamepad_input()
 			continue;
 		}
 		bool pressed = !!(buttons & bit);
+		// The launcher handles native PAD1..PAD4 as Nintendo A/B/X/Y.
+		// Game-only click/Space/Enter synthesis would deliver a second action
+		// to that UI (for example X opening options and then confirming them).
+		// Keep the existing pointer/keyboard controls inside game sessions.
+		if (!krkrsdl2_game_mode && b >= NS_GP_BTN_A && b <= NS_GP_BTN_Y)
+			continue;
 		switch (b)
 		{
 			// IMPORTANT (NS vs Xbox face buttons): SDL_CONTROLLER_BUTTON_*
@@ -5997,8 +6004,9 @@ void switch_game_mount(void)
 	mkdir(krkrsdl2_game_root, 0777);
 	krkrsdl2_game_mode = false;
 	TVPStartupScriptName = ttstr(TJS_W("file://?/romfs:/startup.tjs"));
-	const auto directories = krkrsdl2_list_game_directories();
-	KRKRNS_LOG("[launcher] browser mode, %u game directorie(s)", (unsigned)directories.size());
+	// The launcher owns the library scan. Counting folders here would traverse
+	// the same SD directory again solely for a diagnostic message.
+	KRKRNS_LOG("[launcher] browser mode; library scan deferred to launcher");
 }
 #endif
 
