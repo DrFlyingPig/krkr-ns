@@ -1192,10 +1192,38 @@ static bool TVPClearAutoPathCacheCallbackInit = false;
 // ---------------------------------------------------------------------------
 static std::unordered_map<std::string, ttstr> krkrns_primary_archive_names;
 static ttstr krkrns_primary_archive_path;
+static std::unordered_map<std::string, bool> krkrns_overlay_archives;
+
+// A package without its own startup.tjs supplements the selected game rather
+// than defining another entry. Preserve its normal auto-path priority, just
+// like patch.xp3, regardless of its filename (localisations often use the
+// product name). Otherwise a selected base package replaces a localisation's
+// AppConfig.tjs and changes saveDataID, silently rejecting its existing saves.
+static bool krkrns_is_overlay_archive(const ttstr &archive_name)
+{
+	const std::string key = krkrns_utf8_of_path(archive_name);
+	auto cached = krkrns_overlay_archives.find(key);
+	if(cached != krkrns_overlay_archives.end()) return cached->second;
+	bool overlay = false;
+	tTVPArchive *arc = nullptr;
+	try
+	{
+		arc = TVPArchiveCache.Get(archive_name);
+		overlay = !arc->IsExistent(TJS_W("startup.tjs"));
+	}
+	catch(...)
+	{
+		// Unknown packages retain the previous entry-priority behaviour.
+	}
+	if(arc) arc->Release();
+	krkrns_overlay_archives.emplace(key, overlay);
+	return overlay;
+}
 
 void krkrns_set_primary_archive(const ttstr & archive_autopath)
 {
 	krkrns_primary_archive_names.clear();
+	krkrns_overlay_archives.clear();
 	// The auto path form carries the archive delimiter ("...dtcn.xp3>"); the
 	// cache is keyed by the bare archive name.
 	krkrns_primary_archive_path = TVPNormalizeStorageName(archive_autopath);
@@ -1230,6 +1258,7 @@ void krkrns_clear_primary_archive()
 {
 	krkrns_primary_archive_names.clear();
 	krkrns_primary_archive_path = ttstr();
+	krkrns_overlay_archives.clear();
 }
 
 void TVPAddAutoPath(const ttstr & name)
@@ -1613,9 +1642,8 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 		// name the localisation archive also carries.  Two kinds of winner must
 		// be left alone, because the ecosystem puts them on top on purpose:
 		// the engine's compat/patch override layers (our Switch shims shadow
-		// the desktop copies the games ship) and patch-style archives
-		// (patch.xp3, *patch*.xp3 -- "apply after the base data" is what those
-		// names mean).
+		// the desktop copies the games ship) and supplemental archives without
+		// their own startup.tjs, including localisations and patch-style names.
 		bool winner_is_override = false;
 		{
 			// Storage names are normalized to lower case (the log printed
@@ -1633,9 +1661,12 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 			const tjs_char * sharp = TJS_strchr(winnerArchive.c_str(), TVPArchiveDelimiter);
 			if(sharp) winnerArchive = ttstr(winnerArchive.c_str(),
 				(int)(sharp - winnerArchive.c_str()));
-			winnerArchive = TVPExtractStorageName(winnerArchive);
-			winnerArchive.ToLowerCase();
-			if(TJS_strstr(winnerArchive.c_str(), TJS_W("patch"))) winner_is_override = true;
+			if(sharp && !winner_is_override &&
+			   !found.StartsWith(krkrns_primary_archive_path))
+				winner_is_override = krkrns_is_overlay_archive(winnerArchive);
+			ttstr winnerName = TVPExtractStorageName(winnerArchive);
+			winnerName.ToLowerCase();
+			if(TJS_strstr(winnerName.c_str(), TJS_W("patch"))) winner_is_override = true;
 		}
 		if(!winner_is_override && !krkrns_primary_archive_names.empty() &&
 		   !found.StartsWith(krkrns_primary_archive_path))
@@ -2794,5 +2825,4 @@ tTJSNativeInstance * tTJSNC_Storages::CreateNativeInstance()
 	return NULL;
 }
 //---------------------------------------------------------------------------
-
 

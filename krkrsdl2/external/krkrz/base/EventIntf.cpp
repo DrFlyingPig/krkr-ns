@@ -212,6 +212,17 @@ static void TVPDestroyEventQueue()
 static tTVPAtExit TVPDestroyEventQueueAtExit
 	(TVP_ATEXIT_PRI_PREPARE, TVPDestroyEventQueue);
 
+void TVPClearEventsForEngineRestart()
+{
+	// Call after stopping timer producers, while old script objects can still
+	// release normally. Idle timer events otherwise retain their action owners
+	// and run against invalidated globals in the launcher's fresh engine.
+	TVPDestroyEventQueue();
+	TVPWinUpdateEventQueue.clear();
+	TVPExclusiveEventPosted = false;
+	TVPProcessContinuousHandlerEventFlag = false;
+}
+
 bool TVPEventDisabled = false;
 bool TVPEventInterrupting = false;
 

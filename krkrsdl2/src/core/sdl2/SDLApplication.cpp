@@ -6172,8 +6172,15 @@ static void krkrsdl2_reinitialize_engine()
 		TVPClearGraphicCache();
 	}
 	{
+#ifdef TVP_FAUDIO_IMPLEMENT
+		// WaveIntf creates QueueSoundBuffer on this build.  The legacy
+		// DirectSound release only visits a different, unused buffer list.
+		extern void TVPReleaseQueueSoundBuffers();
+		TVPReleaseQueueSoundBuffers();
+#else
 		extern void TVPReleaseDirectSound();
 		TVPReleaseDirectSound();
+#endif
 	}
 
 	// Plugins register classes into the script engine, so unregister them while
@@ -6212,6 +6219,12 @@ static void krkrsdl2_reinitialize_engine()
 		// natively.  Drop them while the old engine can still Release them.
 		extern void TVPClearContinuousHandlers();
 		TVPClearContinuousHandlers();
+		// Timer callbacks and queued idle events also retain script owners.
+		// Stop the producer before releasing the queues; a fresh timer thread
+		// is created lazily by the next engine's Timer constructors.
+		tTVPTimerThread::Uninit();
+		TVPClearEventsForEngineRestart();
+		KRKRNS_LOG("[reinit] script timers and pending events cleared");
 		// Same reasoning for the video-overlay registry: it is process-global
 		// and must not hand the next session an overlay the game leaked.
 		TVPClearVideoOverlays();

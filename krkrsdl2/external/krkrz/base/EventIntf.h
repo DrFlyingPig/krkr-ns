@@ -242,6 +242,8 @@ TJS_EXP_FUNC_DEF(void, TVPRemoveContinuousEventHook, (tTVPContinuousEventCallbac
 /* KRKR-ns: drop all script-registered continuous handlers (process-global
  * state that must not survive an in-process engine rebuild). */
 extern void TVPClearContinuousHandlers();
+// Discard events owned by the old script engine before rebuilding it.
+extern void TVPClearEventsForEngineRestart();
 
 extern void TVPBeginContinuousEvent();
 	// must be implemented in each platforms

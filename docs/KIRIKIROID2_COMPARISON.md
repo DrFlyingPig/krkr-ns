@@ -142,6 +142,7 @@
 | 菜单闪退 | ここは… | MenuItem 类 | 已修（TJS 模型/原生按需） |
 | E-mote 不渲染 | 多个 | 私有插件探测 | 已修（自研内置） |
 | 转场全炸 ×4067 | LimeLight | sysTransitionEffect/layerStwCopy（K2 APK 私有） | 未修（backlog P1） |
+| 系统设置闪退 | KAGEX 设置界面 | 初始化脚本覆盖探测后，原生内置表漏报 layerStwCopy，未创建 sysTransitionEffect | **已修 P93**，2026-09-26 用户确认；完整包裹缩放转场算法仍待移植 |
 | clipAlphaRect 缺失 | xgkfg | LayerExImage（K2 APK 私有） | 垫片已修 |
 | 影片后闪退 | 晴菜花 | SwitchMovieOverlay 音频环形缓冲越界 | 已修 |
 | 存档删除失败 | 晴菜花 | 路径规范化 + TJS 层包装 | 已修 |

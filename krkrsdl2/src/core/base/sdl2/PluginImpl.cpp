@@ -71,6 +71,9 @@ extern "C" void krkrsdl2_link_varfile_plugin();
 extern "C" void krkrsdl2_link_savestruct_plugin();
 extern "C" void krkrsdl2_link_getsample_plugin();
 extern "C" void krkrsdl2_link_wutcwf_plugin();
+#ifdef KRKRSDL2_ENABLE_ALPHAMOVIE
+extern "C" void krkrsdl2_link_alphamovie_plugin();
+#endif
 
 
 //---------------------------------------------------------------------------
@@ -545,7 +548,8 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 	// Plugins that attach members instead of registering a class (or that only
 	// register a storage media) cannot be detected through the global object;
 	// their registration is static, so the name alone means "available".
-	if (name == TJS_W("varfile.dll") ||   // var:// storage media
+	if (name == TJS_W("layerstwcopy.dll") || // Layer.stitchWrappedCopy (core binding)
+		name == TJS_W("varfile.dll") ||   // var:// storage media
 		name == TJS_W("getabout.dll") ||  // System.getAboutString
 		name == TJS_W("addfont.dll") ||   // System.addFont
 		name == TJS_W("fftgraph.dll") ||  // drawFFTGraph (stub)
@@ -563,6 +567,9 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 	// subsystems on FILE-EXISTENCE PROBES of plugin names before Plugins.link;
 	// the built-ins have no file behind them, so those probes must be answered
 	// here (see TVPGetPlacedPath in StorageIntf.cpp).  Lower-cased short name.
+#ifdef KRKRSDL2_ENABLE_ALPHAMOVIE
+	if (short_name == TJS_W("alphamovie.dll")) return true;
+#endif
 	if (short_name == TJS_W("emoteplayer.dll") ||
 		short_name == TJS_W("motionplayer.dll") ||
 		short_name == TJS_W("emotedriver.dll") ||
@@ -603,6 +610,19 @@ void TVPLoadPlugin(const ttstr & name)
 {
 #ifdef __SWITCH__
 	const ttstr short_name = TVPExtractStorageName(name).AsLowerCase();
+#ifdef KRKRSDL2_ENABLE_ALPHAMOVIE
+	if (short_name == TJS_W("alphamovie.dll"))
+	{
+		krkrsdl2_link_alphamovie_plugin();
+		ncbAutoRegister::LoadModule(short_name);
+		if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())
+		{
+			if (ns_builtin_plugins.insert(short_name).second)
+				TVPAddLog(TJS_W("(info) loaded built-in plugin: alphamovie.dll"));
+			return;
+		}
+	}
+#endif
 #ifdef KRKRSDL2_ENABLE_EMOTEPLAYER
 	// Games refer to the E-mote KAG integration by several DLL names
 	// (Yuzusoft titles use motionplayer.dll, others emoteplayer.dll).

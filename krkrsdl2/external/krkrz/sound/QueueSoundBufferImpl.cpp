@@ -131,6 +131,16 @@ static void TVPShutdownSoundBuffers() {
 }
 static tTVPAtExit TVPShutdownWaveSoundBuffersAtExit( TVP_ATEXIT_PRI_PREPARE, TVPShutdownSoundBuffers );
 //---------------------------------------------------------------------------
+// The launcher restarts the script engine without running process-exit hooks.
+// Stop this backend's event thread and release its voices while the old script
+// owners are still alive.  Keep the process audio device: video overlays and
+// remaining native instances still own streams until their normal teardown.
+void TVPReleaseQueueSoundBuffers()
+{
+	TVPShutdownSoundBuffers();
+	TVPAddLog(TJS_W("[reinit] queue sound buffers released"));
+}
+//---------------------------------------------------------------------------
 //---------------------------------------------------------------------------
 
 //---------------------------------------------------------------------------
@@ -197,6 +207,9 @@ void tTJSNI_QueueSoundBuffer::ReleaseSoundBuffer( bool disableevent ) {
 	if( disableevent )
 		CanDeliverEvents = false; // temporarily disables event derivering
 	Stop();
+	// A session restart can leave the script object alive until finalization;
+	// forget its queued sample pointers before DestroySoundBuffer frees them.
+	Player.Clear();
 	DestroySoundBuffer();
 	CanDeliverEvents = b;
 }

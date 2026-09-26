@@ -8,6 +8,37 @@
 
 ## 已应用补丁 (源码层)
 
+### P93: 设置页的内置插件探测与会话事件清理（2026-09-26）
+
+- **故障与证据**：进入 `option.ks` 的 `SysTransEffectOpen` 后读取 `kag.sysTransitionEffect` 抛缺成员异常，游戏结束并返回启动器。`uisystem.tjs` 只在 `CanLoadPlugin("layerStwCopy.dll")` 为真时创建该对象；游戏 `initialize.tjs` 后定义的探测函数覆盖了启动前的脚本包装。引擎已有 `Layer.stitchWrappedCopy`，但内置插件表漏了该名称，游戏原生的 storage 探测因此返回假。
+- **修复**：把 `layerstwcopy.dll` 加入 `TVPHasSwitchBuiltin`，统一文件存在性探测、放置路径和 `Plugins.link` 对已有核心方法的回答。没有向游戏补写假的转场对象，也没有恢复 AlphaMovie 占位类。本补丁不改变旧 `stitchWrappedCopy` 的裁剪/普通 Blt 实现，完整包裹缩放算法仍是独立的兼容性工作。
+- **会话清理**：停止旧 `tTVPTimerThread` 后清空普通、idle、输入及窗口更新事件，再销毁脚本引擎。避免旧 Timer 的 action owner 在启动器新引擎里继续读取已消失的 `SystemConfig`；下一局首次创建 Timer 时重新建立线程。
+- **历史与对照**：`56be88b2`（2026-09-19）的兼容性报告已经记录 `sysTransitionEffect/layerStwCopy` 故障。加入原生 AlphaMovie 之前的 NRO `4684C057E581D302B683E253D09BC5F18DD6C1AB3BD1342F7EEEC8CB083D4316` 在相同资源与配置下仍复现设置闪退，日志再次确认缺少同一成员。故不能归因于本次 P92；尚未用更早、设置确实正常的运行基线定位最初触发的提交。
+- **验收与部署**：Switch 构建成功；修复版 NRO SHA-256 `3141223231D895D1CF454BE9722A9A147B76A3D1D9F2B5018A23583BCEF7047C`。用户确认剧情流程和系统设置均正常；两次修复版日志均成功加载 `layerstwcopy.dll`，没有脚本异常，其中一次正常返回启动器并确认 timer/事件清理。旧版对照结束后，工程构建路径和模拟器部署路径均恢复为此修复版。
+
+### P92: 原生 AlphaMovie / AJPM 解码与脚本播放接口（2026-09-26）
+
+- **修复**：在 `src/plugins/alphamovie` 实现真正的内置 `AlphaMovie.dll`，通过 ncbind 注册原生类，并接入插件可用性探测、列表、会话卸载和 CMake 静态链接。公共兼容脚本不再定义同名占位类。支持 TJS 子类有、无显式基类构造的调用。
+- **解码与存储**：通过 TVP storage 读取 XP3 内的 AJPM revision 0，支持 alpha mode 1 的 Huffman/DCT alpha 和 mode 2 的 zlib alpha。建立帧索引并逐帧解码，缓存上限 32 MiB，不全片展开。对容器跨度、输入边界、熵编码、图像尺寸和 alpha 解压长度做检查。
+- **接口语义**：根据原插件手册和 64 位原 DLL 实测，保留零起始的 `showNextImage` 返回值、`frame` seek、播放重启、停止、循环、下一段切换与元数据切换、预读及清理。非循环播放持有末帧直至脚本 stop，空帧不改动目标图层；游戏自己的 GenericFlip / handler 控制显示时钟。
+- **图层输出**：按原 DLL 写入 BGRA，保留完整编码矩形、位置与 padding，支持负 pitch。原 DLL 在 `ltAddAlpha/dfAddAlpha` 目标上也直接写入像素，故不额外做预乘或提前裁剪到画布尺寸。
+- **验证**：主机单元检查通过；原始素材 6 段和兼容补丁素材 6 段共 1882 帧完整解码通过。9 个抽样帧与移植参考解码器逐字节一致；与原 DLL 对照，zlib alpha 完全一致，DCT/颜色存在最大 4 个灰度级的整数 IDCT/色彩舍入差异。Switch 原生脚本集成与最终设备画面验收另见 [ALPHAMOVIE_SUPPORT.md](ALPHAMOVIE_SUPPORT.md)。
+
+### P91: 保留无独立启动脚本的补丁包优先级，避免旧存档 ID 不匹配（2026-09-26）
+
+- **故障**：确认快速读档后仍停在当前剧情；日志执行 `invokeLoad` 后回到 `page_done`，没有恢复剧情。
+- **证据**：旧快速存档和继续存档保存的 ID 与补充包 `AppConfig.tjs` 一致，运行时的 anchor ID 却来自原始入口包。日志确认补充包的 `appconfig.tjs` 被启动包优先规则改指到入口包的同名文件。KAG 的 `readBookMarkFromFile` / `KAGBookMarkInterface.isValid` 按 ID 拒绝旧存档。
+- **修复**：仅保护独立入口包免受其他入口包覆盖。自动路径已经选中的归档若不包含根目录 `startup.tjs`，按补充包保留原有优先级，与已有 patch 包例外一致，不再凭“启动包优先”替换其同名文件。分类按归档内容判定并缓存，在设置或清除入口时重置；兼容脚本覆盖层和已有 patch 文件名规则保持有效。不修改游戏文件或存档 ID。
+- **验收状态**：Switch 构建成功并部署，NRO SHA-256 `4684C057E581D302B683E253D09BC5F18DD6C1AB3BD1342F7EEEC8CB083D4316`。新日志确认加载汉化包 AppConfig，当前 anchor ID 与旧存档一致；确认读档后经过 `loadinit.ks/doLoad()`，恢复 `start.ks/*envplay` 并继续剧情。用户随后确认“现在正常了”。
+
+### P90: 撤销 AlphaMovie 虚假能力声明，释放实际队列音频（2026-09-26）
+
+- **故障**：进入标题后，点击“开始游戏”在第一段 AMV 的 `GFX_AMovie.restart` 报 `Member "open" does not exist`；清理时又报 `Member "finalize" does not exist`，返回启动器后 BGM 仍响。
+- **来源**：P75 / `963ba665` 为兼容 KAG3 的 AMV 脚本加入公共 `AlphaMovie` 占位类。它没有解码器，且缺少 AMV 接口；类的存在改变了插件能力探测。
+- **修复**：从 `k2compat_reinstall.tjs` 删除占位类，让未实现的能力保持缺失；只有真正实现插件完整契约时才注册该名称。原先依赖此占位类的 KAG3 游戏仍需真实 AlphaMovie 支持，本补丁不宣称它可以播放 AMV。
+- **音频会话清理**：`TVP_FAUDIO_IMPLEMENT` 构建重启时调用新增的 `TVPReleaseQueueSoundBuffers()`，使用现有 `TVPSoundBuffers.Shutdown()` 停止事件线程、停止解码队列并释放播放流；清除播放器的样本引用后再释放样本存储。原调用 `TVPReleaseDirectSound()` 只遍历另一套旧缓冲区。保留进程音频设备，避免尚待正常析构的视频流或原生实例持有悬空设备引用。
+- **验收状态**：原生 AMV 实现后，用户已确认启动与剧情运行正常；主机检查和跨会话原生脚本集成通过。构建与部署结果见 P92、P93。
+
 ### P89: 换游戏字体会话隔离 — 修复同名字体冲突与退出黑屏（2026-09-21）
 
 - **原始故障**：KRKR-ns 的启动器在同一进程内连续运行多个标题；不同游戏可能携带同名 `SourceHanSansJP-*.otf`。FreeType 私有字体目录却是进程全局状态，导致后启动的“九次九日九重色”把另一游戏的同名文件误判为已加载，最终在 `PreRenderFontEx.getTextWidth` 报 `Font ... cannot be used`。

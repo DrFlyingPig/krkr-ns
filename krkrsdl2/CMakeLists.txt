@@ -585,6 +585,9 @@ src/plugins/fftgraph/FftGraph.cpp
 src/plugins/win32dialog/Win32Dialog.cpp
 src/plugins/varfile/VarFile.cpp
 src/plugins/savestruct/SaveStruct.cpp
+src/plugins/alphamovie/AlphaMovie.cpp
+src/plugins/alphamovie/AmvMovie.cpp
+src/plugins/alphamovie/AmvCodec.cpp
 src/plugins/ncbind/ncbind.cpp
 src/plugins/emoteplayer/BinaryAccessor.cpp
 src/plugins/emoteplayer/emotefile.cpp
@@ -612,6 +615,7 @@ src/plugins/fftgraph
 src/plugins/win32dialog
 src/plugins/varfile
 src/plugins/savestruct
+src/plugins/alphamovie
 src/plugins/ncbind
 src/plugins/emoteplayer
 external/krkrz/external/glm
@@ -622,6 +626,7 @@ list(APPEND KRKRSDL2_DEFINITIONS
 	KRKRSDL2_ENABLE_CSVPARSER
 	KRKRSDL2_ENABLE_TEXTRENDER
 	KRKRSDL2_ENABLE_EMOTEPLAYER
+	KRKRSDL2_ENABLE_ALPHAMOVIE
 	TVP_VORBIS_DECODER_IMPLEMENT
 	TVP_IMAGE_ENABLE_WEBP
 	USE_OBSOLETE_FUNCTIONS
