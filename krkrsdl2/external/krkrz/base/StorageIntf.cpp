@@ -12,6 +12,7 @@
 #include "KrkrNSLog.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <memory>
 #include <set>
@@ -1978,7 +1979,7 @@ void TVPClearStorageCaches()
 //---------------------------------------------------------------------------
 // tTJSNC_Storages
 //---------------------------------------------------------------------------
-// Storages.fstat / getTime / deleteFile / copyFile / dirlist / dirlistEx
+// Storages.fstat / getTime / deleteFile / copyFile / moveFile / dirlist / dirlistEx
 //
 // Ported from krkrsdl3's plugins/fstat.cpp, the ncbind plugin kirikiri exposes
 // as fstat.dll.  A KAG BASE ADV SYSTEM title (v1_KR_Xmoe_晴菜花) leans on it in
@@ -2006,8 +2007,10 @@ void TVPClearStorageCaches()
 // ctime] with attrib 0 for the regular files the listing yields; deleteFile
 // removes only names with a local form and clears the storage caches on
 // success; copyFile copies through the engine's streams, which also creates a
-// missing destination folder.  The rest of the plugin (setTime, exportFile,
-// truncateFile, moveFile, dirtree, md5, temporary files, file selector) stays
+// missing destination folder; moveFile renames local files without replacing
+// an existing destination and clears the storage caches on success.
+// The rest of the plugin (setTime, exportFile,
+// truncateFile, dirtree, md5, temporary files, file selector) stays
 // out of this port.
 //
 // A Date for a POSIX timestamp, or an empty variant when there is none.  The
@@ -2143,6 +2146,53 @@ static bool TVPStoragesDeleteFile(const ttstr & file)
 	KRKRNS_LOG("[fstat] deleteFile: removed %s", path8.c_str());
 	TVPClearStorageCaches();
 	return true;
+}
+
+static bool TVPStoragesMoveFile(const ttstr & from, const ttstr & to)
+{
+	KRKRNS_LOG("[fstat] moveFile('%s' -> '%s')", krkrns_utf8_of_path(from).c_str(),
+		krkrns_utf8_of_path(to).c_str());
+	if(from.IsEmpty() || to.IsEmpty()) return false;
+	try
+	{
+		ttstr src = TVPStoragesPlacedName(from);
+		ttstr dst = TVPNormalizeStorageName(to);
+		if(src.IsEmpty() || dst.IsEmpty()) return false;
+
+		// Both ends must be local: archive members cannot be renamed.  Resolve
+		// only the source through auto paths; a destination is an exact name.
+		ttstr local_src = src, local_dst = dst;
+		TVPGetLocalName(local_src);
+		TVPGetLocalName(local_dst);
+		local_src = TVPStoragesNativePath(local_src);
+		local_dst = TVPStoragesNativePath(local_dst);
+		if(local_src == local_dst) return false;
+
+		// fstat's public contract requires an absent destination.  POSIX rename
+		// otherwise replaces it, so check using the media's stat-free route.
+		if(TVPIsExistentStorageNoSearch(dst)) return false;
+		std::string src8, dst8;
+		if(!TVPUtf16ToUtf8(src8, tjs_string(local_src.c_str())) ||
+		   !TVPUtf16ToUtf8(dst8, tjs_string(local_dst.c_str()))) return false;
+
+		// fsdev supports rename on SD files.  Do not emulate a move by copying
+		// and then deleting the source: a failed copy must never lose a save.
+		if(std::rename(src8.c_str(), dst8.c_str()) != 0)
+		{
+			const int err = errno;
+			KRKRNS_LOG("[fstat] moveFile: rename(%s -> %s) failed, errno=%d",
+				src8.c_str(), dst8.c_str(), err);
+			return false;
+		}
+		TVPClearStorageCaches();
+		KRKRNS_LOG("[fstat] moveFile: moved %s -> %s", src8.c_str(), dst8.c_str());
+		return true;
+	}
+	catch(...)
+	{
+		KRKRNS_LOG("[fstat] moveFile: names are not writable local files");
+		return false;
+	}
 }
 
 static bool TVPStoragesCopyFile(const ttstr & from, const ttstr & to)
@@ -2780,6 +2830,15 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/copyFile) {
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/copyFile )
 //----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/moveFile) {
+	if( numparams < 2 ) return TJS_E_BADPARAMCOUNT;
+	// The move is a side effect even when the caller discards its result.
+	const bool moved = TVPStoragesMoveFile( *param[0], *param[1] );
+	if( result ) *result = moved;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/moveFile )
+//----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirlist) {
 	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
 	if( result ) *result = TVPStoragesDirList( *param[0], false );
@@ -2825,4 +2884,3 @@ tTJSNativeInstance * tTJSNC_Storages::CreateNativeInstance()
 	return NULL;
 }
 //---------------------------------------------------------------------------
-
