@@ -639,12 +639,18 @@ static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 butto
 static void ns_gp_push_key(SDL_Window *window, Uint8 state, SDL_Scancode scancode)
 {
 	g_krkrns_prof.gp_push_key++;
+	KRKRNS_LOG("[keytrace] synth push %s sc=%d",
+		state == SDL_PRESSED ? "KD" : "KU", (int)scancode);
 	SDL_Event ev;
 	SDL_zero(ev);
 	ev.type = (state == SDL_PRESSED) ? SDL_KEYDOWN : SDL_KEYUP;
 	ev.key.windowID = SDL_GetWindowID(window);
 	ev.key.state = state;
 	ev.key.repeat = 0;
+	// Mark the event as ours (SDL leaves padding untouched): the poll loop
+	// drops REAL arrow-key events, and only this marker lets a synthesized
+	// arrow through it.
+	ev.key.padding2 = 0xA5;
 	ev.key.keysym.scancode = scancode;
 	ev.key.keysym.sym = SDL_GetKeyFromScancode(scancode);
 	ev.key.keysym.mod = KMOD_NONE;
@@ -4598,6 +4604,17 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 				case SDL_CONTROLLERBUTTONDOWN:
 				case SDL_CONTROLLERBUTTONUP:
 				{
+#ifdef __SWITCH__
+					// switch_process_gamepad_input already turns the d-pad into
+					// arrow keys; delivering the native VK_PAD* here as well made
+					// games that accept both streams move two rows per press.
+					if (event.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
+						event.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+					{
+						KRKRNS_LOG("[keytrace] native dpad swallowed btn=%d", (int)event.cbutton.button);
+						return true;
+					}
+#endif
 					switch (event.cbutton.state)
 					{
 						case SDL_PRESSED:
@@ -4895,6 +4912,41 @@ void sdl_process_events()
 	while (SDL_PollEvent(&event))
 	{
 		g_krkrns_prof.ev_src[(event.type >> 8) & 15]++;
+#ifdef __SWITCH__
+		// Temporary input trace for the double-move investigation: raw events
+		// as SDL delivered them, before any dispatch.
+		if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)
+		{
+			KRKRNS_LOG("[keytrace] raw %s sym=%d sc=%d rep=%d",
+				event.type == SDL_KEYDOWN ? "KD" : "KU",
+				(int)event.key.keysym.sym, (int)event.key.keysym.scancode,
+				(int)event.key.repeat);
+		}
+		else if (event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP)
+		{
+			KRKRNS_LOG("[keytrace] raw %s btn=%d",
+				event.type == SDL_CONTROLLERBUTTONDOWN ? "CBD" : "CBU",
+				(int)event.cbutton.button);
+		}
+		// One physical input, one delivered event.  The per-frame poll owns the
+		// d-pad (it synthesizes arrows below), and the emulator ALSO feeds the
+		// host keyboard through as a guest HID keyboard, so a single d-pad
+		// press used to arrive as both a REAL arrow key event and the
+		// synthesized one -- KAG navigation moved two rows per press.  Drop
+		// real arrow-key events; synthesized ones (padding2 marker) pass.
+		if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) &&
+			(event.key.keysym.scancode == SDL_SCANCODE_UP ||
+			 event.key.keysym.scancode == SDL_SCANCODE_DOWN ||
+			 event.key.keysym.scancode == SDL_SCANCODE_LEFT ||
+			 event.key.keysym.scancode == SDL_SCANCODE_RIGHT) &&
+			event.key.padding2 != 0xA5)
+		{
+			KRKRNS_LOG("[keytrace] real arrow dropped sc=%d %s",
+				(int)event.key.keysym.scancode,
+				event.type == SDL_KEYDOWN ? "KD" : "KU");
+			continue;
+		}
+#endif
 		if (event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED)
 		{
 			refresh_controllers();
