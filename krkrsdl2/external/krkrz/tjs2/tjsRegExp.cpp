@@ -257,6 +257,13 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/_compile)
 	if(numparams != 1) return TJS_E_BADPARAMCOUNT;
 
 	ttstr expr = *param[0];
+	// Oniguruma's UTF-16 backend rejects the wide-character class used by
+	// KAGEX's property parser ("\\x0100-\\xFFFF") with
+	// "too short multibyte code string" on Switch.  The krkrsdl3 reference
+	// lowers this internal expression to the equivalent word class before
+	// compiling it; keep the same compatibility behavior here.  This only
+	// applies to the internal /.../ form, not user-created RegExp patterns.
+	expr.Replace(TJS_W("\\x0100-\\xFFFF"), TJS_W("\\w"));
 
 	const tjs_char *p = expr.c_str();
 	if(!p || !p[0]) return TJS_E_FAIL;

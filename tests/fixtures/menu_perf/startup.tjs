@@ -99,6 +99,12 @@ note("solid archive opens=32 ms=" + (System.getTickCount() - began));
 
 Plugins.link("textrender.dll");
 var layout = new TextRenderBase();
+layout.setDefault(%["face" => fonts[0], "fontSize" => 24, "align" => 0, "valign" => -1]);
+layout.setRenderSize(600, 100);
+// KAGEX history invokes TextRenderBase.render only for its side effects and
+// discards the boolean return value.  The native wrapper must still render.
+layout.render("履历无返回值排版 ABC");
+check(layout.getCharacters(0, 0).count > 0, "textrender runs when its return value is ignored");
 for (var size = 18; size <= 48; size += 6) {
     layout.setDefault(%["face" => fonts[0], "fontSize" => size, "align" => 0, "valign" => 0]);
     layout.setRenderSize(600, 100);

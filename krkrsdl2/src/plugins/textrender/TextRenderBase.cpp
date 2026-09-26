@@ -730,7 +730,8 @@ tTJSNativeClass *TVPCreateNativeClass_TextRenderBase()
 			const tjs_int diff = TJS_PARAM_EXIST(2) ? static_cast<tjs_int>(*param[2]) : 0;
 			const tjs_int all = TJS_PARAM_EXIST(3) ? static_cast<tjs_int>(*param[3]) : 0;
 			const bool same = TJS_PARAM_EXIST(4) && static_cast<tjs_int>(*param[4]) != 0;
-			if (result) *result = static_cast<tjs_int>(_this->Render(text, autoIndent, diff, all, same));
+			const bool rendered = _this->Render(text, autoIndent, diff, all, same);
+			if (result) *result = static_cast<tjs_int>(rendered);
 			return TJS_S_OK;
 		}
 		TJS_END_NATIVE_METHOD_DECL(render)
