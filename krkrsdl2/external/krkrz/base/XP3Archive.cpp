@@ -39,6 +39,12 @@ void TVPSetXP3ArchiveExtractionFilter(tTVPXP3ArchiveExtractionFilter filter)
 {
 	TVPXP3ArchiveExtractionFilter = filter;
 }
+
+static tTVPXP3ArchiveContentFilter TVPXP3ArchiveContentFilter = NULL;
+void TVPSetXP3ArchiveContentFilter(tTVPXP3ArchiveContentFilter filter)
+{
+	TVPXP3ArchiveContentFilter = filter;
+}
 //---------------------------------------------------------------------------
 
 
@@ -566,15 +572,44 @@ tTJSBinaryStream * tTVPXP3Archive::CreateStreamByIndex(tjs_uint idx)
 
 	tTJSBinaryStream *stream = TVPGetCachedArchiveHandle(this, Name);
 
-	tTJSBinaryStream *out;
+	tTVPXP3ArchiveStream *out = NULL;
 	try
 	{
 		out = new tTVPXP3ArchiveStream(this, idx, &(item.Segments), stream,
 			item.OrgSize);
+
+		// Kirikiroid2's content filter runs once when an archive item is opened.
+		// It may attach per-stream state for the extraction callback and may ask
+		// the archive layer to materialize the fully filtered item in memory.
+		if(TVPXP3ArchiveContentFilter)
+		{
+			const tjs_int filter_result = TVPXP3ArchiveContentFilter(
+				item.Name, Name, item.OrgSize, &out->GetFilterContext());
+			const tjs_int XP3_CONTENT_FILTER_FETCH_FULLDATA = 1;
+			if(filter_result == XP3_CONTENT_FILTER_FETCH_FULLDATA)
+			{
+				tTVPMemoryStream *memory = new tTVPMemoryStream();
+				try
+				{
+					memory->SetSize((tjs_uint)item.OrgSize);
+					out->ReadBuffer(memory->GetInternalBuffer(), (tjs_uint)item.OrgSize);
+				}
+				catch(...)
+				{
+					delete memory;
+					throw;
+				}
+				delete out;
+				return memory;
+			}
+		}
 	}
 	catch(...)
 	{
-		TVPReleaseCachedArchiveHandle(this, stream);
+		if(out)
+			delete out;
+		else
+			TVPReleaseCachedArchiveHandle(this, stream);
 		throw;
 	}
 
@@ -1027,10 +1062,13 @@ tjs_uint TJS_INTF_METHOD tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_
 		// execute filter (for encryption method)
 		if(TVPXP3ArchiveExtractionFilter)
 		{
+			// Keep the referenced name alive across both info construction and the
+			// callback.  The non-const GetName overload returns by value.
+			const ttstr &filename = static_cast<const tTVPXP3Archive *>(Owner)->GetName(StorageIndex);
 			tTVPXP3ExtractionFilterInfo info(CurPos, (tjs_uint8*)buffer + write_size,
-				one_size, Owner->GetFileHash(StorageIndex));
+				one_size, Owner->GetFileHash(StorageIndex), filename);
 			TVPXP3ArchiveExtractionFilter
-				( (tTVPXP3ExtractionFilterInfo*) &info );
+				( (tTVPXP3ExtractionFilterInfo*) &info, &FilterContext );
 		}
 
 		// adjust members
@@ -1139,4 +1177,3 @@ void TVPExtractArchive(const ttstr & name, const ttstr & _destdir, bool allowext
 }
 #endif
 //---------------------------------------------------------------------------
-

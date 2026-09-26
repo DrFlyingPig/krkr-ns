@@ -747,6 +747,8 @@ public:
 
 	void PileRect(tjs_int dx, tjs_int dy, tTJSNI_BaseLayer *src,
 		const tTVPRect &rect, tjs_int opacity);
+	void BlendRect(tjs_int dx, tjs_int dy, tTJSNI_BaseLayer *src,
+		const tTVPRect &rect, tjs_int opacity = 255);
 
 	void CopyRect(tjs_int dx, tjs_int dy, tTVPBaseBitmap *src, tTVPBaseBitmap *provincesrc,
 		const tTVPRect &rect);
@@ -755,6 +757,12 @@ public:
 
 	void StretchCopy(const tTVPRect &destrect, tTVPBaseBitmap *src,
 		const tTVPRect &rect, tTVPBBStretchType mode = stNearest, tjs_real typeopt = 0.0);
+	void StretchPile(const tTVPRect &destrect, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
+	void StretchBlend(const tTVPRect &destrect, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
 
 	// KRKR-ns: ported from Kirikiroid2/krkrz — KAGEX titles call
 	// Layer.affinePile for their effect/UI drawing (obsoleted upstream in
@@ -764,6 +772,12 @@ public:
 		tTVPBBStretchType type = stNearest);
 
 	void AffinePile(const tTVPPointD *points, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
+	void AffineBlend(const t2DAffineMatrix &matrix, tTJSNI_BaseLayer *src,
+		const tTVPRect &srcrect, tjs_int opacity = 255,
+		tTVPBBStretchType type = stNearest);
+	void AffineBlend(const tTVPPointD *points, tTJSNI_BaseLayer *src,
 		const tTVPRect &srcrect, tjs_int opacity = 255,
 		tTVPBBStretchType type = stNearest);
 

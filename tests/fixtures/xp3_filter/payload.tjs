@@ -1,0 +1,5 @@
+// The fixture builder appends a large comment so action=1 must materialize a
+// file larger than the archive stream's normal small read chunks.
+global.xp3ContractPayload = "decrypted-through-content-context";
+Debug.message("[xp3-contract] PAYLOAD PASS");
+

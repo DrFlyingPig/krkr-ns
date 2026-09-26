@@ -29,12 +29,13 @@ struct tTVPXP3ExtractionFilterInfo
 	void * Buffer; // target data buffer
 	const tjs_uint BufferSize; // buffer size in bytes pointed by "Buffer"
 	const tjs_uint32 FileHash; // hash value of the file (since inteface v2)
+	const ttstr &FileName; // in-archive file name (Kirikiroid2 interface v3)
 
 	tTVPXP3ExtractionFilterInfo(tjs_uint64 offset, void *buffer,
-		tjs_uint buffersize, tjs_uint32 filehash) :
+		tjs_uint buffersize, tjs_uint32 filehash, const ttstr &filename) :
 			SizeOfSelf(sizeof(tTVPXP3ExtractionFilterInfo)),
 			Offset(offset), Buffer(buffer), BufferSize(buffersize),
-			FileHash(filehash) {;}
+			FileHash(filehash), FileName(filename) {;}
 };
 #pragma pack(pop)
 
@@ -49,7 +50,11 @@ struct tTVPXP3ExtractionFilterInfo
 	// for backward application compatibility.
 
 typedef void (TVP_tTVPXP3ArchiveExtractionFilter_CONVENTION *
-	tTVPXP3ArchiveExtractionFilter)(tTVPXP3ExtractionFilterInfo *info);
+	tTVPXP3ArchiveExtractionFilter)(tTVPXP3ExtractionFilterInfo *info,
+		tTJSVariant *context);
+typedef tjs_int (TVP_tTVPXP3ArchiveExtractionFilter_CONVENTION *
+	tTVPXP3ArchiveContentFilter)(const ttstr &filepath,
+		const ttstr &archivename, tjs_uint64 filesize, tTJSVariant *context);
 
 // KRKR-ns: Kirikiroid2-compatible per-game XP3 extraction filter.  The launcher
 // arms the game folder's xp3filter.tjs through this before mounting; see
@@ -61,6 +66,7 @@ extern tTVPXP3ArchiveExtractionFilter TVPXP3ArchiveExtractionFilter;
 /*]*/
 //---------------------------------------------------------------------------
 TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveExtractionFilter, (tTVPXP3ArchiveExtractionFilter filter));
+TJS_EXP_FUNC_DEF(void, TVPSetXP3ArchiveContentFilter, (tTVPXP3ArchiveContentFilter filter));
 //---------------------------------------------------------------------------
 
 
@@ -169,12 +175,14 @@ class tTVPXP3ArchiveStream : public tTJSBinaryStream
 	tTVPSegmentData *SegmentData; // uncompressed segment data
 
 	bool SegmentOpened;
+	tTJSVariant FilterContext;
 
 public:
 	tTVPXP3ArchiveStream(tTVPXP3Archive *owner, tjs_int storageindex,
 		std::vector<tTVPXP3ArchiveSegment> *segments, tTJSBinaryStream *stream,
 			tjs_uint64 orgsize);
 	~tTVPXP3ArchiveStream();
+	tTJSVariant &GetFilterContext() { return FilterContext; }
 
 private:
 	void EnsureSegment(); // ensure accessing to current segment

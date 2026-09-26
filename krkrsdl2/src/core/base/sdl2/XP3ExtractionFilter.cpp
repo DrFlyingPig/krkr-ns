@@ -10,9 +10,9 @@
 // reads happen on worker threads while the main engine is mid-execution, so a
 // private engine per thread is the only safe shape.
 //
-// Ported from Kirikiroid2 src/plugins/xp3filter.cpp (CBinaryAccessor and the
-// decoder-engine plumbing), adapted to this tree's 4-field
-// tTVPXP3ExtractionFilterInfo (no FileName) and no content-filter context.
+// Ported from Kirikiroid2 src/plugins/xp3filter.cpp (CBinaryAccessor, the
+// decoder-engine plumbing, content-filter callback and six-argument
+// extraction callback).  Platform-specific loading remains in launchXP3.
 
 #include <mutex>
 #include <map>
@@ -247,10 +247,23 @@ struct XP3FilterDecoder {
 	tTJSVariantClosure ManagedDecoder;
 	tTJSVariantClosure ManagedFilter;
 	tjs_uint ScriptVersion = 0;
+
+	XP3FilterDecoder() : ManagedDecoder(nullptr), ManagedFilter(nullptr) {;}
+	~XP3FilterDecoder()
+	{
+		// tTJSVariantClosure deliberately has no RAII lifetime management.
+		// Release registered callbacks while their private engine is still alive.
+		if (ManagedDecoder.Object || ManagedDecoder.ObjThis) ManagedDecoder.Release();
+		if (ManagedFilter.Object || ManagedFilter.ObjThis) ManagedFilter.Release();
+		ManagedDecoder.Object = ManagedDecoder.ObjThis = nullptr;
+		ManagedFilter.Object = ManagedFilter.ObjThis = nullptr;
+		if (ScriptEngine) ScriptEngine->Release();
+	}
 };
 
 static ttstr sXP3FilterScript;
 static tjs_uint sXP3FilterScriptVersion = 0;
+static bool sManagedContentFilterRegistered = false;
 
 class XP3FilterRegister : public tTJSDispatch
 {
@@ -288,6 +301,7 @@ public:
 		if (numparams < 1) return TJS_E_BADPARAMCOUNT;
 		if (Decoder->ManagedFilter.Object) Decoder->ManagedFilter.Release();
 		Decoder->ManagedFilter = param[0]->AsObjectClosure();
+		sManagedContentFilterRegistered = true;
 		return TJS_S_OK;
 	}
 };
@@ -300,8 +314,18 @@ static XP3FilterDecoder *AddXP3Decoder()
 	iTJSDispatch2 *global = decoder->ScriptEngine->GetGlobalNoAddRef();
 	tTJSVariant val;
 	iTJSDispatch2 *dsp;
-	// A minimal Storages class carrying the filter registration methods; the
-	// game filter scripts only ever call these two members on it.
+
+	// Match Kirikiroid2's private filter-script environment.  Some distributed
+	// filters use Debug/System while registering their Storages callbacks.
+	dsp = TVPCreateNativeClass_Debug();
+	val = tTJSVariant(dsp);
+	dsp->Release();
+	global->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP, TJS_W("Debug"), nullptr, &val, global);
+	dsp = TVPCreateNativeClass_System();
+	val = tTJSVariant(dsp);
+	dsp->Release();
+	global->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP, TJS_W("System"), nullptr, &val, global);
+
 	tTJSNativeClass *cls = TVPCreateNativeClass_Storages();
 	TJSNativeClassRegisterNCM(cls, TJS_W("setXP3ArchiveExtractionFilter"),
 		new XP3FilterRegister(decoder), cls->GetClassName().c_str(), nitMethod, TJS_STATICMEMBER);
@@ -326,6 +350,42 @@ static XP3FilterDecoder *FetchXP3Decoder()
 		decoder = AddXP3Decoder();
 	}
 	return decoder;
+}
+
+// Kirikiroid2 content-filter contract:
+//   callback(filepath, archiveName, fileSize) -> [action, context]
+// action 1 asks XP3Archive to read and filter the entire item into memory;
+// context is retained by that archive stream and passed to every extraction
+// callback for the item.
+static tjs_int TVP_tTVPXP3ArchiveExtractionFilter_CONVENTION
+TVPXP3ArchiveContentFilterWrapper(const ttstr &filepath, const ttstr &archivename,
+	tjs_uint64 filesize, tTJSVariant *context)
+{
+	XP3FilterDecoder *decoder = FetchXP3Decoder();
+	if (!decoder || !decoder->ManagedFilter.Object) return 0;
+
+	tTJSVariant FilePath(filepath);
+	tTJSVariant ArchiveName(archivename);
+	tTJSVariant FileSize((tjs_int64)filesize);
+	tTJSVariant *vars[] = { &FilePath, &ArchiveName, &FileSize };
+	tTJSVariant result;
+	decoder->ManagedFilter.FuncCall(0, nullptr, nullptr, &result,
+		sizeof(vars) / sizeof(vars[0]), vars, nullptr);
+
+	tjs_int action = 0;
+	if (result.Type() == tvtObject)
+	{
+		iTJSDispatch2 *array = result.AsObjectNoAddRef();
+		if (array)
+		{
+			tTJSVariant value;
+			if (TJS_SUCCEEDED(array->PropGetByNum(0, 0, &value, array)))
+				action = (tjs_int)value;
+			if (context && TJS_SUCCEEDED(array->PropGetByNum(0, 1, &value, array)))
+				*context = value;
+		}
+	}
+	return action;
 }
 
 // ---------------------------------------------------------------------------
@@ -371,11 +431,21 @@ static void NativeXorDecrypt(unsigned char *buf, unsigned len, tjs_uint64 hash, 
 	for (unsigned i = 0; i < len; ++i) buf[i] ^= key;
 }
 
-static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *info)
+static void TVP_tTVPXP3ArchiveExtractionFilter_CONVENTION
+TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *info,
+	tTJSVariant *context)
 {
+	if (info->SizeOfSelf != sizeof(tTVPXP3ExtractionFilterInfo))
+		throw eTJSError(TJS_W("Incompatible tTVPXP3ExtractionFilterInfo size"));
+
 	try
 	{
-		if (sNativeXorVerified)
+		// The native shortcut is valid only for stateless four-argument filters.
+		// A content filter or a non-void per-file context makes the six-argument
+		// callback semantically observable, so the script must remain in charge.
+		const bool native_xor_allowed = !sManagedContentFilterRegistered &&
+			(!context || context->Type() == tvtVoid);
+		if (native_xor_allowed && sNativeXorVerified)
 		{
 			NativeXorDecrypt((unsigned char*)info->Buffer, (unsigned)info->BufferSize, info->FileHash, info->Offset);
 			return;
@@ -387,7 +457,8 @@ static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *in
 			// Keep the pre-filter bytes so the native path can be checked against
 			// what the script produced.
 			unsigned char *before = nullptr;
-			if (!sNativeXorDisabled && sNativeXorChecks < kNativeXorChecksRequired)
+			if (native_xor_allowed && !sNativeXorDisabled &&
+				sNativeXorChecks < kNativeXorChecksRequired)
 			{
 				before = new unsigned char[info->BufferSize];
 				memcpy(before, info->Buffer, (size_t)info->BufferSize);
@@ -399,7 +470,12 @@ static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *in
 			tTJSVariant Buffer(buf);
 			buf->Release();
 			tTJSVariant BufferSize((tjs_int64)info->BufferSize);
-			tTJSVariant *vars[] = { &FileHash, &Offset, &Buffer, &BufferSize };
+			tTJSVariant FileName(info->FileName);
+			tTJSVariant emptyContext;
+			tTJSVariant *filterContext = context ? context : &emptyContext;
+			tTJSVariant *vars[] = {
+				&FileHash, &Offset, &Buffer, &BufferSize, &FileName, filterContext
+			};
 			decoder->ManagedDecoder.FuncCall(0, nullptr, nullptr, nullptr,
 				sizeof(vars) / sizeof(vars[0]), vars, nullptr);
 
@@ -429,11 +505,9 @@ static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *in
 	{
 		// A throwing filter would surface as an unreadable archive; log the
 		// reason plus the arguments, so an incomplete or mis-ordered parameter
-		// list can be told apart from a damaged archive.  Ours passes four
-		// arguments where Kirikiroid2 passes six (it adds the file name and the
-		// caller context); scripts that only declare four must still receive
-		// them intact.
-		KRKRNS_LOG("[xp3filter] callback threw at offset %lld size %u hash=%lld: %s",
+		// list can be told apart from a damaged archive.
+		KRKRNS_LOG("[xp3filter] callback threw for %s at offset %lld size %u hash=%lld: %s",
+			info->FileName.AsNarrowStdString().c_str(),
 			(long long)info->Offset, (unsigned)info->BufferSize,
 			(long long)info->FileHash,
 			e.GetMessage().AsNarrowStdString().c_str());
@@ -447,14 +521,30 @@ static void TVPXP3ArchiveExtractionFilterWrapper(tTVPXP3ExtractionFilterInfo *in
 
 void TVPSetXP3FilterScript(const ttstr & content)
 {
-	// Install the native hook (idempotent) and arm the script; per-thread
-	// decoder engines rebuild lazily on their next extraction.
-	TVPXP3ArchiveExtractionFilter = TVPXP3ArchiveExtractionFilterWrapper;
 	if (sXP3FilterScript != content)
 	{
 		sXP3FilterScript = content;
 		++sXP3FilterScriptVersion;
-		KRKRNS_LOG("[xp3filter] script armed (%d chars)", (int)content.GetLen());
+		sManagedContentFilterRegistered = false;
+		sNativeXorVerified = false;
+		sNativeXorDisabled = false;
+		sNativeXorChecks = 0;
+		KRKRNS_LOG("[xp3filter] script %s (%d chars)",
+			content.IsEmpty() ? "cleared" : "armed", (int)content.GetLen());
+	}
+
+	// Use the public archive setters just like Kirikiroid2.  Clearing the game
+	// script must remove both hooks so a later unprotected title cannot inherit
+	// the previous game's callbacks or native-XOR state.
+	if (content.IsEmpty())
+	{
+		TVPSetXP3ArchiveExtractionFilter(nullptr);
+		TVPSetXP3ArchiveContentFilter(nullptr);
+	}
+	else
+	{
+		TVPSetXP3ArchiveExtractionFilter(TVPXP3ArchiveExtractionFilterWrapper);
+		TVPSetXP3ArchiveContentFilter(TVPXP3ArchiveContentFilterWrapper);
 	}
 }
 //---------------------------------------------------------------------------

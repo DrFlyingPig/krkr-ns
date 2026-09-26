@@ -1,0 +1,29 @@
+// Executed in Kirikiroid2's private per-thread filter engine.
+// The key is deliberately per-file and is carried only by the content-filter
+// context, so the extraction callback cannot decrypt correctly unless the
+// full [action, context] contract is preserved.
+Storages.setXP3ArchiveContentFilter(function(filepath, archiveName, fileSize) {
+    var key = (fileSize ^ 0x5a) & 0xff;
+    if (key == 0) key = 0xa5;
+    Debug.message("[xp3-contract] CONTENT file=" + filepath
+        + " archive=" + archiveName + " size=" + fileSize
+        + " action=1 context=ok");
+    return [1, [filepath, fileSize, key]];
+});
+
+Storages.setXP3ArchiveExtractionFilter(function(hash, offset, buffer, length,
+                                                 filename, context) {
+    if (context.count != 3)
+        throw new Exception("XP3 CONTRACT FAIL: context missing");
+    if (filename != context[0])
+        throw new Exception("XP3 CONTRACT FAIL: filename/context mismatch");
+    if (offset != 0)
+        throw new Exception("XP3 CONTRACT FAIL: action=1 was not a full read");
+    if (length != context[1] || buffer.count != length)
+        throw new Exception("XP3 CONTRACT FAIL: full-data size mismatch");
+    buffer.xor(0, length, context[2]);
+    Debug.message("[xp3-contract] EXTRACT file=" + filename
+        + " offset=" + offset + " length=" + length
+        + " six-args=ok context=ok full-data=ok");
+});
+

@@ -36,6 +36,26 @@ portRoot.fillRect(320, 0, 320, 180, 0x20dd40);
 portRoot.fillRect(0, 180, 320, 180, 0x2055ff);
 portRoot.fillRect(320, 180, 320, 180, 0xffd020);
 portAssert((portRoot.getMainPixel(639, 359) & 0xffffff) == 0xffd020, "full image reaches bottom-right");
+
+// Kirikiroid2's obsolete Layer methods are still public API and are used by
+// older KAG/KAGEX scripts.  Exercise both the TJS binding and the pixel path.
+var portBlendSource = new Layer(portWindow, portRoot);
+portBlendSource.setSize(2, 2);
+portBlendSource.type = ltOpaque;
+// pile variants honor the source pixel alpha even when the source Layer type
+// is opaque.  Use an explicitly opaque ARGB value so this fixture checks the
+// scaling/mapping path rather than accidentally asking for a transparent pile.
+portBlendSource.fillRect(0, 0, 2, 2, 0xff123456);
+portRoot.blendRect(4, 4, portBlendSource, 0, 0, 2, 2, 255);
+portAssert((portRoot.getMainPixel(4, 4) & 0xffffff) == 0x123456, "Layer.blendRect copies opaque source pixels");
+portRoot.stretchPile(8, 4, 4, 4, portBlendSource, 0, 0, 2, 2, 255, 0);
+portAssert((portRoot.getMainPixel(10, 6) & 0xffffff) == 0x123456, "Layer.stretchPile scales source pixels");
+portBlendSource.fillRect(0, 0, 2, 2, 0xff654321);
+portRoot.stretchBlend(14, 4, 4, 4, portBlendSource, 0, 0, 2, 2, 255, 0);
+portAssert((portRoot.getMainPixel(16, 6) & 0xffffff) == 0x654321, "Layer.stretchBlend scales opaque source pixels");
+portRoot.affineBlend(portBlendSource, 0, 0, 2, 2, false,
+                     22, 4, 24, 4, 22, 6, 255, 0);
+portAssert((portRoot.getMainPixel(22, 4) & 0xffffff) == 0x654321, "Layer.affineBlend maps source pixels");
 var portChild = new Layer(portWindow, portRoot);
 portChild.setSize(80, 80);
 portChild.setPos(450, 230);
