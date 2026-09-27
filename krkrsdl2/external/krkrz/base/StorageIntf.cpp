@@ -1600,6 +1600,84 @@ void krkrsdl2_reset_auto_paths()
 //---------------------------------------------------------------------------
 // TVPGetPlacedPath
 //---------------------------------------------------------------------------
+static bool krkrns_is_engine_override(const ttstr &path)
+{
+	return path.StartsWith(TJS_W("file://?/romfs:/")) ||
+		path.StartsWith(TJS_W("file://?/sdmc:/switch/krkr-ns/patch/"));
+}
+
+static bool krkrns_is_resource_override(const ttstr &path)
+{
+	if(krkrns_is_engine_override(path)) return true;
+	const tjs_char *sharp = TJS_strchr(path.c_str(), TVPArchiveDelimiter);
+	ttstr archive = path;
+	if(sharp) archive = ttstr(path.c_str(), (int)(sharp - path.c_str()));
+	ttstr archive_name = TVPExtractStorageName(archive);
+	archive_name.ToLowerCase();
+	return TJS_strstr(archive_name.c_str(), TJS_W("patch")) ||
+		(sharp && !path.StartsWith(krkrns_primary_archive_path) &&
+		 krkrns_is_overlay_archive(archive));
+}
+
+// Kirikiroid2 resolves qualified names directly from its archive-root working
+// directory. The multi-archive launcher keeps that directory beside the XP3s:
+// retain the full member path here before falling back to basename lookup.
+static ttstr krkrns_find_qualified_archive_path(const ttstr &normalized,
+		const ttstr &basename_winner)
+{
+	if(krkrns_primary_archive_path.IsEmpty() ||
+		TJS_strchr(normalized.c_str(), TVPArchiveDelimiter)) return ttstr();
+	const tjs_char *primary_sharp = TJS_strchr(
+		krkrns_primary_archive_path.c_str(), TVPArchiveDelimiter);
+	if(!primary_sharp) return ttstr();
+	ttstr primary_archive(krkrns_primary_archive_path.c_str(),
+		(int)(primary_sharp - krkrns_primary_archive_path.c_str()));
+	ttstr game_directory = TVPExtractStoragePath(primary_archive);
+	if(!normalized.StartsWith(game_directory)) return ttstr();
+	ttstr member(normalized.c_str() + game_directory.GetLen());
+	if(!TJS_strchr(member.c_str(), TJS_W('/'))) return ttstr();
+
+	// Engine shims intentionally override game scripts by basename. A patch
+	// may store a flat replacement at its root, but a same-named picture in
+	// another patch subdirectory must not replace this qualified request.
+	if(krkrns_is_engine_override(basename_winner)) return basename_winner;
+	const tjs_char *winner_sharp = TJS_strchr(
+		basename_winner.c_str(), TVPArchiveDelimiter);
+	if(winner_sharp && !TJS_strchr(winner_sharp + 1, TJS_W('/')) &&
+		krkrns_is_resource_override(basename_winner)) return basename_winner;
+
+	// These probes use the already mounted archive indices, not file contents.
+	// TVPAutoPathCache memoizes the result, and duplicate archive roots are
+	// checked once even when the game registers many of their subdirectories.
+	std::set<ttstr> visited;
+	for(size_t i = TVPAutoPathList.size(); i-- > 0;)
+	{
+		const ttstr &path = TVPAutoPathList[i];
+		const tjs_char *sharp = TJS_strchr(path.c_str(), TVPArchiveDelimiter);
+		if(!sharp || !member.StartsWith(ttstr(sharp + 1))) continue;
+		ttstr root(path.c_str(), (int)(sharp - path.c_str()) + 1);
+		if(!visited.insert(root).second) continue;
+		ttstr candidate = root + member;
+		if(!TVPIsExistentStorageNoSearchNoNormalize(candidate)) continue;
+
+		// Retain the selected entry's priority over ordinary sibling packages,
+		// while preserving matching patch/localisation resources.
+		if(!candidate.StartsWith(krkrns_primary_archive_path) &&
+			!krkrns_is_resource_override(candidate))
+		{
+			ttstr primary = krkrns_primary_archive_path + member;
+			if(TVPIsExistentStorageNoSearchNoNormalize(primary)) candidate = primary;
+		}
+		if(candidate != basename_winner)
+			KRKRNS_LOG("[entry] qualified %s -> %s (basename would select %s)",
+				krkrns_utf8_of_path(member).c_str(),
+				krkrns_utf8_of_path(candidate).c_str(),
+				krkrns_utf8_of_path(basename_winner).c_str());
+		return candidate;
+	}
+	return ttstr();
+}
+
 ttstr TVPGetPlacedPath(const ttstr & name)
 {
 	// search path and return the path which the "name" is placed.
@@ -1634,6 +1712,15 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 
 	TVPRebuildAutoPathTable(); // ensure auto path table
 	tTVPFileInfo *result = TVPAutoPathTable.Find(storagename);
+	ttstr basename_winner;
+	if(result && (result->Flag & tTVPFileInfo::EMPTY_FILE) == 0)
+		basename_winner = result->FilePath + storagename;
+	ttstr qualified = krkrns_find_qualified_archive_path(normalized, basename_winner);
+	if(!qualified.IsEmpty())
+	{
+		TVPAutoPathCache.Add(name, qualified);
+		return qualified;
+	}
 	if(result && (result->Flag & tTVPFileInfo::EMPTY_FILE) == 0 )
 	{
 		// found in table
@@ -1646,30 +1733,7 @@ ttstr TVPGetPlacedPath(const ttstr & name)
 		// the engine's compat/patch override layers (our Switch shims shadow
 		// the desktop copies the games ship) and supplemental archives without
 		// their own startup.tjs, including localisations and patch-style names.
-		bool winner_is_override = false;
-		{
-			// Storage names are normalized to lower case (the log printed
-			// ".../switch/krkr-ns/patch/..."), so these literals must be lower
-			// case too or StartsWith never matches.
-			const tjs_char * overridePrefixes[] = {
-				TJS_W("file://?/romfs:/"),
-				TJS_W("file://?/sdmc:/switch/krkr-ns/patch/"),
-				NULL
-			};
-			for(int oi = 0; overridePrefixes[oi]; oi++)
-				if(found.StartsWith(overridePrefixes[oi])) winner_is_override = true;
-			// the archive part of the winner ("<dir>/<name>.xp3>" + in-archive path)
-			ttstr winnerArchive = found;
-			const tjs_char * sharp = TJS_strchr(winnerArchive.c_str(), TVPArchiveDelimiter);
-			if(sharp) winnerArchive = ttstr(winnerArchive.c_str(),
-				(int)(sharp - winnerArchive.c_str()));
-			if(sharp && !winner_is_override &&
-			   !found.StartsWith(krkrns_primary_archive_path))
-				winner_is_override = krkrns_is_overlay_archive(winnerArchive);
-			ttstr winnerName = TVPExtractStorageName(winnerArchive);
-			winnerName.ToLowerCase();
-			if(TJS_strstr(winnerName.c_str(), TJS_W("patch"))) winner_is_override = true;
-		}
+		bool winner_is_override = krkrns_is_resource_override(found);
 		if(!winner_is_override && !krkrns_primary_archive_names.empty() &&
 		   !found.StartsWith(krkrns_primary_archive_path))
 		{
