@@ -6,11 +6,11 @@
 
 **`⚠️ Codex倾情巨献，绝无人工参与，属实验性项目，难以保证稳定性 ⚠️`**
 
-基于 [krkrsdl2](https://github.com/krkrsdl2/krkrsdl2)（pinned `bf207f2`）· 内嵌 krkrsdl2/krkrz（pinned `b11c43a`）
+移植基线：[krkrsdl2](https://github.com/krkrsdl2/krkrsdl2) `bf207f2` · [krkrz](https://github.com/krkrsdl2/krkrz) `b11c43a`；兼容实现参考 Kirikiroid2。
 
 [![Release](https://img.shields.io/github/v/release/DrFlyingPig/krkr-ns?style=flat-square)](https://github.com/DrFlyingPig/krkr-ns/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-red?style=flat-square)]()
+![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-red?style=flat-square)
 
 **[⬇️ NRO下载入口](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
 
@@ -20,99 +20,119 @@
 
 ## 📖 说明介绍
 
-KRKR-ns 将 PC 端吉里吉里（KiriKiri / KRKR）引擎完整移植到 Nintendo Switch，可直接运行未加密 `.xp3` 打包的 KRKR / KAG 视觉小说，也支持展开的目录式游戏。
+KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小说引擎移植项目，基于 krkrsdl2，并参考 Kirikiroid2 改善兼容性。当前启动器以 `.xp3` 为游戏入口，可读取资源包及游戏目录中的文件；部分插件、格式和功能仍有兼容性限制。
 
-内置游戏库启动器：扫描 `sdmc:/switch/KRKR-ns/Game/`，自动挑选入口 xp3（`启动游戏.xp3` > `运行游戏.xp3` > `data.xp3` …），显示封面并支持自定义名称；列表、翻页、弹窗均可触摸点击，按键与触摸都有按下反馈。游戏内选择「结束游戏」会直接**返回启动器**，可以立刻更换下一款游戏，无需退出程序——模拟器与真机均以同进程整引擎重建获得全新引擎。
+内置浅色游戏库界面，支持手柄和触摸操作，可为每个游戏设置预览图、头像和显示名称。切换游戏时只更新界面，点击「开始游戏」后再加载游戏资源；游戏内选择「结束游戏」会返回启动器，方便继续更换游戏。
 
 ## ⬇️ 获取与使用
 
-1. 从 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases/latest) 下载 `krkrsdl2.nro`，放到 SD 卡的 `sdmc:/switch/KRKR-ns/` 目录下。
-2. **真机**：进入 HBMenu 加载（相册方式需按住 `R` 进入 title-override）；**模拟器**：直接加载该 nro（Ryujinx 系 fork 均可）。
-3. 游戏放到 `sdmc:/switch/KRKR-ns/Game/<游戏目录>/`，启动器会列出其中的 `.xp3`，选择即可开始；同目录的其余 xp3 会自动挂载为资源包。
-4. 存档按游戏隔离存放于 `sdmc:/switch/KRKR-ns/saves/<游戏目录>/`。
+1. 从 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases/latest) 下载 `krkrsdl2.nro`，放到 SD 卡的 `sdmc:/switch/KRKR-ns/` 目录下。升级时替换 NRO，保留已有游戏、存档和图片设置。
+2. **真机**：使用完整内存模式打开 HBMenu，通常按住 `R` 启动一个已安装游戏，再加载 NRO；直接从相册进入的模式内存较小。入口按键可随 [Atmosphère 配置](https://github.com/Atmosphere-NX/Atmosphere/blob/master/config_templates/override_config.ini)改变。
+3. **模拟器**：直接加载 NRO；下文的 SD 卡路径对应模拟器的虚拟 SD 卡目录。
+4. 将游戏放到 `sdmc:/switch/KRKR-ns/Game/<游戏目录>/`，保留游戏原有文件与目录结构。在启动器选中游戏，按 `A` 开始；按 `X` 可选择启动用的 `.xp3`。同目录的其他 `.xp3` 会作为资源包挂载，下次启动会优先使用上次选择的入口。
+5. 存档默认按游戏目录分开保存于 `sdmc:/switch/KRKR-ns/saves/<游戏目录>/`；同一游戏目录下的多个启动包共用该存档目录。
+6. 自定义图片放到 `sdmc:/switch/KRKR-ns/Artwork/`。选中游戏后打开图片设置，分别为预览图和头像选择游戏图片或自定义图片，确认后会自动保存。
 
-> ⚠️ **特别说明：Switch 的文件路径不支持中文。**
-> 真机上游戏目录名与 xp3 文件名必须使用英文 / 数字等 **ASCII 字符**（如 `sdmc:/switch/KRKR-ns/Game/CafeStella/play.xp3`）。自己找来的游戏资源若带有中文文件名或中文名目录（含补丁、追加包），请**先全部重命名为 ASCII** 再放入，否则真机无法识别。
-> 模拟器走 PC 文件系统不受此限制，但建议统一使用 ASCII 命名，避免同一份资源两端行为不一致。
+> **启动入口**：目前启动器需要 `.xp3` 入口，仅有展开的 `startup.tjs`、没有 `.xp3` 的游戏还不能直接从游戏库启动。
+>
+> **文件与目录名**：程序按 UTF-8 处理路径，不要求把中文名称全部改成英文。请保留游戏内部资源名和目录结构，避免破坏脚本引用。更改游戏目录名会影响存档和图片设置的匹配，改名前请先备份存档。
+>
+> **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["实际目录名"] = "显示名称";`，只改变游戏库中的名称。
 
-> 诊断日志按次保存在 `sdmc:/switch/KRKR-ns/log/`（每次启动一个文件，自动只保留最新 3 份）；运行时开关（标记文件，置于 `sdmc:/switch/KRKR-ns/` 下）与全部源码级补丁清单见 [PATCHES.md](docs/PATCHES.md)。
-> 自行构建：devkitPro 工具链（`NINTENDO_SWITCH=ON`），`build_nro.sh` 一键完成构建、打包与模拟器部署。
+> 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份；运行时开关与源码补丁记录见 [PATCHES.md](docs/PATCHES.md)。
+>
+> 自行构建需准备 devkitPro / devkitA64、Switch 依赖库、CMake/Ninja 和 FFmpeg，并按本地环境配置脚本中的工具路径。FFmpeg 构建脚本见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)；运行 `build_nro.sh` 生成 `build-switch/krkrsdl2.nro`，加 `--no-emu-copy` 可跳过模拟器复制。
 
 ## ✅ 已实现功能
 
-> 尚未覆盖的插件族与格式缺口（对照 krkrsdl3 盘点）、移植优先级见 [COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md)。
+> 兼容性差异与移植计划见 [KIRIKIROID2_COMPARISON.md](docs/KIRIKIROID2_COMPARISON.md) 和 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)。
 
-**启动器与多游戏管理**
+**游戏库与界面**
 
-- 游戏库界面：封面（自定义 / 自动生成）、名称别名（`Names.tjs`）、入口 xp3 自动挑选、启动文件选择（X）、退出确认（A）、重扫（Y）
-- 全触摸操作：列表行 / 上下列表 / 翻页 / 弹窗条目 / 按钮均有触摸命中区；按键与触摸的按下反馈一致
-- 游戏内「结束游戏」→ 返回内置启动器，连续更换游戏（真机链式重启 / 模拟器同进程重建）
-- 内存模式提示与「重试」：非完整内存模式给出 HBMenu 启动指引；启动过程分阶段 `[boot]` 计时
-- 存档按游戏目录隔离；compat 补丁目录（SD 卡）可覆盖内置适配层
+- 浅色游戏库界面，支持手柄和触摸操作；A 确认、B 返回，支持翻页、启动文件选择和重新扫描。
+- 自动选择并记住游戏的启动文件，支持自定义游戏显示名称。
+- 浏览和切换游戏时不扫描游戏资源，点击「开始游戏」后再加载。
+- 可从游戏图片或 SD 卡自定义图片中选择预览图和头像，支持分页浏览、自动裁剪和恢复默认；选择结果会保存，重启后仍可使用。
+- 游戏结束后返回启动器，可继续选择其他游戏；启动内存不足时提供提示和重试入口。
 
-**引擎兼容与适配**
+**游戏运行与存档**
 
-- KAG2 / KAG3 兼容层（Switch 桩替换桌面版插件脚本，自动维持优先级）
-- KAG3 的二次窗口确认框可用：对话框寄宿在主窗口内呈现（居中叠加），输入坐标换算到对话框自身坐标系，并支持模态循环——快速存/读档等确认框不再中断动作
-- 菜单 API 与 `menu.dll` 语义对齐：没有该插件时不向脚本暴露原生 `MenuItem` / `Window.menu`（KAGEX 作品保持自己的 TJS 菜单模型，KAG3 需要的脚本侧菜单模型只发给不带兼容层的作品）
-- TJS 引擎多线程安全：每线程独立寄存器区栈（加密包的解码引擎在音频线程执行脚本时，不再与主线程互相踩坏寄存器）
-- 常用插件内置化：E-mote（emoteplayer / motionplayer）、psbfile、textrender、kagparser、csvparser、layerExBTOA 等；游戏对插件的文件存在性探测对内置插件生效，E-mote 等子系统正常启用
-- 内置插件再扩充：`dirlist`（getDirList）、`getabout`、`getsample`（唇同步 / 波形采样）、`savestruct`（文本存档格式）、`varfile`（`var://`）、`win32dialog`、`addfont`、`fftgraph`、`wutcwf`（TCWF 音频解码）
-- 文本编码探测：无 BOM 文本按 UTF-8 → Shift-JIS → GBK 依次尝试，中文重编码脚本不再中断启动
-- 引擎 API 补齐：`Layer.affinePile`、`Layer.stitchWrappedCopy`、`Font.doUserSelect`；缺失转场自动回落 crossfade
-- 加密 xp3 数据包支持：自动加载游戏目录下的 `xp3filter.tjs` 解密过滤器（Kirikiroid2 兼容，独立脚本引擎逐块解密，附原生 XOR 快路径）
-- KAGEX 适配：`Window.fullScreen` 控制台语义（避免 Windows 专属全屏流程导致白屏）、方屏扩展画布（exHeight）按顶部可见区等比满屏呈现；经典 4:3 画布（1024×768 等）整幅 letterbox 显示，消息窗口不再被裁掉（两种呈现共用同一判定，纹理上传的行带与之保持一致）
-- 缺失资源垫图、`Layer.loadImages` 容错、脚本异常记录并继续（风暴熔断）
+- 支持常见 KRKR / KAG 游戏，以及游戏目录中的多个资源包。
+- 支持游戏设置、选项和确认弹窗，快速存档、读档可以正常处理确认操作；具体可用功能仍取决于游戏兼容性。
+- 各游戏存档分开保存，连续快速存档时可正常轮换备份。
+- 支持补丁和翻译资源优先加载，按目录查找资源，避免不同目录的同名图片被误用。
+- 改善中文、日文脚本和字体兼容性；提供解密脚本的游戏，可尝试通过该脚本读取加密资源包。
 
-**图形与性能**
+**画面、动画与音视频**
 
-- E-mote 立绘动画：隔离 GL 后端 + 驱动自检（异常驱动自动回退 CPU）、脏区回读、半分辨率可选
-- simde SIMD 混合内核（NEON）、4 核绘制线程池
-- GPU 呈现链直通（FBO blit）、XP3 段缓存、增量资源索引、解码图像缓存（上限 96 MiB）
-- 帧内归因埋点（`[prof] frame:` / `[prof] blt:`）、合成层脏区上传、上传统一行带与呈现裁剪共用同一判定
-- 菜单公共路径优化：字体度量按需缓存、存档缓冲写入、PSB 共享资源、固实 7z 解压块复用
-- 启动器重绘优化：文本宽度缓存 + 按样式分组绘制，无输入时不重绘
-- 大位图独立内存区复用；修复文字对象销毁影响其他字体、选项文字垂直居中的问题
+- 支持背景、立绘、文字、选项和常见转场，按游戏画面比例显示。
+- 支持 E-mote 动态立绘，以及 AlphaMovie 透明动画的播放、循环和跳帧。
+- 音乐与语音支持 WAV、OGG、Opus 等格式；视频支持部分 WMV、MP4、MPEG 格式，可从游戏目录或资源包播放，并支持音量调整。
+- 内置文字绘制、脚本解析、存档和字体等常用插件；仍有部分插件与格式尚未支持。
 
-**视频播放**
+**流畅度与稳定性**
 
-- FFmpeg 解码管线（SwitchMovieOverlay）：ASF / MOV/MP4 / MPEG-PS 容器按签名自动识别，支持归档内与目录式视频源；子集构成见 `tools/build_ffmpeg_switch.sh`
-- 独立解码线程（4 MiB 栈）+ 双缓冲帧；**layer / overlay / mixer 三种模式均可上屏**（overlay 按脚本设定区域叠画在场景上方）
-- 音轨解码：WMA / AAC / MP2 / MP3 等经 swresample 下混为 S16，通过引擎音频设备（FAudio）输出；视频结束事件等待声音播完（逐块排空 PCM 环），音量可调
+- 缓存已显示的文字、图片和游戏资源，减少重复读取与绘制，改善游戏库切换和菜单响应。
+- 检查图片读取和解码错误，无法预览的图片会显示提示，也可改用自定义图片。
+- 退出游戏时清理音频、定时器和事件，减少切换游戏时的残留与异常；诊断日志自动保留最近 3 次。
 
 ## 🗂 架构
 
-引擎分四层：内嵌上游引擎核心 → Switch 平台层（本项目主要改动区）→ 内置插件 → 脚本兼容层。仓库布局：
+项目由启动器、引擎核心、Switch 平台适配、内置插件和脚本兼容层组成，各部分职责如下：
 
-```
-KRKR-ns/                            # 仓库根
-├── krkrsdl2/                       # 引擎源码（基于 krkrsdl2，pinned bf207f2）
-│   ├── src/                        # Switch 平台层 + 内置插件（本项目主要改动区）
-│   │   ├── core/sdl2/              # SDLApplication、GL 合成、KrkrNS 日志/路径/剖析
-│   │   ├── core/base/sdl2/         # 存储、脚本管理、系统、插件装载（PluginImpl）、7z
-│   │   ├── core/visual/sdl2/       # 绘制设备、Layer、视频 overlay（SwitchMovieOverlay）
-│   │   ├── core/sound/sdl2/        # 音频设备（FAudio）与波形解码（Vorbis / Opus）
-│   │   ├── core/environ/sdl2/      # 事件循环、窗口、线程、CPU 探测
-│   │   ├── core/msg/sdl2/          # 消息对话框
-│   │   ├── core/utils/sdl2/        # 剪贴板等
-│   │   ├── plugins/                # 内置插件：emoteplayer、psbfile、kagparser、textrender…
-│   │   ├── resources/nswitch/      # 平台资源（图标）
-│   │   └── config/                 # 源文件清单（构建系统使用）
-│   ├── external/                   # 内嵌上游与第三方（krkrz 引擎核心 pinned b11c43a、SDL2、FAudio、simde、zlib）
-│   ├── data/                       # 启动器 startup.tjs 与内置字体
-│   ├── CMakeLists.txt              # 构建入口（NINTENDO_SWITCH=ON）
-│   └── meson.build
-├── docs/                           # 文档（开发记录）
-├── compat-patches/                 # TJS 兼容垫片（部署进 romfs）
-├── tools/                          # 构建 / 调试脚本（build_ffmpeg_switch.sh、upstream_delta.sh 等）
-├── tests/                          # 单元测试（位图桥、E-mote GL 等）
-└── build_nro.sh                    # 一键构建 / 打包 / 模拟器部署
+| 部分 | 主要职责 |
+| --- | --- |
+| 启动器 | `data/startup.tjs` 提供游戏列表、启动选择和预览图界面；`LauncherArtwork` 模块负责扫描图片、生成缩略图和保存选择。 |
+| 引擎核心 | `external/krkrz/` 提供 TJS2 脚本执行、图层与位图、资源归档等公共逻辑；资源路径查找位于 `base/StorageIntf.cpp`。 |
+| Switch 平台适配 | `src/core/` 对接窗口、输入、绘制、文件系统和音频；使用 SDL2 与 libnx 适配 Switch，FAudio 负责音频输出，FFmpeg 负责视频及视频音轨解码。 |
+| 内置插件 | `src/plugins/` 提供 E-mote、AlphaMovie、文字绘制、脚本解析等功能，编译进 NRO，由引擎注册或按需启用；AlphaMovie 独立解码透明动画并输出到图层。 |
+| 脚本兼容层 | `compat-patches/system/` 提供平台兼容脚本，随启动器和字体一起打包进 RomFS；SD 卡上的兼容补丁可覆盖内置版本。 |
+
+启动器和游戏共用同一套引擎。浏览游戏库时只更新界面；开始游戏后才加载入口和资源包。游戏结束后重建引擎状态，再回到启动器。
+
+仓库布局：
+
+```text
+KRKR-ns/
+├── krkrsdl2/                       # 引擎源码
+│   ├── external/
+│   │   ├── krkrz/                  # KRKRZ 核心：脚本、图层、位图、资源归档
+│   │   └── ...                     # SDL2、FAudio、simde、zlib 等第三方组件
+│   ├── src/
+│   │   ├── core/sdl2/              # 程序入口、画面呈现、日志、预览图处理
+│   │   │   ├── SDLEntrypoint.cpp
+│   │   │   ├── SDLApplication.cpp
+│   │   │   └── LauncherArtwork*    # 图片扫描、解码、缩略图和设置保存
+│   │   ├── core/base/sdl2/         # 文件与存储、脚本管理、插件加载
+│   │   ├── core/visual/sdl2/       # 窗口、绘制设备、图层、视频播放
+│   │   ├── core/sound/sdl2/        # 音频输出与解码
+│   │   ├── core/environ/sdl2/      # 应用生命周期、事件、线程和系统信息
+│   │   ├── core/msg/sdl2/          # 消息与对话框
+│   │   ├── core/utils/sdl2/        # 剪贴板等平台工具
+│   │   ├── plugins/               # E-mote、AlphaMovie、文字与存档等插件
+│   │   ├── resources/nswitch/     # NRO 图标等平台资源
+│   │   └── config/                # 构建使用的源码清单
+│   ├── data/
+│   │   ├── startup.tjs             # 游戏库启动器
+│   │   ├── launcher/               # 启动器标志与默认预览图
+│   │   └── notosanssc.ttf          # 内置中文字体
+│   ├── CMakeLists.txt              # Switch 构建配置
+│   └── meson.build                 # 上游构建配置
+├── compat-patches/system/          # 打包进 RomFS 的 TJS 兼容脚本
+├── design/launcher-preview/        # 启动器设计稿与预览文件
+├── docs/                           # 兼容性、补丁和开发文档
+├── tools/                          # 构建、打包和调试工具
+├── tests/                          # 引擎、存档、动画等功能检查
+├── out/                            # 本地 FFmpeg 依赖和发布 NRO，不纳入版本控制
+└── build_nro.sh                    # 构建、NRO 打包与模拟器部署入口
 ```
 
-> 文档索引：[docs/README.md](docs/README.md)——兼容性缺口 [COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md)、源码级补丁 [PATCHES.md](docs/PATCHES.md)、上游差异 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)（`tools/upstream_delta.sh` 自动生成）。
+> 文档索引：[docs/README.md](docs/README.md)；移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)，源码补丁见 [PATCHES.md](docs/PATCHES.md)。[COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md) 是较早的 krkrsdl3 对照记录；上游差异见 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)，由 `tools/upstream_delta.sh` 生成。
 
 ## 📄 许可
 
-本仓库以 [krkrsdl2 的 MIT 许可](LICENSE) 发布；内嵌/引用的上游组件（krkrz 引擎、FAudio、SDL2 及其 Switch 端口、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留其原始许可证与归属，见各组件目录内的 LICENSE/COPYING 文件。
+本项目自身代码沿用 [krkrsdl2 的 MIT 许可](LICENSE)。引用的上游与第三方组件（krkrz、FAudio、SDL2、FFmpeg、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留原始许可证与归属，见组件目录内的 LICENSE/COPYING 文件。
+
+E-mote 与 AlphaMovie 的移植来源许可分别见 [UPSTREAM-LICENSE.txt](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt) 和 [LICENSE.krkrsdl3](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)。
 
 **本项目不包含、也不分发任何商业游戏资源。**
