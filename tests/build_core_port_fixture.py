@@ -6,7 +6,7 @@ Usage:
 
 The input NRO is not modified. RomFS includes the fixture script and font,
 plus the bundled compatibility scripts or explicit synthetic media required
-by the selected fixture. The startup scripts never read game data.
+by the selected fixture. The startup scripts never read game directories or saves.
 """
 
 import argparse
@@ -34,10 +34,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nro", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--fixture", choices=("core_port", "menu_contract", "movie_contract"),
+    parser.add_argument("--fixture", choices=("core_port", "menu_contract", "movie_contract", "layer_raster", "movie_audio"),
                         default="core_port")
     parser.add_argument("--media", type=Path,
-                        help="Synthetic MP4 to include as sample.mp4 in movie_contract")
+                        help="Local movie to include as sample.mp4 in a movie fixture")
     parser.add_argument(
         "--romfs-tool", default=r"D:\devkitPro\tools\bin\build_romfs.exe"
     )
@@ -56,9 +56,9 @@ def main() -> None:
         # basename is executed, including in a self-contained test package.
         for name in ("k2compat.tjs", "k2compat_reinstall.tjs"):
             shutil.copy2(repo / "compat-patches/system" / name, compat / name)
-    if args.fixture == "movie_contract":
+    if args.fixture in ("movie_contract", "movie_audio"):
         if args.media is None:
-            parser.error("movie_contract requires --media pointing to a synthetic MP4")
+            parser.error(args.fixture + " requires --media pointing to a local test movie")
         shutil.copy2(args.media, romfs / "sample.mp4")
 
     stem = "core-port" if args.fixture == "core_port" else args.fixture.replace("_", "-")

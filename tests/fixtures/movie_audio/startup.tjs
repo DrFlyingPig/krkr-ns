@@ -1,0 +1,43 @@
+// Playback continuity probe. The local input media is never committed.
+var movieAudioWindow = new Window();
+movieAudioWindow.setInnerSize(640, 360);
+movieAudioWindow.caption = "KRKR NS movie audio continuity";
+var movieAudioRoot = new Layer(movieAudioWindow, null);
+movieAudioRoot.setSize(640, 360);
+movieAudioRoot.type = ltOpaque;
+movieAudioRoot.fillRect(0, 0, 640, 360, 0xff203040);
+movieAudioRoot.visible = true;
+movieAudioWindow.visible = true;
+var movieAudio = new VideoOverlay(movieAudioWindow);
+var movieAudioState = "unload";
+movieAudio.onStatusChanged = function(status) {
+    movieAudioState = status;
+    Debug.message("[movie-audio-test] STATUS " + status);
+};
+movieAudio.open("romfs:/sample.mp4");
+movieAudio.setBounds(0, 0, 640, 360);
+movieAudio.visible = true;
+var movieAudioDuration = movieAudio.totalTime;
+if (movieAudioDuration <= 0 || movieAudio.numberOfAudioStream != 1)
+    throw new Exception("MOVIE AUDIO FAIL: local clip has no audio or duration");
+Debug.message("[movie-audio-test] START duration=" + movieAudioDuration + "ms");
+movieAudio.play();
+var movieAudioStarted = System.getTickCount();
+var movieAudioPolls = 0;
+var movieAudioTimer = new Timer(function() {
+    movieAudioPolls++;
+    if (movieAudioState == "stop") {
+        if (movieAudio.position < movieAudioDuration - 1000)
+            throw new Exception("MOVIE AUDIO FAIL: playback stopped early at " + movieAudio.position);
+        movieAudio.visible = false;
+        movieAudio.close();
+        movieAudioRoot.fillRect(0, 0, 640, 360, 0xff20aa55);
+        movieAudioTimer.enabled = false;
+        Debug.message("[movie-audio-test] COMPLETE natural EOF; polls=" + movieAudioPolls);
+    } else if (System.getTickCount() - movieAudioStarted > movieAudioDuration + 15000) {
+        movieAudioTimer.enabled = false;
+        throw new Exception("MOVIE AUDIO FAIL: playback timeout");
+    }
+}, "");
+movieAudioTimer.interval = 250;
+movieAudioTimer.enabled = true;

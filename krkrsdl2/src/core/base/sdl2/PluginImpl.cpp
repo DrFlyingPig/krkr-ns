@@ -61,6 +61,7 @@ extern "C" void krkrsdl2_link_emoteplayer_plugin();
 #endif
 // Static-archive anchor for the layerExBTOA built-in (see layerexbtoa).
 extern "C" void krkrsdl2_link_layerexbtoa_plugin();
+extern "C" void krkrsdl2_link_layerexraster_plugin();
 // Static-archive anchors for the Kirikiroid2-compatible built-ins.
 extern "C" void krkrsdl2_link_dirlist_plugin();
 extern "C" void krkrsdl2_link_getabout_plugin();
@@ -574,6 +575,7 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("motionplayer.dll") ||
 		short_name == TJS_W("emotedriver.dll") ||
 		short_name == TJS_W("layerexbtoa.dll") ||
+		short_name == TJS_W("layerexraster.dll") ||
 		short_name == TJS_W("varfile.dll") ||
 		short_name == TJS_W("getabout.dll") ||
 		short_name == TJS_W("addfont.dll") ||
@@ -682,14 +684,17 @@ void TVPLoadPlugin(const ttstr & name)
 			}
 		}
 	}
-	// layerExBTOA attaches extension functions directly to the Layer class
-	// (clipAlphaRect and friends) rather than registering a new class, so it
+	// These plugins attach extension functions directly to the Layer class
+	// rather than registering a new class, so their presence
 	// cannot be detected through TVPHasSwitchBuiltin.  Route it through the
 	// ncbind auto-register table like the E-mote module.
-	if (short_name == TJS_W("layerexbtoa.dll"))
+	if (short_name == TJS_W("layerexbtoa.dll") || short_name == TJS_W("layerexraster.dll"))
 	{
 		// Force the translation unit out of the static archive first.
-		krkrsdl2_link_layerexbtoa_plugin();
+		if (short_name == TJS_W("layerexraster.dll"))
+			krkrsdl2_link_layerexraster_plugin();
+		else
+			krkrsdl2_link_layerexbtoa_plugin();
 		ncbAutoRegister::LoadModule(short_name);
 		if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())
 		{

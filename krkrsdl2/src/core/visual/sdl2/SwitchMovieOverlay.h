@@ -220,7 +220,7 @@ private:
 
     /* ---- audio track (same worker thread decodes, FAudio plays) ---- */
     static const size_t kPcmRingBytes = 1u << 20; // absorb decode-ahead
-    static const size_t kAudioBlockBytes = 4096 * 4; // ~21ms @48k stereo
+    static const size_t kAudioBlockBytes = 4096 * 4; // 4096 frames: ~93ms @44.1k stereo
     static const int kAudioBlocks = 4;               // 3 queued + 1 free
     int audioStream_ = -1;
     AVCodecContext * audioCodec_ = nullptr;
@@ -236,12 +236,20 @@ private:
     std::atomic<int> audioFreeBlocks_{0};
     int nextAudioBlock_ = 0;
     bool audioEof_ = false;
+    std::atomic<uint64_t> audioCompletedBlocks_{0};
+    uint64_t audioSubmittedBlocks_ = 0; // decode-thread diagnostics
+    uint64_t audioSubmittedBytes_ = 0;
+    uint64_t audioQueueStarved_ = 0;
+    Uint32 audioLastDiagnosticMs_ = 0;
 
     void CloseAudio();
     bool OpenAudioOutput();
     void DecodeAudioPacket(AVPacket * pkt);
     void ConsumeAudioFrame(AVFrame * frame);
-    void FeedAudio(bool flush);
+    void AppendAudioPcm(const uint8_t *data, size_t bytes);
+    void DrainAudio();
+    void FeedAudio(bool flush, bool allowPartialTail = false);
+    void LogAudioQueue(bool final);
     static void AudioQueueCb(iTVPAudioStream * stream, void * user);
 };
 

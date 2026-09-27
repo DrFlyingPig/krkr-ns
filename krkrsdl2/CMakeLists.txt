@@ -576,6 +576,7 @@ src/plugins/kagparser/KAGParser.cpp
 src/plugins/csvparser/CSVParser.cpp
 src/plugins/textrender/TextRenderBase.cpp
 src/plugins/layerexbtoa/LayerExBTOA.cpp
+src/plugins/layerexraster/LayerExRaster.cpp
 src/plugins/dirlist/DirList.cpp
 src/plugins/getabout/GetAbout.cpp
 src/plugins/getsample/GetSample.cpp

@@ -3558,6 +3558,7 @@ const int sw = this->surface->w;
 }
 void TVPWindowWindow::InvalidateClose()
 {
+	if (this->TJSNativeInstance) this->TJSNativeInstance->NotifyWindowClose();
 	this->TJSNativeInstance = nullptr;
 	this->SetVisible(false);
 	delete this;
@@ -5831,9 +5832,43 @@ void krkrsdl2_release_leftover_windows()
 		tTJSNI_Window *w = TVPGetWindowListAt(0);
 		if (!w) break;
 		iTJSDispatch2 *owner = w->GetOwnerNoAddRef();
-		if (!owner) break;
-		tTJSVariantClosure clo(owner);
-		clo.Invalidate(0, nullptr, nullptr, clo.ObjThis);
+		if (owner)
+		{
+			try
+			{
+				tTJSVariantClosure clo(owner);
+				clo.Invalidate(0, nullptr, nullptr, clo.ObjThis);
+			}
+			catch (...)
+			{
+				// A script finalize runs before native invalidation. If it
+				// throws, the window remains registered and retrying through
+				// the game's exceptionHandler never reaches the engine restart.
+				KRKRNS_LOG("[reinit] window script invalidation threw; continuing native cleanup");
+			}
+		}
+		if (TVPGetWindowCount() > 0 && TVPGetWindowListAt(0) == w)
+		{
+			try
+			{
+				w->Invalidate();
+			}
+			catch (...)
+			{
+				// BaseWindow unregisters itself before releasing its children.
+				// A failing child must still give up the native form and must
+				// not leave the old native instance pointing at the freed form.
+				KRKRNS_LOG("[reinit] native window invalidation threw; releasing remaining form");
+				TTVPWindowForm *form = w->GetForm();
+				w->NotifyWindowClose();
+				if (form) form->InvalidateClose();
+			}
+			if (TVPGetWindowCount() > 0 && TVPGetWindowListAt(0) == w)
+			{
+				KRKRNS_LOG("[reinit] window registry did not advance; stopping window cleanup");
+				break;
+			}
+		}
 	}
 	for (int pass = 0; pass < 2; ++pass)
 	{

@@ -2,6 +2,7 @@
 /* KRKR-ns Phase 4: FFmpeg movie overlay implementation (see header). */
 
 #include "SwitchMovieOverlay.h"
+#include "MovieAudioQueue.h"
 
 #include <cstring>
 #include <limits>
@@ -164,8 +165,8 @@ SwitchMovieOverlay::SwitchMovieOverlay(NativeEventQueueImplement *eventQueue)
 SwitchMovieOverlay::~SwitchMovieOverlay()
 {
     Stop();
-    CloseCodecs();
     CloseAudio();
+    CloseCodecs();
 }
 
 bool SwitchMovieOverlay::OpenStream(const ttstr & name,
@@ -173,6 +174,7 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
                                     long & width, long & height)
 {
     Stop();
+    CloseAudio();
     CloseCodecs();
     // Ownership transfers at this point, including every failure path below.
     stream_ = stream;
@@ -473,6 +475,16 @@ void SwitchMovieOverlay::Play()
         return;
     }
 
+    // A completed decode thread remains joinable until Stop or another Play.
+    if (thread_)
+    {
+        SDL_WaitThread(thread_, nullptr);
+        thread_ = nullptr;
+    }
+    // Each new playback owns a fresh source voice. Flush callbacks from the
+    // previous run cannot return credits into this run; pause/resume above
+    // continues using its current voice instead.
+    CloseAudio();
     quit_.store(false);
     frameCount_.store(0);
     frontBuf_.store(0);
@@ -483,6 +495,9 @@ void SwitchMovieOverlay::Play()
     // every play; a missing device keeps the previous silent behaviour.
     audioEof_ = false;
     pcmRead_ = pcmWrite_ = 0;
+    audioCompletedBlocks_.store(0);
+    audioSubmittedBlocks_ = audioSubmittedBytes_ = audioQueueStarved_ = 0;
+    audioLastDiagnosticMs_ = SDL_GetTicks();
     if (audioStream_ >= 0 && OpenAudioOutput())
     {
         audioFreeBlocks_.store(kAudioBlocks);
@@ -531,6 +546,7 @@ void SwitchMovieOverlay::Stop()
         SDL_WaitThread(thread, nullptr);
     }
     KRKRNS_LOG("[movie] stop: joined");
+    LogAudioQueue(true);
     decoding_.store(false);
     status_.store(vsStopped);
 }
@@ -815,6 +831,9 @@ void SwitchMovieOverlay::DecodeLoop()
 
     if (reachedEnd && !quit_.load())
     {
+        // A demux EOF is not a decoder EOF. Delayed audio frames and samples
+        // buffered by swresample must reach the PCM ring before its final EOS.
+        DrainAudio();
         // Keep the final frame for roughly one frame interval, then let the
         // KRKR event handler perform its normal Stop/loop transition.
         if (frameCount_.load() > 0)
@@ -823,10 +842,9 @@ void SwitchMovieOverlay::DecodeLoop()
         // queued), bounded so a stuck device cannot stall the movie end.
         if (audioOut_)
         {
-            // Drain the ring a block at a time (FeedAudio only ever copies one
-            // block), waiting for the device to hand a block back between
-            // passes, so the tail of the audio is actually sent.  Bounded so a
-            // stuck device cannot stall the movie end.
+            // Refill the bounded device queue until the PCM tail is drained.
+            // Wait for the device to hand blocks back between passes. Bounded
+            // so a stuck device cannot stall the movie end.
             int waited = 0;
             while (!quit_.load() && waited < 4000)
             {
@@ -874,6 +892,10 @@ bool SwitchMovieOverlay::WaitForPlaybackTime(double seconds)
             startedMs_ += SDL_GetTicks() - pausedAt;
             continue;
         }
+        // Audio packets and video packets need not alternate in the container.
+        // Keep already-decoded PCM flowing while video timing holds up demux;
+        // also refill once for a late frame which needs no timed wait.
+        FeedAudio(false, true);
         const double elapsed = (SDL_GetTicks() - startedMs_) / 1000.0;
         const double lead = seconds - elapsed;
         if (lead <= 0.066) return true;
@@ -960,22 +982,17 @@ bool SwitchMovieOverlay::OpenAudioOutput()
 
 void SwitchMovieOverlay::CloseAudio()
 {
-    if (audioOut_)
-    {
-        KRKRNS_LOG("[movie] closeaudio: detach + delete output");
-        audioOut_->StopStream();
-        audioOut_->SetCallback(nullptr, nullptr);
-        delete audioOut_;
-        audioOut_ = nullptr;
-    }
+    if (audioOut_) KRKRNS_LOG("[movie] closeaudio: detach + delete output");
+    ReleaseMovieAudioOutput(audioOut_, [this] {
+        for (auto & b : audioBlocks_) delete[] b;
+        audioBlocks_.clear();
+        pcmRing_.clear();
+        pcmRing_.shrink_to_fit();
+        pcmRead_ = pcmWrite_ = 0;
+        audioFreeBlocks_.store(0);
+        audioCompletedBlocks_.store(0);
+    });
     KRKRNS_LOG("[movie] closeaudio: done");
-    for (auto & b : audioBlocks_)
-        delete[] b;
-    audioBlocks_.clear();
-    pcmRing_.clear();
-    pcmRing_.shrink_to_fit();
-    pcmRead_ = pcmWrite_ = 0;
-    audioFreeBlocks_.store(0);
 }
 
 void SwitchMovieOverlay::AudioQueueCb(iTVPAudioStream * stream, void * user)
@@ -983,7 +1000,9 @@ void SwitchMovieOverlay::AudioQueueCb(iTVPAudioStream * stream, void * user)
     (void)stream;
     // FAudio worker thread: one enqueued block has been consumed and its
     // memory is free for reuse again.
-    static_cast<SwitchMovieOverlay *>(user)->audioFreeBlocks_.fetch_add(1);
+    auto *self = static_cast<SwitchMovieOverlay *>(user);
+    self->audioFreeBlocks_.fetch_add(1);
+    self->audioCompletedBlocks_.fetch_add(1);
 }
 
 // Convert one decoded audio frame to interleaved S16 (downmixing via
@@ -992,7 +1011,7 @@ void SwitchMovieOverlay::AudioQueueCb(iTVPAudioStream * stream, void * user)
 // throttles the whole decode pipeline against the audio clock.
 void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
 {
-    if (quit_.load()) return;
+    if (quit_.load() || !audioOut_) return;
     if (!swrResample_)
     {
         AVChannelLayout outLayout;
@@ -1023,20 +1042,32 @@ void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
                                 frame->nb_samples);
     if (got <= 0) return;
     const size_t bytes = (size_t)got * bytesPerFrame;
+    AppendAudioPcm(converted.data(), bytes);
+}
 
+void SwitchMovieOverlay::AppendAudioPcm(const uint8_t *data, size_t bytes)
+{
     size_t written = 0;
     while (written < bytes)
     {
+        FeedAudio(false);
         const size_t cap = pcmRing_.size();
         const size_t used = pcmWrite_ - pcmRead_;
         const size_t space = cap - used;
-        if (space == 0 || quit_.load()) return;
+        if (quit_.load()) return;
+        if (space == 0)
+        {
+            // Preserve decoded PCM under backpressure instead of dropping the
+            // rest of this frame when an interleaved audio run fills the ring.
+            SDL_Delay(4);
+            continue;
+        }
         const size_t n = std::min(bytes - written, space);
         const size_t pos = pcmWrite_ % cap;
         const size_t tail = std::min(n, cap - pos);
-        std::memcpy(pcmRing_.data() + pos, converted.data() + written, tail);
+        std::memcpy(pcmRing_.data() + pos, data + written, tail);
         if (n > tail)
-            std::memcpy(pcmRing_.data(), converted.data() + written + tail,
+            std::memcpy(pcmRing_.data(), data + written + tail,
                         n - tail);
         pcmWrite_ += n;
         written += n;
@@ -1049,66 +1080,69 @@ void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
 void SwitchMovieOverlay::DecodeAudioPacket(AVPacket * pkt)
 {
     if (!audioCodec_) return;
-    int sent = avcodec_send_packet(audioCodec_, pkt);
-    if (sent == AVERROR(EAGAIN))
-    {
-        // codec queue full: pull one frame out and retry once
-        AVFrame * f = av_frame_alloc();
-        if (f)
-        {
-            if (avcodec_receive_frame(audioCodec_, f) >= 0)
-                ConsumeAudioFrame(f);
-            av_frame_free(&f);
-        }
-        sent = avcodec_send_packet(audioCodec_, pkt);
-    }
-    if (sent < 0) return;
-    for (;;)
-    {
-        AVFrame * f = av_frame_alloc();
-        const int got = avcodec_receive_frame(audioCodec_, f);
-        if (got < 0)
-        {
-            av_frame_free(&f);
-            break;
-        }
-        ConsumeAudioFrame(f);
-        av_frame_free(&f);
-    }
+    AVFrame *frame = av_frame_alloc();
+    if (!frame) return;
+    const auto result = PumpMovieAudioDecoder(
+        [&] { return avcodec_send_packet(audioCodec_, pkt); },
+        [&] { return avcodec_receive_frame(audioCodec_, frame); },
+        [&] { ConsumeAudioFrame(frame); av_frame_unref(frame); },
+        [this] { return quit_.load(); }, AVERROR(EAGAIN), AVERROR_EOF);
+    av_frame_free(&frame);
+    if (result.error)
+        KRKRNS_LOG("[movie] audio decode failed code=%d flush=%d",
+                   result.error, pkt ? 0 : 1);
+    if (!pkt) audioEof_ = result.eof;
+}
+
+void SwitchMovieOverlay::DrainAudio()
+{
+    if (!audioOut_ || !audioCodec_ || quit_.load()) return;
+    DecodeAudioPacket(nullptr);
+    if (!swrResample_ || quit_.load()) return;
+    const int capacity = 4096;
+    const size_t bytesPerFrame = (size_t)audioChannels_ * 2;
+    std::vector<uint8_t> converted((size_t)capacity * bytesPerFrame);
+    uint8_t *out[1] = {converted.data()};
+    const auto result = DrainMovieAudioResampler(
+        [&] { return swr_convert(swrResample_, out, capacity, nullptr, 0); },
+        [&](int frames) { AppendAudioPcm(converted.data(), (size_t)frames * bytesPerFrame); },
+        [this] { return quit_.load(); });
+    KRKRNS_LOG("[movie-audio] drain decoder-eof=%d resampler-frames=%zu error=%d",
+               audioEof_ ? 1 : 0, result.frames, result.error);
 }
 
 // Hand whole blocks of buffered PCM to the audio device.  flush=true also
 // sends a partial tail (marked end-of-stream) when the movie is over.
-void SwitchMovieOverlay::FeedAudio(bool flush)
+void SwitchMovieOverlay::FeedAudio(bool flush, bool allowPartialTail)
 {
-    if (!audioOut_ || quit_.load()) return;
-    const size_t cap = pcmRing_.size();
+    if (!audioOut_ || quit_.load() || status_.load() == vsPaused) return;
     const size_t available = pcmWrite_ - pcmRead_;
-    if (available == 0) return;
-    // One block is kAudioBlockBytes.  The flush path used to hand the whole
-    // ring over as the copy length, which wrote up to a megabyte past a 16 KB
-    // allocation and corrupted the heap: the flush runs at the movie's end, so
-    // the damage surfaced as the crash in CloseAudio's delete[] right after
-    // playback completed.  Bound the copy here and let the caller drain the
-    // rest in block-sized pieces.
-    const size_t n = std::min(available, kAudioBlockBytes);
-    if (!flush && n < kAudioBlockBytes) return;
-    if (audioFreeBlocks_.load() <= 0) return;
-    if ((int)audioOut_->GetQueuedCount() >= kAudioBlocks - 1) return;
+    const auto result = RefillMovieAudioQueue(
+        *audioOut_, pcmRing_, pcmRead_, pcmWrite_, audioBlocks_,
+        audioFreeBlocks_, nextAudioBlock_, kAudioBlockBytes, flush,
+        [this] { return quit_.load() || status_.load() == vsPaused; },
+        allowPartialTail, (size_t)audioChannels_ * 2);
+    if (result.queuedBefore == 0 && available != 0 &&
+        audioCompletedBlocks_.load() != 0 && result.submittedBlocks != 0)
+        ++audioQueueStarved_;
+    audioSubmittedBlocks_ += result.submittedBlocks;
+    audioSubmittedBytes_ += result.submittedBytes;
+    LogAudioQueue(false);
+}
 
-    uint8_t * block = audioBlocks_[nextAudioBlock_];
-    for (size_t done = 0; done < n; )
-    {
-        const size_t pos = pcmRead_ % cap;
-        const size_t t = std::min(n - done, cap - pos);
-        std::memcpy(block + done, pcmRing_.data() + pos, t);
-        pcmRead_ += t;
-        done += t;
-    }
-    const bool last = flush && n == available;
-    audioFreeBlocks_.fetch_sub(1);
-    audioOut_->Enqueue(block, n, last);
-    nextAudioBlock_ = (nextAudioBlock_ + 1) % audioBlocks_.size();
+void SwitchMovieOverlay::LogAudioQueue(bool final)
+{
+    if (!audioOut_ || audioSubmittedBlocks_ == 0) return;
+    const Uint32 now = SDL_GetTicks();
+    if (!final && now - audioLastDiagnosticMs_ < 1000) return;
+    audioLastDiagnosticMs_ = now;
+    KRKRNS_LOG("[movie-audio] %s t=%u pcm=%zu queued=%u submitted=%llu bytes=%llu completed=%llu buffered-starve=%llu",
+               final ? "stop" : "queue", now, pcmWrite_ - pcmRead_,
+               (unsigned)audioOut_->GetQueuedCount(),
+               (unsigned long long)audioSubmittedBlocks_,
+               (unsigned long long)audioSubmittedBytes_,
+               (unsigned long long)audioCompletedBlocks_.load(),
+               (unsigned long long)audioQueueStarved_);
 }
 
 void SwitchMovieOverlay::SetAudioVolume(long volume)

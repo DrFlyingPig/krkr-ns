@@ -1,0 +1,105 @@
+// Native plugin, pixel and animation contract; no game files or saves.
+var rasterChecks = 0;
+function rasterAssert(value, label) {
+    if (!value) throw new Exception("RASTER FAIL: " + label);
+    rasterChecks++;
+    Debug.message("[raster-test] PASS " + label);
+}
+function rasterHasPlugin(name) {
+    var list = Plugins.getList();
+    for (var i = 0; i < list.count; i++) if (list[i] == name) return true;
+    return false;
+}
+function rasterThrows(callback, label) {
+    var threw = false;
+    try { callback(); } catch (e) { threw = true; }
+    rasterAssert(threw, label);
+}
+rasterAssert(Storages.isExistentStorage("layerExRaster.dll"), "built-in file probe is available");
+Plugins.link("layerExRaster.dll");
+Plugins.link("LAYEREXRASTER.DLL");
+rasterAssert(rasterHasPlugin("layerexraster.dll"), "actual native registration is advertised");
+rasterAssert(typeof global.Layer.copyRaster != "undefined", "copyRaster is attached to Layer");
+var rasterModules = 0;
+var rasterList = Plugins.getList();
+for (var i = 0; i < rasterList.count; i++) if (rasterList[i] == "layerexraster.dll") rasterModules++;
+rasterAssert(rasterModules == 1, "repeated case-insensitive loads are idempotent");
+rasterAssert(Plugins.unlink("layerexraster.dll") == false, "live built-in cannot be unloaded");
+
+var rasterWindow = new Window();
+rasterWindow.setInnerSize(320, 180);
+rasterWindow.caption = "KRKR NS raster contract";
+var rasterRoot = new Layer(rasterWindow, null);
+rasterRoot.setSize(320, 180);
+rasterRoot.type = ltOpaque;
+rasterRoot.fillRect(0, 0, 320, 180, 0xff203040);
+rasterRoot.visible = true;
+var rasterSource = new Layer(rasterWindow, rasterRoot);
+var rasterDest = new Layer(rasterWindow, rasterRoot);
+rasterSource.setSize(8, 8);
+rasterDest.setSize(8, 8);
+rasterSource.setImageSize(8, 8);
+rasterDest.setImageSize(8, 8);
+rasterSource.type = ltAlpha;
+rasterDest.type = ltAlpha;
+for (var y = 0; y < 8; y++) {
+    for (var x = 0; x < 8; x++) {
+        rasterSource.setMainPixel(x, y, 0x100000 + y * 256 + x);
+        rasterSource.setMaskPixel(x, y, 40 + y * 8 + x);
+    }
+}
+rasterDest.fillRect(0, 0, 8, 8, 0xff334455);
+rasterDest.copyRaster(rasterSource, 0, 4, 1000, 0);
+rasterAssert((rasterDest.getMainPixel(7, 6) & 0xffffff) == 0x100607,
+             "zero amplitude copies source RGB");
+rasterAssert(rasterDest.getMaskPixel(7, 6) == 95, "alpha byte is copied unchanged");
+rasterDest.fillRect(0, 0, 8, 8, 0xff334455);
+rasterDest.copyRaster(rasterSource, 2, 4, 1000, 0);
+rasterAssert((rasterDest.getMainPixel(2, 1) & 0xffffff) == 0x100100,
+             "positive row displacement copies from source left edge");
+rasterAssert((rasterDest.getMainPixel(0, 1) & 0xffffff) == 0x334455,
+             "uncovered left edge retains destination pixels");
+rasterAssert((rasterDest.getMainPixel(0, 3) & 0xffffff) == 0x100302,
+             "negative row displacement advances source");
+rasterAssert((rasterDest.getMainPixel(7, 3) & 0xffffff) == 0x334455,
+             "uncovered right edge retains destination pixels");
+rasterDest.fillRect(0, 0, 8, 8, 0xff334455);
+rasterDest.copyRaster(rasterSource, 2, 4, 1000, 250);
+rasterAssert((rasterDest.getMainPixel(0, 0) & 0xffffff) == 0x100002,
+             "time drives the reference raster phase");
+var rasterOtherSize = new Layer(rasterWindow, rasterRoot);
+rasterOtherSize.setSize(9, 8);
+rasterOtherSize.setImageSize(9, 8);
+rasterDest.fillRect(0, 0, 8, 8, 0xff334455);
+rasterDest.copyRaster(rasterOtherSize, 2, 4, 1000, 0);
+rasterAssert((rasterDest.getMainPixel(4, 4) & 0xffffff) == 0x334455,
+             "size mismatch leaves destination unchanged");
+rasterThrows(function() { rasterDest.copyRaster(rasterSource, 1, 0, 1000, 0); }, "zero lines is rejected");
+rasterThrows(function() { rasterDest.copyRaster(rasterSource, 1, 4, 0, 0); }, "zero cycle is rejected");
+rasterThrows(function() { rasterDest.copyRaster(%[], 1, 4, 1000, 0); }, "non-Layer input is rejected");
+rasterThrows(function() { rasterDest.copyRaster(rasterSource, 1, 4); }, "missing arguments are rejected");
+
+// An onPaint callback owns invalidation in KAG; copyRaster itself does not.
+var rasterVisualSource = new Layer(rasterWindow, rasterRoot);
+var rasterVisualDest = new Layer(rasterWindow, rasterRoot);
+rasterVisualSource.setSize(256, 96);
+rasterVisualDest.setSize(256, 96);
+rasterVisualSource.setImageSize(256, 96);
+rasterVisualDest.setImageSize(256, 96);
+rasterVisualDest.setPos(32, 30);
+rasterVisualSource.type = ltOpaque;
+rasterVisualDest.type = ltOpaque;
+for (var x = 0; x < 256; x += 16)
+    rasterVisualSource.fillRect(x, 0, 16, 96, (x % 32 == 0) ? 0xff55aaff : 0xffffcc55);
+rasterVisualDest.visible = true;
+rasterWindow.visible = true;
+var rasterTicks = 0;
+var rasterTimer = new Timer(function() {
+    rasterTicks++;
+    rasterVisualDest.fillRect(0, 0, 256, 96, 0xff203040);
+    rasterVisualDest.copyRaster(rasterVisualSource, 12, 32, 800, rasterTicks * 50);
+    rasterVisualDest.update();
+    if (rasterTicks == 4) Debug.message("[raster-test] COMPLETE " + rasterChecks + " checks; native animation active");
+}, "");
+rasterTimer.interval = 50;
+rasterTimer.enabled = true;
