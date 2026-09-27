@@ -4,7 +4,7 @@
 
 **吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版**
 
-**`⚠️ Codex倾情巨献，绝无人工参与，属实验性项目，难以保证稳定性 ⚠️`**
+**`⚠️ 属实验性项目，难以保证稳定性 ⚠️`**
 
 移植基线：[krkrsdl2](https://github.com/krkrsdl2/krkrsdl2) `bf207f2` · [krkrz](https://github.com/krkrsdl2/krkrz) `b11c43a`；兼容实现参考 Kirikiroid2。
 
