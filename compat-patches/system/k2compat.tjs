@@ -164,8 +164,13 @@ class MenuItem {
     }
     function remove(item) {
         var index = this.children.find(item);
-        if (index >= 0) this.children.remove(index, 1);
-        if (item !== void && item !== null) item.parent = null;
+        // Array.remove takes a VALUE; erase takes an INDEX. Removing the
+        // numeric index left the item in children after clearing its parent.
+        if (index >= 0) {
+            this.children.erase(index);
+            if (item !== void && item !== null && item.parent === this)
+                item.parent = null;
+        }
         return item;
     }
     function click() {

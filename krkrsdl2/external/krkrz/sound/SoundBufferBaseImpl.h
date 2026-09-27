@@ -16,6 +16,8 @@
 
 #include "SoundBufferBaseIntf.h"
 
+// Detach the finished session before its shared timer thread is destroyed.
+void TVPResetSoundBufferTimerForEngineRestart();
 
 //---------------------------------------------------------------------------
 class tTJSNI_SoundBuffer : public tTJSNI_BaseSoundBuffer

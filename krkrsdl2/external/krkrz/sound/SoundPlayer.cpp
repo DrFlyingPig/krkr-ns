@@ -11,6 +11,11 @@
 #include "tjsCommHead.h"
 
 #include "MsgIntf.h"
+#ifdef __SWITCH__
+#include "KrkrNSLog.h"
+#else
+#include <cstdio>
+#endif
 #include "SoundPlayer.h"
 #include "QueueSoundBufferImpl.h"
 #include "SoundSamples.h"
@@ -230,7 +235,21 @@ bool tTVPSoundPlayer::Update() {
 	}
 	if( PlayStopPos != -1 ) {
 		tjs_uint64 samplesPlayed = Stream->GetSamplesPlayed();
-		if( PlayStopPos <= (tjs_int64)(samplesPlayed) || samplesPlayed == 0 ) {	// Sound API の種類によって再生終了後にサンプル位置が取得できず、GetSamplesPlayed が0を返すケースもありうる
+		tjs_uint32 queued = Stream->GetQueuedCount();
+		// Some backends reset the sample counter at EOS. Zero also occurs
+		// before a newly started voice has consumed its first queued buffer,
+		// so only an exhausted queue can use the zero-counter EOS fallback.
+		if( PlayStopPos <= (tjs_int64)(samplesPlayed) ||
+			(samplesPlayed == 0 && queued == 0) ) {
+			// Update runs on the audio event thread. Keep diagnostics away
+			// from the main thread's TJS log objects and console buffer.
+#ifdef __SWITCH__
+			KRKRNS_LOG("[audio-eos] natural stop samplesPlayed=%llu stopPos=%lld queued=%u",
+				(unsigned long long)samplesPlayed, (long long)PlayStopPos, (unsigned)queued);
+#else
+			std::fprintf(stderr, "[audio-eos] natural stop samplesPlayed=%llu stopPos=%lld queued=%u\n",
+				(unsigned long long)samplesPlayed, (long long)PlayStopPos, (unsigned)queued);
+#endif
 			Stream->StopStream();
 			Playing = false;
 			continued = false;

@@ -299,6 +299,7 @@ private:
     bool _isStop = false;
     bool _playing = false;
     bool _allplaying = false;
+    bool _finitePlaybackGraph = false;
     bool _useD3D = false;
     int _pipoVal = 0;
     tTJSVariant _tags;

@@ -1,0 +1,85 @@
+// Contract checks for the bundled script MenuItem model. The native class is
+// deliberately not registered; this fixture does not validate native menus.
+global.__krkrns_game_k2compat = "";
+Scripts.execStorage("romfs:/compat/system/k2compat.tjs");
+
+var menuChecks = 0;
+function menuAssert(value, label) {
+    if (!value) throw new Exception("MENU CONTRACT FAIL: " + label);
+    menuChecks++;
+    Debug.message("[menu-contract] PASS " + label);
+}
+menuAssert(typeof(global.MenuItem) == "Object", "script MenuItem is available");
+
+var root = new MenuItem(null, "root");
+var first = new MenuItem(null, "first");
+var middle = new MenuItem(null, "middle");
+var last = new MenuItem(null, "last");
+root.add(first);
+root.add(middle);
+root.add(last);
+menuAssert(root.children.count == 3 && middle.parent === root,
+           "add establishes the initial parent and children");
+
+var removed = root.remove(middle);
+menuAssert(removed === middle, "remove returns the supplied item");
+menuAssert(root.children.count == 2 && root.children[0] === first &&
+           root.children[1] === last, "remove middle preserves sibling order");
+menuAssert(middle.parent === null && first.parent === root && last.parent === root,
+           "remove middle detaches only the removed child");
+
+root.remove(middle);
+menuAssert(root.children.count == 2 && root.children[0] === first &&
+           root.children[1] === last && middle.parent === null,
+           "repeated remove leaves the tree unchanged");
+
+var otherRoot = new MenuItem(null, "other root");
+var foreign = new MenuItem(null, "foreign");
+otherRoot.add(foreign);
+root.remove(foreign);
+menuAssert(foreign.parent === otherRoot && otherRoot.children.count == 1 &&
+           otherRoot.children[0] === foreign,
+           "remove non-child preserves its actual parent");
+menuAssert(root.children.count == 2 && root.children[0] === first &&
+           root.children[1] === last, "remove non-child preserves receiver children");
+
+root.remove(first);
+menuAssert(root.children.count == 1 && root.children[0] === last &&
+           first.parent === null && last.parent === root,
+           "remove first preserves the final child");
+root.remove(last);
+menuAssert(root.children.count == 0 && last.parent === null,
+           "remove last empties the tree");
+root.remove(last);
+menuAssert(root.children.count == 0 && last.parent === null,
+           "repeated remove from empty parent is harmless");
+
+root.add(middle);
+root.insert(first, 0);
+root.insert(last, 1);
+menuAssert(root.children.count == 3 && root.children[0] === first &&
+           root.children[1] === last && root.children[2] === middle,
+           "insert establishes first and middle positions");
+root.remove(last);
+menuAssert(root.children.count == 2 && root.children[0] === first &&
+           root.children[1] === middle && last.parent === null,
+           "remove inserted child updates both sides of the relationship");
+
+root.remove(null);
+root.remove(void);
+menuAssert(root.children.count == 2 && first.parent === root && middle.parent === root,
+           "remove null and void preserves existing children");
+middle.shortcut = 0;
+menuAssert(typeof(middle.shortcut) == "String" && middle.shortcut == "0",
+           "shortcut keeps the string property contract");
+
+Debug.message("[menu-contract] COMPLETE " + menuChecks + " checks; script model only");
+
+var menuWindow = new Window();
+menuWindow.setInnerSize(320, 180);
+menuWindow.caption = "KRKR NS menu contract";
+var menuLayer = new Layer(menuWindow, null);
+menuLayer.setSize(320, 180);
+menuLayer.fillRect(0, 0, 320, 180, 0xff205040);
+menuLayer.visible = true;
+menuWindow.visible = true;

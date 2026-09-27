@@ -1,6 +1,7 @@
 #include "KrkrNSPaths.h"
 #include "ncbind/ncbind.hpp"
 #include "emoteplayerclass.h"
+#include "EmotePlaybackCompletion.h"
 #include "tjsArray.h"
 #include "StorageIntf.h"
 #include "CharacterSet.h"
@@ -1098,8 +1099,28 @@ void EmotePlayer::play(tTJSString name, int flag)
         _allplaying = true;
         isSelfClear = false;
     }
-    TVPConsoleLog("EmotePlayer.play selected file=%p motion=%p playing=%d",
-                  emtEngine._mainfile, emtEngine._mainmotion, _playing ? 1 : 0);
+    _isStop = false;
+    _finitePlaybackGraph = IsFinitePlaybackGraph(emtEngine._mainmotion,
+        [](emotemotion* motion) {
+            return IsFiniteMotion(motion);
+        }, [this](emotemotion* motion) {
+            std::vector<emotemotion*> children;
+            for (auto* node : motion->nodeList) {
+                if (!node) continue;
+                for (auto* frame : node->frameList)
+                    if (frame && frame->hasContent && frame->src.compare(0, 7, "motion/") == 0)
+                        children.push_back(emtEngine.findmotionByName(frame->src));
+            }
+            return children;
+        });
+    TVPConsoleLog("EmotePlayer.play selected file=%p motion=%p playing=%d finite=%d vars=%u sync=%.3f selfSync=%.3f last=%.3f loop=%.3f",
+                  emtEngine._mainfile, emtEngine._mainmotion, _playing ? 1 : 0,
+                  _finitePlaybackGraph ? 1 : 0,
+                  emtEngine._mainfile ? (unsigned)emtEngine._mainfile->_metadata->_varList.size() : 0,
+                  emtEngine._mainmotion ? (double)emtEngine._mainmotion->syncTime : 0.0,
+                  emtEngine._mainmotion ? (double)emtEngine._mainmotion->selfSyncTime : 0.0,
+                  emtEngine._mainmotion ? emtEngine._mainmotion->lastTime : 0.0,
+                  emtEngine._mainmotion ? emtEngine._mainmotion->loopTime : 0.0);
 }
 void EmotePlayer::initPhysics(tTJSVariant metadata)
 {
@@ -1198,6 +1219,14 @@ void EmotePlayer::progress(tjs_real mstime)
             }
             // 使用emoteengine::progress构建独立ref树
             emtEngine.progress(clockPassed, empty, _limitArea);
+        }
+        if (_allplaying && HasCompletedFinitePlayback(_playing, _finitePlaybackGraph,
+                !emtEngine._mainfile->_metadata->_varList.empty(),
+                !emtEngine.currTimeline.empty()))
+        {
+            _allplaying = false;
+            TVPConsoleLog("EmotePlayer completed motion=%s frame=%.3f",
+                          EmoteToUtf8(_motion).c_str(), (double)clockPassed);
         }
         // ping-pong触发更新draw，位置暂时选这里，让它频繁点
         if (_pipoVal == 0)

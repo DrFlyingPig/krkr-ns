@@ -117,7 +117,7 @@ tTJSNI_MenuItem * tTJSNI_BaseMenuItem::CastFromVariant(const tTJSVariant & from)
 		if(clo.Object == NULL) TVPThrowExceptionMessage(TVPSpecifyMenuItem);
 		tTJSNI_MenuItem *menuitem = NULL;
 		if(TJS_FAILED(clo.Object->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
-			tTJSNC_MenuItem::ClassID, (iTJSNativeInstance**)&menuitem)))
+			tTJSNC_MenuItem::ClassID, (iTJSNativeInstance**)&menuitem)) || !menuitem)
 			TVPThrowExceptionMessage(TVPSpecifyMenuItem);
 		return menuitem;
 	}
@@ -140,8 +140,9 @@ void tTJSNI_BaseMenuItem::RemoveChild(tTJSNI_BaseMenuItem *item)
 	if(Children.Remove(item))
 	{
 		ChildrenArrayValid = false;
-		if(item->Owner) item->Owner->Release();
 		item->Parent = NULL;
+		// Releasing the last dispatch reference may destroy the native instance.
+		if(item->Owner) item->Owner->Release();
 	}
 }
 //---------------------------------------------------------------------------

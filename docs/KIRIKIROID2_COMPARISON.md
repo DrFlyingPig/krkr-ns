@@ -5,6 +5,7 @@
 > 方法：目录/规模盘点、原生类成员逐项 diff（Window/Layer）、插件清单对照、以及 2026-09 会话中全部实机故障的根因回溯。
 > 注意：Kirikiroid2 的 APK 里还有一批**未公开源码的私有内置插件**（社区俗称「私有插件仓库」），公有树里看不到；本文件对这部分只能列「已知存在」清单。
 > 2026-09-21 起，实施顺序与逐项验收状态统一记录在 [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md)；本文件保留差异证据，不再单独维护另一套优先级。
+> 2026-09-27 补充：[空占位专项审计](STUB_IMPLEMENTATION_AUDIT.md) 已确认多个已注册接口仍无实际行为。本文旧的「对齐」「功能等价」标签及函数名扫描结论不能作为完整兼容性验收；当前缺口与验证边界以该专项记录为准。
 
 ---
 
@@ -45,7 +46,7 @@
 | 内容几何 | `MainScene` 声明式：游戏 `SetSize/SetInnerSize` → `RecalcPaintBox()` 等比缩放进视图 | `krkrsdl2_present_crops()` 启发式裁剪 + P87 `declaredClientW/H`（仿 K2 补的） | 「窗口大小不对/画面缺一块」类故障的历史根源；K2 的方案是原始参照 |
 | 全屏语义 | `GetFullScreenMode()` 恒 false（窗口层） | 曾恒 true（引发 LimeLight 白屏），后按 K2 改回真实语义 | 已对齐 |
 | 原生 Window 类成员 | 73 个 | 79 个（超集：另含 canvas/drawCycle/exSystemMenu/mouseCursor/displayDensity/fireOnDraw） | 我们是超集，无缺口 |
-| 多点触摸/旋转 | onMultiTouch/onTouchScaling/onDisplayRotate 完整 | 成员存在，Switch 上无触摸硬件 | 无实际影响 |
+| 多点触摸/旋转 | onMultiTouch/onTouchScaling/onDisplayRotate | SDL 有触摸/手势事件，但 enableTouch 与触摸点轮询仍为空桩 | 轮询式触摸脚本存在兼容缺口，见专项审计 |
 | 多窗口 | 主窗口 + 模态子窗口共用单 GL surface | P57-58 时代实现「寄宿窗口」 | 已对齐（KAG 模态对话框可用） |
 
 ### 3.2 文本渲染与 TextRender（历史记录 bug 的根因子系统）
@@ -64,7 +65,7 @@
 | 插件 | Kirikiroid2 公有 | K2 APK 私有（社区 DLL list/逆向已知） | KRKR-ns 内置 | 状态 |
 |---|---|---|---|---|
 | xp3filter | ✅ | — | ✅（XP3ExtractionFilter + 原生 xor 快路径） | 对齐 |
-| win32dialog | ✅（去 UI 版） | — | ✅（TJS 垫片+原生混合） | 对齐 |
+| win32dialog | ✅（去 UI 版） | — | ⚠️（TJS 垫片+原生混合） | 消息入口有实现；模板、execute/show/modeless 等仍为空桩 |
 | varfile / csvParser / dirlist / addFont / fftgraph / getSample / getabout / saveStruct | ✅ | — | ✅ | 对齐 |
 | wutcwf | ✅ | — | ✅ | 对齐 |
 | layerExMovie / layerExPerspective | ✅ | — | ❌（backlog P2） | 缺 |
@@ -74,7 +75,7 @@
 | **extrans** | ❌ | ✅（APK） | ❌ | 转场退化 crossfade（backlog P1） |
 | **AlphaMovie** | ❌ | ✅（APK） | ⚠️ 桩（TJS model-only） | ここは… 走 1 秒空影片 |
 | json / fstat / sqlite3 / PackinOne / lzfs | ❌ | ✅（APK） | ❌（fstat 部分有） | backlog P2 |
-| **emoteplayer（E-mote）** | ❌（K2 靠 APK 私有仓库） | ✅（APK） | ✅ **自研完整移植**（开源 GL 后端） | 我们领先 |
+| **emoteplayer（E-mote）** | ❌（公有树无该插件实现） | 公有源码无法核验 APK 语义 | ⚠️ 有实际播放与 GL/软件后端，公开控制接口仍有空桩 | 颜色、timeline 混合、skip/pass、物理等未补齐，不能称为完整移植 |
 | **psbfile** | ❌ | ✅（APK?） | ✅ 自研 | 我们领先 |
 | kagparser | ✅（utils 内置） | — | ✅ 内置 | 对齐 |
 | kremscripten / layerexbtoa（GFX_Motion） | ❌ | ? | ✅ | 我们独有 |

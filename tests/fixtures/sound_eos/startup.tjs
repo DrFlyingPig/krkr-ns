@@ -1,0 +1,121 @@
+// Natural WaveSoundBuffer completion, including delayed main-thread delivery.
+// The package contains synthetic 300 ms Opus/Vorbis/PCM clips only by default.
+var eosChecks = 0;
+function eosAssert(value, label) {
+    if (!value) throw new Exception("SOUND EOS FAIL: " + label);
+    eosChecks++;
+    Debug.message("[sound-eos] PASS " + label);
+}
+var eosWindow = new Window();
+eosWindow.setInnerSize(320, 180);
+eosWindow.caption = "KRKR NS natural sound completion";
+var eosRoot = new Layer(eosWindow, null);
+eosRoot.setSize(320, 180);
+eosRoot.fillRect(0, 0, 320, 180, 0xff203040);
+eosRoot.visible = true;
+eosWindow.visible = true;
+var eosCases = [
+    %[file:"romfs:/short-opus.ogg", name:"Opus normal", stall:0],
+    %[file:"romfs:/short-vorbis.ogg", name:"Vorbis normal", stall:0],
+    %[file:"romfs:/short-pcm.wav", name:"PCM normal", stall:0],
+    %[file:"romfs:/short-opus.ogg", name:"Opus replay 1", stall:0],
+    %[file:"romfs:/short-opus.ogg", name:"Opus replay 2", stall:0],
+    %[file:"romfs:/short-opus.ogg", name:"Opus stalled main thread", stall:800],
+    %[file:"romfs:/short-vorbis.ogg", name:"Vorbis stalled main thread", stall:800]
+];
+// OPTIONAL_GAME_SAMPLE
+var eosCase = -1;
+var eosStoppedEvents = 0;
+var eosPlayEvents = 0;
+var eosRunning = false;
+var eosBegan = 0;
+var eosPlayTick = 0;
+var eosStopTick = 0;
+var eosSettled = 0;
+var eosOwner = %[action:function(ev) {
+    if (ev.type != "onStatusChanged") return;
+    Debug.message("[sound-eos] event case=" + eosCase + " status=" + ev.status +
+                  " elapsed=" + (System.getTickCount() - eosBegan));
+    if (eosRunning && ev.status == "play") {
+        eosPlayTick = System.getTickCount();
+        eosPlayEvents++;
+    }
+    if (eosRunning && ev.status == "stop") {
+        eosStopTick = System.getTickCount();
+        eosStoppedEvents++;
+    }
+}];
+// Native action delivery invokes the dictionary member. Bind its script
+// context explicitly because TJS functions do not capture lexical globals.
+eosOwner.action = eosOwner.action incontextof global;
+var eosSound = new WaveSoundBuffer(eosOwner);
+eosSound.looping = false;
+eosSound.volume = 10000;
+var eosTimer;
+function eosStartNext() {
+    eosCase++;
+    if (eosCase >= eosCases.count) {
+        eosTimer.enabled = false;
+        eosSound.stop();
+        eosRoot.fillRect(0, 0, 320, 180, 0xff20a060);
+        Debug.message("[sound-eos] COMPLETE " + eosChecks + " checks");
+        return;
+    }
+    eosRunning = false;
+    eosSound.open(eosCases[eosCase].file);
+    eosAssert(eosSound.status == "stop", eosCases[eosCase].name + " opens stopped");
+    eosAssert(eosSound.totalTime > 0 && eosSound.totalTime < 5000,
+              eosCases[eosCase].name + " duration is finite");
+    eosStoppedEvents = 0;
+    eosPlayEvents = 0;
+    eosPlayTick = 0;
+    eosStopTick = 0;
+    eosSettled = 0;
+    eosBegan = System.getTickCount();
+    eosRunning = true;
+    eosSound.play();
+    eosAssert(eosSound.status == "play", eosCases[eosCase].name + " enters play");
+    // Deliberately delay script delivery while the native audio worker runs.
+    // Natural stop must still arrive when main-thread dispatch resumes.
+    while (System.getTickCount() - eosBegan < eosCases[eosCase].stall) {}
+}
+eosTimer = new Timer(function() {
+    try {
+        if (eosCase < 0) { eosStartNext(); return; }
+        var elapsed = System.getTickCount() - eosBegan;
+        if (elapsed > eosSound.totalTime + 3000)
+            throw new Exception(eosCases[eosCase].name + " timeout status=" +
+                eosSound.status + " stopEvents=" + eosStoppedEvents +
+                " position=" + eosSound.position + " total=" + eosSound.totalTime);
+        if (eosSound.status != "stop" || eosStoppedEvents == 0) return;
+        if (eosSettled == 0) {
+            eosAssert(eosPlayEvents == 1, eosCases[eosCase].name + " emits one play event");
+            eosAssert(eosStoppedEvents == 1, eosCases[eosCase].name + " emits natural stop event");
+            // Use the play notification as the clock origin so first-device
+            // initialization cannot hide early native completion. Permit one
+            // 50 ms dispatch interval of startup uncertainty, not truncation.
+            var played = eosStopTick - eosPlayTick;
+            Debug.message("[sound-eos] duration-observation name=" + eosCases[eosCase].name +
+                " callElapsed=" + elapsed + " initElapsed=" + (eosPlayTick - eosBegan) +
+                " playElapsed=" + played + " declared=" + eosSound.totalTime +
+                " early=" + (played < eosSound.totalTime - 50));
+            eosAssert(played >= eosSound.totalTime - 50,
+                      eosCases[eosCase].name + " preserves complete audio duration");
+            eosSettled = System.getTickCount();
+            return;
+        }
+        if (System.getTickCount() - eosSettled < 150) return;
+        eosAssert(eosStoppedEvents == 1, eosCases[eosCase].name + " stop event stays unique");
+        eosRunning = false;
+        eosStartNext();
+    } catch (e) {
+        eosTimer.enabled = false;
+        eosRunning = false;
+        eosSound.stop();
+        eosRoot.fillRect(0, 0, 320, 180, 0xffa02020);
+        Debug.message("[sound-eos] FAIL " + e.message);
+        throw e;
+    }
+}, "");
+eosTimer.interval = 50;
+eosTimer.enabled = true;

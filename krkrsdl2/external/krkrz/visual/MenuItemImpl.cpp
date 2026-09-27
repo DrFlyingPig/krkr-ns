@@ -125,7 +125,8 @@ tTJSNI_MenuItem::tTJSNI_MenuItem()
 tjs_error TJS_INTF_METHOD tTJSNI_MenuItem::Construct(tjs_int numparams,
 	tTJSVariant **param, iTJSDispatch2 *tjs_obj)
 {
-	inherited::Construct(numparams, param, tjs_obj);
+	tjs_error hr = inherited::Construct(numparams, param, tjs_obj);
+	if(TJS_FAILED(hr)) return hr;
 
 	// create or attach MenuItem object
 	if(Window)
@@ -196,6 +197,9 @@ void tTJSNI_MenuItem::Add(tTJSNI_MenuItem * item)
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::Insert(tTJSNI_MenuItem *item, tjs_int index)
 {
+	// Public indices name insertion positions; -1 is only Add's sentinel.
+	if(index < 0 || index > static_cast<tjs_int>(Children.size()))
+		TVPThrowExceptionMessage(TJS_W("Menu item index out of range."));
 // 	if(MenuItem && item->MenuItem)
 // 	{
 // 		MenuItem->Insert(index, item->MenuItem);
@@ -211,6 +215,8 @@ void tTJSNI_MenuItem::Insert(tTJSNI_MenuItem *item, tjs_int index)
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::Remove(tTJSNI_MenuItem *item)
 {
+	if(item->Parent != this || Children.Find(item) < 0)
+		TVPThrowExceptionMessage(TVPNotChildMenuItem);
 // 	if(MenuItem && item->MenuItem)
 // 	{
 // 		int index = MenuItem->IndexOf(item->MenuItem);
@@ -239,8 +245,20 @@ tjs_int tTJSNI_MenuItem::GetIndex() const
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::SetIndex(tjs_int newIndex)
 {
-// 	if(!MenuItem) return;
-// 	MenuItem->setMenuIndex (newIndex);
+	if(!Parent) return;
+	std::lock_guard<std::mutex> holder(Parent->Children.Lock);
+	auto &siblings = Parent->Children;
+	if(newIndex < 0 || newIndex >= static_cast<tjs_int>(siblings.size()))
+		TVPThrowExceptionMessage(TJS_W("Menu item index out of range."));
+	auto current = std::find(siblings.begin(), siblings.end(), this);
+	if(current == siblings.end())
+		TVPThrowExceptionMessage(TVPNotChildMenuItem);
+	auto target = siblings.begin() + newIndex;
+	if(current < target)
+		std::rotate(current, current + 1, target + 1);
+	else if(current > target)
+		std::rotate(target, current, current + 1);
+	Parent->ChildrenArrayValid = false;
 }
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::SetCaption(const ttstr & caption)
@@ -322,14 +340,13 @@ bool tTJSNI_MenuItem::GetRadio() const
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::SetShortcut(const ttstr & shortcut)
 {
-	//if(!MenuItem) return;
-//	MenuItem->setShortCut (TextToShortCut(shortcut.AsAnsiString()));
+	// Preserve the script value without claiming a platform accelerator.
+	Shortcut = shortcut;
 }
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::GetShortcut(ttstr & shortcut) const
 {
-	/*if(!MenuItem)*/ shortcut.Clear();
-//	shortcut = ShortCutToText(MenuItem->getShortCut());
+	shortcut = Shortcut;
 }
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::SetVisible(bool b)

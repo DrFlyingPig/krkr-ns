@@ -46,9 +46,22 @@ public:
 	}
 } static TVPSoundBufferTimerDispatcher;
 //---------------------------------------------------------------------------
+void TVPResetSoundBufferTimerForEngineRestart()
+{
+	// Script shutdown can leave native sound objects alive until a later
+	// finalization. Their process-global dispatcher must not retain the timer
+	// whose registration is lost when the session's TimerThread is destroyed.
+	// Clear this session's registry so its late Invalidate calls cannot remove
+	// a rebuilt session's timer or receive that session's timer beats.
+	TVPTimer *timer = TVPSoundBufferTimer;
+	TVPSoundBufferTimer = NULL;
+	TVPSoundBufferVector.clear();
+	delete timer;
+}
+//---------------------------------------------------------------------------
 void TVPAddSoundBuffer(tTJSNI_SoundBuffer * buf)
 {
-	if(TVPSoundBufferVector.size() == 0)
+	if(!TVPSoundBufferTimer)
 	{
 		// first buffer
 		TVPSoundBufferTimer = new TVPTimer(); // Create Timer Object
@@ -62,21 +75,16 @@ void TVPAddSoundBuffer(tTJSNI_SoundBuffer * buf)
 //---------------------------------------------------------------------------
 void TVPRemoveSoundBuffer(tTJSNI_SoundBuffer *buf)
 {
-	if(TVPSoundBufferVector.size() != 0)
-	{
-		std::vector<tTJSNI_SoundBuffer *>::iterator i;
-		i = std::find(TVPSoundBufferVector.begin(), TVPSoundBufferVector.end(),
-			buf);
-		if(i != TVPSoundBufferVector.end())
-		{
-			TVPSoundBufferVector.erase(i);
-		}
-	}
+	std::vector<tTJSNI_SoundBuffer *>::iterator i;
+	i = std::find(TVPSoundBufferVector.begin(), TVPSoundBufferVector.end(), buf);
+	if(i == TVPSoundBufferVector.end()) return;
+	TVPSoundBufferVector.erase(i);
 
 	if(TVPSoundBufferVector.size() == 0)
 	{
 		// all buffer was removed
 		delete TVPSoundBufferTimer;
+		TVPSoundBufferTimer = NULL;
 	}
 }
 //---------------------------------------------------------------------------

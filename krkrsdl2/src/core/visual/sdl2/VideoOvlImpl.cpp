@@ -978,7 +978,7 @@ void tTJSNI_VideoOverlay::SetDefaultStopFrame()
 tjs_int tTJSNI_VideoOverlay::GetStopFrame()
 {
 	tjs_int	result = 0;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetStopFrame( &result );
@@ -1045,7 +1045,7 @@ void tTJSNI_VideoOverlay::SetMode( tTVPVideoOverlayMode m )
 tjs_real tTJSNI_VideoOverlay::GetPlayRate()
 {
 	tjs_real	result = 0.0;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetPlayRate( &result );
@@ -1066,7 +1066,7 @@ void tTJSNI_VideoOverlay::SetPlayRate(tjs_real r)
 tjs_int tTJSNI_VideoOverlay::GetAudioBalance()
 {
 	long	result = 0;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetAudioBalance( &result );
@@ -1086,7 +1086,12 @@ void tTJSNI_VideoOverlay::SetAudioBalance(tjs_int b)
 tjs_int tTJSNI_VideoOverlay::GetAudioVolume()
 {
 	long	result = 0;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if defined(__SWITCH__)
+	// SwitchMovieOverlay and iTVPAudioStream use linear 0..100000 volume.
+	// DirectSound attenuation conversion belongs only to the Win32 backend.
+	if(VideoOverlay) VideoOverlay->GetAudioVolume( &result );
+	return result;
+#elif defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetAudioVolume( &result );
@@ -1096,7 +1101,9 @@ tjs_int tTJSNI_VideoOverlay::GetAudioVolume()
 }
 void tTJSNI_VideoOverlay::SetAudioVolume(tjs_int b)
 {
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if defined(__SWITCH__)
+	if(VideoOverlay) VideoOverlay->SetAudioVolume( b );
+#elif defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
 	if(VideoOverlay)
 	{
 		VideoOverlay->SetAudioVolume( TVPVolumeToDSAttenuate( b ) );
@@ -1126,7 +1133,7 @@ void tTJSNI_VideoOverlay::SelectAudioStream(tjs_uint n)
 tjs_int tTJSNI_VideoOverlay::GetEnabledAudioStream()
 {
 	long		result = -1;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetEnableAudioStreamNum( &result );
@@ -1167,7 +1174,7 @@ void tTJSNI_VideoOverlay::SelectVideoStream(tjs_uint n)
 tjs_int tTJSNI_VideoOverlay::GetEnabledVideoStream()
 {
 	long		result = -1;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetEnableVideoStreamNum( &result );
@@ -1242,7 +1249,7 @@ void tTJSNI_VideoOverlay::SetMixingMovieAlpha( tjs_real a )
 tjs_real tTJSNI_VideoOverlay::GetMixingMovieAlpha()
 {
 	float	ret = 0.0f;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetMixingMovieAlpha( &ret );
@@ -1261,8 +1268,8 @@ void tTJSNI_VideoOverlay::SetMixingMovieBGColor( tjs_uint col )
 }
 tjs_uint tTJSNI_VideoOverlay::GetMixingMovieBGColor()
 {
-	unsigned long	ret;
-#if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
+	unsigned long	ret = 0;
+#if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
 		VideoOverlay->GetMixingMovieBGColor( &ret );

@@ -1,11 +1,12 @@
-"""Package the self-contained core-port startup script into a copy of an NRO.
+"""Package a self-contained contract startup script into a copy of an NRO.
 
 Usage:
     python tests/build_core_port_fixture.py --nro build-switch/krkrsdl2.nro \
         --output-dir build-core-port-fixture
 
-The input NRO is not modified.  The result contains only the regression
-startup script and bundled font in RomFS, so it never reads game data.
+The input NRO is not modified. RomFS includes the fixture script and font,
+plus the bundled compatibility scripts or explicit synthetic media required
+by the selected fixture. The startup scripts never read game data.
 """
 
 import argparse
@@ -33,6 +34,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nro", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--fixture", choices=("core_port", "menu_contract", "movie_contract"),
+                        default="core_port")
+    parser.add_argument("--media", type=Path,
+                        help="Synthetic MP4 to include as sample.mp4 in movie_contract")
     parser.add_argument(
         "--romfs-tool", default=r"D:\devkitPro\tools\bin\build_romfs.exe"
     )
@@ -42,12 +47,24 @@ def main() -> None:
     output_dir = args.output_dir.resolve()
     romfs = output_dir / "romfs"
     romfs.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(repo / "tests/fixtures/core_port/startup.tjs", romfs / "startup.tjs")
+    shutil.copy2(repo / "tests/fixtures" / args.fixture / "startup.tjs", romfs / "startup.tjs")
     shutil.copy2(repo / "krkrsdl2/data/notosanssc.ttf", romfs / "notosanssc.ttf")
+    if args.fixture == "menu_contract":
+        compat = romfs / "compat/system"
+        compat.mkdir(parents=True, exist_ok=True)
+        # ScriptMgnIntf also invokes the namespace reinstall hook when this
+        # basename is executed, including in a self-contained test package.
+        for name in ("k2compat.tjs", "k2compat_reinstall.tjs"):
+            shutil.copy2(repo / "compat-patches/system" / name, compat / name)
+    if args.fixture == "movie_contract":
+        if args.media is None:
+            parser.error("movie_contract requires --media pointing to a synthetic MP4")
+        shutil.copy2(args.media, romfs / "sample.mp4")
 
-    image = output_dir / "core-port.romfs"
+    stem = "core-port" if args.fixture == "core_port" else args.fixture.replace("_", "-")
+    image = output_dir / (stem + ".romfs")
     subprocess.run([args.romfs_tool, str(romfs), str(image)], check=True)
-    target = output_dir / "core-port.nro"
+    target = output_dir / (stem + ".nro")
     replace_romfs(args.nro.resolve(), image, target)
     print(target)
 

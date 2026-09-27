@@ -138,6 +138,9 @@ static tTVPAtExit TVPShutdownWaveSoundBuffersAtExit( TVP_ATEXIT_PRI_PREPARE, TVP
 void TVPReleaseQueueSoundBuffers()
 {
 	TVPShutdownSoundBuffers();
+	// The launcher calls TimerThread::Uninit after this hook. Remove the
+	// sound dispatcher now while it can still unregister its timer safely.
+	TVPResetSoundBufferTimerForEngineRestart();
 	TVPAddLog(TJS_W("[reinit] queue sound buffers released"));
 }
 //---------------------------------------------------------------------------
@@ -444,8 +447,8 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 	}	// end of thread protected block
 
 	// ensure thread
-	TVPSoundBuffers.EnsureBufferWorking(); // wake the playing thread up again
 	ThreadCallbackEnabled = true;
+	TVPSoundBuffers.EnsureBufferWorking(); // wake after publishing playable work
 	Thread->StartDecoding( predecodedSamples );
 }
 //---------------------------------------------------------------------------

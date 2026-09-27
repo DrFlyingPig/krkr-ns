@@ -92,7 +92,7 @@ public:
     void __stdcall Stop() override;
     void __stdcall Pause() override;
     void __stdcall SetPosition(unsigned long long /*tick*/) override {}
-    void __stdcall GetPosition(unsigned long long * /*tick*/) override {}
+    void __stdcall GetPosition(unsigned long long * tick) override;
     void __stdcall GetStatus(tTVPVideoStatus * status) override;
     void __stdcall GetEvent(long * evcode, LONG_PTR * param1,
                             LONG_PTR * param2, bool * got) override;
@@ -109,28 +109,30 @@ public:
     void __stdcall SetVideoBuffer(BYTE * buff1, BYTE * buff2,
                                   long size) override;
     void __stdcall SetStopFrame(int /*frame*/) override {}
-    void __stdcall GetStopFrame(int * /*frame*/) override {}
+    // This backend currently plays to EOF; custom stop-frame setters are
+    // still unsupported.  Report the actual default boundary, as KRKRZ does.
+    void __stdcall GetStopFrame(int * frame) override { GetNumberOfFrame(frame); }
     void __stdcall SetDefaultStopFrame() override {}
     void __stdcall SetPlayRate(double /*rate*/) override {}
-    void __stdcall GetPlayRate(double * /*rate*/) override {}
+    void __stdcall GetPlayRate(double * rate) override { if (rate) *rate = 1.0; }
     void __stdcall SetAudioBalance(long /*balance*/) override {}
-    void __stdcall GetAudioBalance(long * /*balance*/) override {}
+    void __stdcall GetAudioBalance(long * balance) override { if (balance) *balance = 0; }
     void __stdcall SetAudioVolume(long volume) override;
     void __stdcall GetAudioVolume(long * volume) override;
     void __stdcall GetNumberOfAudioStream(unsigned long * streamCount) override;
     void __stdcall SelectAudioStream(unsigned long /*num*/) override {}
-    void __stdcall GetEnableAudioStreamNum(long * /*num*/) override {}
+    void __stdcall GetEnableAudioStreamNum(long * num) override;
     void __stdcall DisableAudioStream() override {}
     void __stdcall GetNumberOfVideoStream(unsigned long * streamCount) override;
     void __stdcall SelectVideoStream(unsigned long /*num*/) override {}
-    void __stdcall GetEnableVideoStreamNum(long * /*num*/) override {}
+    void __stdcall GetEnableVideoStreamNum(long * num) override;
     void __stdcall SetMixingBitmap(HDC /*hdc*/, RECT * /*dest*/,
                                    float /*alpha*/) override {}
     void __stdcall ResetMixingBitmap() override {}
     void __stdcall SetMixingMovieAlpha(float /*a*/) override {}
-    void __stdcall GetMixingMovieAlpha(float * /*a*/) override {}
+    void __stdcall GetMixingMovieAlpha(float * a) override { if (a) *a = 1.0f; }
     void __stdcall SetMixingMovieBGColor(unsigned long /*col*/) override {}
-    void __stdcall GetMixingMovieBGColor(unsigned long * /*col*/) override {}
+    void __stdcall GetMixingMovieBGColor(unsigned long * col) override { if (col) *col = 0xFF000000; }
     void __stdcall PresentVideoImage() override {}
     void __stdcall GetContrastRangeMin(float * v) override { *v = 0; }
     void __stdcall GetContrastRangeMax(float * v) override { *v = 0; }

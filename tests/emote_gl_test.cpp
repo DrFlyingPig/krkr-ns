@@ -26,6 +26,99 @@ static const float quad[] = {-1,-1,0,0, 1,-1,1,0, 1,1,1,1, -1,1,0,1};
 static const uint16_t indices[] = {0,1,2, 0,2,3};
 using Pixel = std::array<uint8_t,4>;
 
+// Nonuniform pixels and odd widths exercise transparent/opaque SIMD groups,
+// mixed groups, the scalar tail, both triangle windings and stencil cutouts.
+// Expected colours follow the pinned blend equations independently of the
+// rasterizer's edge and UV implementation.
+static void checkAlphaFastPaths(krkrsdl3::iTVPRenderBackend& backend)
+{
+    constexpr int w = 17, h = 9;
+    const Pixel background = {37, 79, 121, 63};
+    const uint8_t alphas[] = {0, 255, 1, 128, 254};
+    std::vector<Pixel> source(w * h), maskPixels(w * h), seedPixels(w * h, background);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+        {
+            source[y * w + x] = {uint8_t(17 + x * 11), uint8_t(31 + y * 23),
+                                 uint8_t(211 - x * 7), alphas[((x / 4) + y) % 5]};
+            maskPixels[y * w + x] = {0, 0, 0, uint8_t((x + y) % 4 < 2 ? 127 : 128)};
+        }
+    void* target = backend.CreateTarget(w, h);
+    void* texture = backend.CreateTexture(w, h);
+    void* mask = backend.CreateTarget(w, h);
+    backend.UpdateTexture(texture, source[0].data(), w, h, w * 4);
+    backend.UpdateTargetTexture(mask, maskPixels[0].data(), w, h, w * 4);
+    const float color[] = {0.25f, 0.75f, 0.5f, 0.5f};
+    const Pixel uniform = {63, 191, 127, 127};
+    const uint16_t reverseIndices[] = {2, 1, 0, 3, 2, 0};
+    for (bool clipped : {false, true})
+        for (bool stencil : {false, true})
+            for (bool reversed : {false, true})
+                for (int mode : {0, 3, 1, 4, 21})
+                    for (float opacity : {-1.0f, 0.0f, 0.5f, 1.0f, 2.0f})
+                    {
+                        const int left = clipped ? 3 : 0, right = clipped ? 14 : w;
+                        const int top = clipped ? 1 : 0, bottom = clipped ? 8 : h;
+                        const float x0 = 2.0f * left / w - 1, x1 = 2.0f * right / w - 1;
+                        const float y0 = 2.0f * top / h - 1, y1 = 2.0f * bottom / h - 1;
+                        const float vertices[] = {x0,y0,0,0, x1,y0,1,0,
+                                                   x1,y1,1,1, x0,y1,0,1};
+                        backend.UpdateTargetTexture(target, seedPixels[0].data(), w, h, w * 4);
+                        backend.SetTarget(target); backend.SetMask(stencil ? mask : nullptr);
+                        backend.SetBlendMode(mode, mode == 21 ? color : nullptr);
+                        backend.DrawMesh(vertices, 4, reversed ? reverseIndices : indices, 6,
+                                         texture, opacity);
+                        int pitch = 0;
+                        const uint8_t* pixels = backend.LockTarget(target, pitch);
+                        check(pixels && pitch == w * 4, "odd-width alpha target dimensions");
+                        for (int y = 0; y < h; ++y)
+                            for (int x = 0; x < w; ++x)
+                            {
+                                Pixel expected = background;
+                                bool exact = true;
+                                if (x >= left && x < right && y >= top && y < bottom &&
+                                    (!stencil || maskPixels[y * w + x][3] >= 128))
+                                {
+                                    const int tx = int((x - left + 0.5) / (right - left) * (w - 1) + 0.5);
+                                    const int ty = int((y - top + 0.5) / (bottom - top) * (h - 1) + 0.5);
+                                    const Pixel src = source[ty * w + tx];
+                                    const double opa = std::max(0.0, std::min(1.0, double(opacity)));
+                                    const double sa = src[3] / 255.0 * opa *
+                                        (mode == 21 ? uniform[3] / 255.0 : 1.0);
+                                    if (sa >= 1.0) expected = src;
+                                    else if (sa != 0 || mode == 1 || mode == 4)
+                                    {
+                                        exact = false;
+                                        for (int c = 0; c < 3; ++c)
+                                        {
+                                            const double out = mode == 1 || mode == 4
+                                                ? src[c] * background[c] / 255.0 + background[c]
+                                                : (mode == 21 ? uniform[c] : src[c]) * sa + background[c] * (1 - sa);
+                                            expected[c] = uint8_t(std::min(255.0, std::round(out)));
+                                        }
+                                        if (mode != 1 && mode != 4)
+                                            expected[3] = uint8_t(std::round(mode == 21
+                                                ? sa * sa * 255 + background[3] * (1 - sa)
+                                                : std::max(sa * 255, double(background[3]))));
+                                    }
+                                }
+                                const uint8_t* actual = pixels + y * pitch + x * 4;
+                                for (int c = 0; c < 4; ++c)
+                                {
+                                    const int error = std::abs(int(actual[c]) - expected[c]);
+                                    if (error > (exact ? 0 : 1))
+                                        std::fprintf(stderr, "alpha regression mode=%d opa=%g clip=%d mask=%d reverse=%d pos=%d,%d channel=%d actual=%d expected=%d\n",
+                                                     mode, opacity, clipped, stencil, reversed, x, y, c,
+                                                     actual[c], expected[c]);
+                                    check(error <= (exact ? 0 : 1), "alpha fast path preserves pixels and blend equations");
+                                }
+                            }
+                        backend.UnlockTarget(target);
+                    }
+    backend.SetMask(nullptr);
+    backend.DestroyTexture(texture); backend.DestroyTarget(mask); backend.DestroyTarget(target);
+}
+
 int main(int argc, char** argv)
 {
     SDL_SetMainReady();
@@ -145,6 +238,8 @@ int main(int argc, char** argv)
         catch (const std::exception&) { rejected = true; }
         check(rejected, "oversized upload rejected before touching GL state");
         gl.DestroyTexture(small); gl.DestroyTexture(texture); gl.DestroyTarget(mask); gl.DestroyTarget(target);
+        // CPU sampling is pinned to nearest texels; GL uses filtered sampling.
+        if (useCpu) checkAlphaFastPaths(gl);
     }
     check(SDL_GL_GetCurrentContext() == originalContext, "destruction restores context");
     int lw, lh; float sx, sy; SDL_Rect vp, cr;

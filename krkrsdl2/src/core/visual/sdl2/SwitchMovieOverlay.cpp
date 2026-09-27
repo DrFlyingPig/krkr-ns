@@ -638,6 +638,18 @@ void SwitchMovieOverlay::GetFrame(int * f)
     if (f) *f = frameCount_.load();
 }
 
+void SwitchMovieOverlay::GetPosition(unsigned long long * tick)
+{
+    if (!tick) return;
+    // frameCount_ counts published frames: the first frame has index zero.
+    // Use PublishFrame's fixed-fps timeline; pausing freezes this position.
+    // Its existing pacing can publish up to about 66 ms ahead of wall time.
+    const int published = frameCount_.load(std::memory_order_acquire);
+    *tick = fps_ > 0.0 && published > 0
+        ? static_cast<unsigned long long>((published - 1) * 1000.0 / fps_)
+        : 0;
+}
+
 void SwitchMovieOverlay::GetFPS(double * f)
 {
     if (f) *f = fps_;
@@ -678,7 +690,19 @@ void SwitchMovieOverlay::GetNumberOfAudioStream(unsigned long * streamCount)
 
 void SwitchMovieOverlay::GetNumberOfVideoStream(unsigned long * streamCount)
 {
-    if (streamCount) *streamCount = 1;
+    if (streamCount) *streamCount = videoStream_ >= 0 ? 1 : 0;
+}
+
+void SwitchMovieOverlay::GetEnableAudioStreamNum(long * num)
+{
+    // The public API exposes one selected audio track. Its ordinal is zero even
+    // when FFmpeg's container-wide stream index is greater than zero.
+    if (num) *num = audioStream_ >= 0 ? 0 : -1;
+}
+
+void SwitchMovieOverlay::GetEnableVideoStreamNum(long * num)
+{
+    if (num) *num = videoStream_ >= 0 ? 0 : -1;
 }
 
 /* ---- decode thread ---- */

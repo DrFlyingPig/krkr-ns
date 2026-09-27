@@ -9,6 +9,10 @@
 
 #ifdef __SWITCH__
 #include <arm_neon.h>
+#elif defined(KRKRNS_EMOTE_TEST_NEON)
+// Exercise the Switch pixel loop on the host with the same NEON operations.
+#define SIMDE_ENABLE_NATIVE_ALIASES
+#include "../../../external/simde/simde/arm/neon.h"
 #endif
 
 #include <SDL.h>
@@ -50,6 +54,9 @@ static ColorRGBA BlendPixels(ColorRGBA src, ColorRGBA dst, int mode,
         src.g = uniformColor.g;
         src.b = uniformColor.b;
     }
+    // Multiply-add modes deliberately ignore sa; even a transparent source
+    // can alter their RGB. Other modes leave every destination byte unchanged.
+    if (sa == 0.0f && mode != 1 && mode != 4) return dst;
     if (sa >= 1.0f)
     {
         // Fully opaque source: plain overwrite (matches SRC_ALPHA blending).
@@ -874,6 +881,26 @@ void EmoteSWRenderBackend::DrawMesh(const float* vertices,
     if (!texture && !targetAsTexture)
         return;
 
+    // Summarize invisible work before discarding it, so a static/hidden scene
+    // can be distinguished from expensive visible meshes on the real runtime.
+    const bool opacityNoOp = opacity <= 0.0f && blendMode_ != 1 && blendMode_ != 4;
+    static unsigned opacityCalls = 0, opacityZero = 0, opacityFull = 0,
+                    opacityMultiply = 0, opacitySkipped = 0;
+    ++opacityCalls;
+    opacityZero += opacity <= 0.0f;
+    opacityFull += opacity >= 1.0f;
+    opacityMultiply += blendMode_ == 1 || blendMode_ == 4;
+    opacitySkipped += opacityNoOp;
+    if (opacityCalls == 240)
+    {
+        KRKRNS_LOG("[emote] mesh opacity: calls=%u zero=%u full=%u multiply=%u skipped=%u",
+                   opacityCalls, opacityZero, opacityFull, opacityMultiply, opacitySkipped);
+        opacityCalls = opacityZero = opacityFull = opacityMultiply = opacitySkipped = 0;
+    }
+    // Stencil sources reach this API with opacity=1. Multiply-add modes retain
+    // their opacity-independent RGB equation, including transparent inputs.
+    if (opacityNoOp) return;
+
     const uint64_t drawStart = SDL_GetPerformanceCounter();
     if (DrawMeshGpu(vertices, vertexCount, indices, indexCount,
                     texture, targetAsTexture, opacity))
@@ -943,7 +970,7 @@ static void SwRasterizeBand(SwBandJob& j)
         const uint32_t* maskRow = j.maskRowBase ? j.maskRowBase + (size_t)py * j.width : nullptr;
 
         int px = j.minX;
-#ifdef __SWITCH__
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
         // ---- 4-pixel NEON fast path (general alpha blend only) -------------
         // The edge functions, UVs and the blend are all per-pixel float work;
         // on the emulated/CPU path this loop is the E-mote's dominant cost
@@ -1033,42 +1060,59 @@ static void SwRasterizeBand(SwBandJob& j)
                     }
                     const uint32x4_t srcv = vld1q_u32(texel);
                     uint32_t* dstRow = reinterpret_cast<uint32_t*>(row) + px;
-                    const uint32x4_t dstv = vld1q_u32(dstRow);
-                    // sa = (src.a / 255) * opa  (same order as BlendPixels)
-                    const float32x4_t sa = vmulq_f32(
-                        vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(srcv, 24)), vInv255), vOpa);
-                    const float32x4_t inv = vsubq_f32(vOne, sa);
-                    const float32x4_t sr = vcvtq_f32_u32(vandq_u32(srcv, vByte));
-                    const float32x4_t sg = vcvtq_f32_u32(
-                        vandq_u32(vshrq_n_u32(srcv, 8), vByte));
-                    const float32x4_t sb = vcvtq_f32_u32(
-                        vandq_u32(vshrq_n_u32(srcv, 16), vByte));
-                    const float32x4_t dr = vcvtq_f32_u32(vandq_u32(dstv, vByte));
-                    const float32x4_t dg = vcvtq_f32_u32(
-                        vandq_u32(vshrq_n_u32(dstv, 8), vByte));
-                    const float32x4_t db = vcvtq_f32_u32(
-                        vandq_u32(vshrq_n_u32(dstv, 16), vByte));
-                    const float32x4_t da = vcvtq_f32_u32(vshrq_n_u32(dstv, 24));
-                    float32x4_t oR = vaddq_f32(vaddq_f32(vmulq_f32(sr, sa),
-                                                         vmulq_f32(dr, inv)), vHalf);
-                    float32x4_t oG = vaddq_f32(vaddq_f32(vmulq_f32(sg, sa),
-                                                         vmulq_f32(dg, inv)), vHalf);
-                    float32x4_t oB = vaddq_f32(vaddq_f32(vmulq_f32(sb, sa),
-                                                         vmulq_f32(db, inv)), vHalf);
-                    float32x4_t oA = vaddq_f32(vmaxq_f32(vmulq_f32(sa, v255), da), vHalf);
-                    oR = vminq_f32(vmaxq_f32(oR, vZero), v255);
-                    oG = vminq_f32(vmaxq_f32(oG, vZero), v255);
-                    oB = vminq_f32(vmaxq_f32(oB, vZero), v255);
-                    oA = vminq_f32(vmaxq_f32(oA, vZero), v255);
-                    uint32x4_t outv = vorrq_u32(
-                        vorrq_u32(vcvtq_u32_f32(oR), vshlq_n_u32(vcvtq_u32_f32(oG), 8)),
-                        vorrq_u32(vshlq_n_u32(vcvtq_u32_f32(oB), 16),
-                                  vshlq_n_u32(vcvtq_u32_f32(oA), 24)));
-                    // fully-opaque source: plain overwrite with a = 255
-                    outv = vbslq_u32(vcgeq_f32(sa, vOne),
-                                     vorrq_u32(srcv, vAlphaKeep), outv);
-                    outv = vbslq_u32(inside, outv, dstv);
-                    vst1q_u32(dstRow, outv);
+                    const uint32x4_t sourceAlpha = vshrq_n_u32(srcv, 24);
+                    if (vmaxvq_u32(vandq_u32(inside, sourceAlpha)) == 0)
+                    {
+                        // Transparent lanes do not touch the destination.
+                    }
+                    else if (j.opacity >= 1.0f &&
+                             vmaxvq_u32(vandq_u32(inside,
+                                 vmvnq_u32(vceqq_u32(sourceAlpha, vdupq_n_u32(255u))))) == 0)
+                    {
+                        // Fully opaque covered lanes only copy their source;
+                        // keep pixels outside the triangle/stencil unchanged.
+                        const uint32x4_t dstv = vld1q_u32(dstRow);
+                        vst1q_u32(dstRow, vbslq_u32(inside, srcv, dstv));
+                    }
+                    else
+                    {
+                        const uint32x4_t dstv = vld1q_u32(dstRow);
+                        // sa = (src.a / 255) * opa  (same order as BlendPixels)
+                        const float32x4_t sa = vmulq_f32(
+                            vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(srcv, 24)), vInv255), vOpa);
+                        const float32x4_t inv = vsubq_f32(vOne, sa);
+                        const float32x4_t sr = vcvtq_f32_u32(vandq_u32(srcv, vByte));
+                        const float32x4_t sg = vcvtq_f32_u32(
+                            vandq_u32(vshrq_n_u32(srcv, 8), vByte));
+                        const float32x4_t sb = vcvtq_f32_u32(
+                            vandq_u32(vshrq_n_u32(srcv, 16), vByte));
+                        const float32x4_t dr = vcvtq_f32_u32(vandq_u32(dstv, vByte));
+                        const float32x4_t dg = vcvtq_f32_u32(
+                            vandq_u32(vshrq_n_u32(dstv, 8), vByte));
+                        const float32x4_t db = vcvtq_f32_u32(
+                            vandq_u32(vshrq_n_u32(dstv, 16), vByte));
+                        const float32x4_t da = vcvtq_f32_u32(vshrq_n_u32(dstv, 24));
+                        float32x4_t oR = vaddq_f32(vaddq_f32(vmulq_f32(sr, sa),
+                                                             vmulq_f32(dr, inv)), vHalf);
+                        float32x4_t oG = vaddq_f32(vaddq_f32(vmulq_f32(sg, sa),
+                                                             vmulq_f32(dg, inv)), vHalf);
+                        float32x4_t oB = vaddq_f32(vaddq_f32(vmulq_f32(sb, sa),
+                                                             vmulq_f32(db, inv)), vHalf);
+                        float32x4_t oA = vaddq_f32(vmaxq_f32(vmulq_f32(sa, v255), da), vHalf);
+                        oR = vminq_f32(vmaxq_f32(oR, vZero), v255);
+                        oG = vminq_f32(vmaxq_f32(oG, vZero), v255);
+                        oB = vminq_f32(vmaxq_f32(oB, vZero), v255);
+                        oA = vminq_f32(vmaxq_f32(oA, vZero), v255);
+                        uint32x4_t outv = vorrq_u32(
+                            vorrq_u32(vcvtq_u32_f32(oR), vshlq_n_u32(vcvtq_u32_f32(oG), 8)),
+                            vorrq_u32(vshlq_n_u32(vcvtq_u32_f32(oB), 16),
+                                      vshlq_n_u32(vcvtq_u32_f32(oA), 24)));
+                        // fully-opaque source: plain overwrite with a = 255
+                        outv = vbslq_u32(vcgeq_f32(sa, vOne),
+                                         vorrq_u32(srcv, vAlphaKeep), outv);
+                        outv = vbslq_u32(inside, outv, dstv);
+                        vst1q_u32(dstRow, outv);
+                    }
                 }
                 f01_row += j.a01 * 4.0f;
                 f12_row += j.a12 * 4.0f;
@@ -1129,7 +1173,6 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
                                        float opacity)
 {
     // CPU fallback kept for renderers without target-texture/geometry support.
-
     const int width = currentTarget_->width;
     const int height = currentTarget_->height;
     uint32_t* dst = (uint32_t*)currentTarget_->pixels.data();

@@ -23,6 +23,29 @@ add_test(NAME alphamovie COMMAND alphamovie_test)
 add_executable(bitmap_pool_test bitmap_pool_test.cpp)
 target_include_directories(bitmap_pool_test PRIVATE "${PORT_ROOT}/src/core/sdl2")
 add_test(NAME bitmap_pool COMMAND bitmap_pool_test)
+add_executable(sound_timer_restart_test sound_timer_restart_test.cpp)
+target_include_directories(sound_timer_restart_test PRIVATE
+    "${PORT_ROOT}/external/krkrz/tjs2" "${PORT_ROOT}/external/krkrz/utils")
+if(MSVC)
+    target_compile_options(sound_timer_restart_test PRIVATE /EHsc)
+endif()
+add_test(NAME sound_timer_restart COMMAND sound_timer_restart_test)
+add_executable(sound_player_eos_test sound_player_eos_test.cpp)
+target_include_directories(sound_player_eos_test PRIVATE
+    "${PORT_ROOT}/external/krkrz/tjs2" "${PORT_ROOT}/external/krkrz/msg"
+    "${PORT_ROOT}/external/krkrz/utils")
+if(MSVC)
+    target_compile_options(sound_player_eos_test PRIVATE /EHsc)
+endif()
+add_test(NAME sound_player_eos COMMAND sound_player_eos_test)
+add_executable(sound_event_wake_test sound_event_wake_test.cpp)
+target_include_directories(sound_event_wake_test PRIVATE
+    "${PORT_ROOT}/external/krkrz/tjs2" "${PORT_ROOT}/external/krkrz/utils"
+    "${PORT_ROOT}/external/krkrz/base" "${PORT_ROOT}/src/core/base/sdl2")
+if(MSVC)
+    target_compile_options(sound_event_wake_test PRIVATE /EHsc)
+endif()
+add_test(NAME sound_event_wake COMMAND sound_event_wake_test)
 add_executable(menu_perf_test menu_perf_test.cpp)
 target_include_directories(menu_perf_test PRIVATE "${PORT_ROOT}/src/core/sdl2" "${PORT_ROOT}/external/krkrz/visual")
 add_test(NAME menu_perf COMMAND menu_perf_test)
@@ -41,9 +64,27 @@ target_compile_definitions(emote_gl_test PRIVATE SDL_MAIN_HANDLED NOMINMAX)
 target_link_libraries(emote_gl_test PRIVATE SDL2::SDL2)
 add_test(NAME emote_gl COMMAND emote_gl_test)
 add_test(NAME emote_cpu COMMAND emote_gl_test --cpu)
+add_executable(emote_neon_test emote_gl_test.cpp
+    "${PORT_ROOT}/src/plugins/emoteplayer/EmoteGLRenderBackend.cpp"
+    "${PORT_ROOT}/src/plugins/emoteplayer/EmoteSWRenderBackend.cpp")
+target_include_directories(emote_neon_test PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/stubs"
+    "${PORT_ROOT}/src/plugins/emoteplayer" "${PORT_ROOT}/src/core/sdl2")
+target_compile_definitions(emote_neon_test PRIVATE
+    SDL_MAIN_HANDLED NOMINMAX KRKRNS_EMOTE_TEST_NEON)
+target_link_libraries(emote_neon_test PRIVATE SDL2::SDL2)
+add_test(NAME emote_neon COMMAND emote_neon_test --cpu)
+add_executable(emote_playback_completion_test emote_playback_completion_test.cpp)
+target_include_directories(emote_playback_completion_test PRIVATE "${PORT_ROOT}/src/plugins/emoteplayer")
+if(MSVC)
+    target_compile_options(emote_playback_completion_test PRIVATE /EHsc)
+endif()
+add_test(NAME emote_playback_completion COMMAND emote_playback_completion_test)
 if(WIN32)
     add_custom_command(TARGET bitmap_bridge_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E
         copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:bitmap_bridge_test>)
     add_custom_command(TARGET emote_gl_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E
         copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:emote_gl_test>)
+    add_custom_command(TARGET emote_neon_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E
+        copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:emote_neon_test>)
 endif()

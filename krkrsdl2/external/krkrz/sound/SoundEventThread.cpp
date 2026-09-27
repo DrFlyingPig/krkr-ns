@@ -174,6 +174,9 @@ void tTVPSoundEventThread::Execute(void)
 //---------------------------------------------------------------------------
 void tTVPSoundEventThread::Start()
 {
+	// A timed wait can consume the wake event before Execute checks whether
+	// to sleep indefinitely. Clear that request before publishing the wake.
+	ResetSuspend();
 	Event.Set();
 }
 //---------------------------------------------------------------------------

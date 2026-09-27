@@ -16,13 +16,15 @@
 |---:|---|---|---|
 | 1 | XP3 content/extraction filter 完整契约 | `FileName`、流级 context、TJS 六参数 extraction 回调、content filter 三参数及 `[action, context]` 返回、action=1 整文件预取、清理/换游戏不串状态 | **已完成；Ryujinx 契约保护包运行通过** |
 | 2 | Layer 公共绘图 API | `blendRect`、`stretchPile`、`stretchBlend`、`affineBlend` 的 C++ 像素实现、两种 affine 重载、TJS 参数与弃用参数语义、像素测试 | **已完成；Ryujinx 像素夹具 12/12 通过** |
-| 3 | 原生 MenuItem 语义 | 用原生类恢复父子关系、事件、checked/enabled/visible/radio/groupIndex 等行为，替代只够探测的 TJS 模型 | 待移植 |
-| 4 | 音视频控制面 | Kirikiroid2/krkrz 的 FFmpeg 波形解码能力，以及 VideoOverlay 的 play/pause/seek/segment/状态回调语义 | 待移植 |
+| 3 | 原生 MenuItem 语义 | 用原生类恢复父子关系、事件、checked/enabled/visible/radio/groupIndex 等行为，替代只够探测的 TJS 模型 | 部分修复：脚本删除契约专项通过；原生 index/shortcut/错误传播已补，仍未注册，UI/完整树与事件待实现 |
+| 4 | 音视频控制面 | Kirikiroid2/krkrz 的 FFmpeg 波形解码能力，以及 VideoOverlay 的 play/pause/seek/segment/状态回调语义 | 部分修复：Switch 音量调用通路与真实默认/位置读取已接；seek/segment/变速/多轨与音频解码缺口仍开放 |
 | 5 | 归档与公开插件缺口 | ZIP/TAR 自动识别；`layerExMovie`、`layerExPerspective`；BPG/PVRv3 等实际有标题命中的格式 | 待移植 |
 | 6 | 系统交互 API | 输入框、文件选择、消息框、Pad/触摸映射等脚本可见契约，按 Switch 能力做边界适配 | 待移植 |
 | 7 | 私有插件语义深挖 | E-mote 与 TextRender 按方法和状态机逐项验证；以真实标题/探针结果补齐，不能依据插件名宣称对齐 | 持续项 |
 
 ## 2026-09-21：第 1、2 项落地范围
+
+2026-09-27 的空占位专项证据、修复边界与剩余调用风险见 [STUB_IMPLEMENTATION_AUDIT.md](STUB_IMPLEMENTATION_AUDIT.md)。其中 MenuItem 和音视频只完成上述局部修复，不能标记整项完成。
 
 ### 1. XP3 filter
 
