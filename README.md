@@ -117,9 +117,9 @@ KRKR-ns/
 │   │   ├── core/environ/sdl2/      # 应用生命周期、事件、线程和系统信息
 │   │   ├── core/msg/sdl2/          # 消息与对话框
 │   │   ├── core/utils/sdl2/        # 剪贴板等平台工具
-│   │   ├── plugins/               # E-mote、AlphaMovie、LayerExRaster、文字与存档等插件
-│   │   ├── resources/nswitch/     # NRO 图标等平台资源
-│   │   └── config/                # 构建使用的源码清单
+│   │   ├── plugins/                # E-mote、AlphaMovie、LayerExRaster、文字与存档等插件
+│   │   ├── resources/nswitch/      # NRO 图标等平台资源
+│   │   └── config/                 # 构建使用的源码清单
 │   ├── data/
 │   │   ├── startup.tjs             # 游戏库启动器
 │   │   ├── launcher/               # 启动器标志与默认预览图
