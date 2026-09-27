@@ -70,7 +70,9 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 **画面、动画与音视频**
 
 - 支持背景、立绘、文字、选项和常见转场，按游戏画面比例显示。
-- 支持 E-mote 动态立绘，以及 AlphaMovie 透明动画的播放、循环和跳帧。
+- 支持 E-mote 动态立绘，改善有限动画结束后返回标题的流畅度。
+- 支持 AlphaMovie 透明动画的播放、循环和跳帧。
+- 内置原生 LayerExRaster 插件，支持游戏脚本调用的波纹图像效果，改善相关剧情转场的兼容性。
 - 音乐与语音支持 WAV、OGG、Opus 等格式；视频支持部分 WMV、MP4、MPEG 格式，可从游戏目录或资源包播放，并支持音量调整。
 - 内置文字绘制、脚本解析、存档和字体等常用插件；仍有部分插件与格式尚未支持。
 
@@ -78,7 +80,9 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 
 - 缓存已显示的文字、图片和游戏资源，减少重复读取与绘制，改善游戏库切换和菜单响应。
 - 检查图片读取和解码错误，无法预览的图片会显示提示，也可改用自定义图片。
-- 退出游戏时清理音频、定时器和事件，减少切换游戏时的残留与异常；诊断日志自动保留最近 3 次。
+- 修复部分影片播放中的音频断流，完善片尾音频处理和播放资源释放。
+- 退出游戏时清理窗口、音频、定时器和事件，修复脚本清理异常引起的重复退出，改善返回游戏库的稳定性。
+- 诊断日志自动保留最近 3 次。
 
 ## 🗂 架构
 
@@ -89,7 +93,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 | 启动器 | `data/startup.tjs` 提供游戏列表、启动选择和预览图界面；`LauncherArtwork` 模块负责扫描图片、生成缩略图和保存选择。 |
 | 引擎核心 | `external/krkrz/` 提供 TJS2 脚本执行、图层与位图、资源归档等公共逻辑；资源路径查找位于 `base/StorageIntf.cpp`。 |
 | Switch 平台适配 | `src/core/` 对接窗口、输入、绘制、文件系统和音频；使用 SDL2 与 libnx 适配 Switch，FAudio 负责音频输出，FFmpeg 负责视频及视频音轨解码。 |
-| 内置插件 | `src/plugins/` 提供 E-mote、AlphaMovie、文字绘制、脚本解析等功能，编译进 NRO，由引擎注册或按需启用；AlphaMovie 独立解码透明动画并输出到图层。 |
+| 内置插件 | `src/plugins/` 提供 E-mote、AlphaMovie、LayerExRaster、文字绘制和脚本解析等功能，编译进 NRO，由引擎注册或按需启用；AlphaMovie 独立解码透明动画并输出到图层。 |
 | 脚本兼容层 | `compat-patches/system/` 提供平台兼容脚本，随启动器和字体一起打包进 RomFS；SD 卡上的兼容补丁可覆盖内置版本。 |
 
 启动器和游戏共用同一套引擎。浏览游戏库时只更新界面；开始游戏后才加载入口和资源包。游戏结束后重建引擎状态，再回到启动器。
@@ -113,7 +117,7 @@ KRKR-ns/
 │   │   ├── core/environ/sdl2/      # 应用生命周期、事件、线程和系统信息
 │   │   ├── core/msg/sdl2/          # 消息与对话框
 │   │   ├── core/utils/sdl2/        # 剪贴板等平台工具
-│   │   ├── plugins/               # E-mote、AlphaMovie、文字与存档等插件
+│   │   ├── plugins/               # E-mote、AlphaMovie、LayerExRaster、文字与存档等插件
 │   │   ├── resources/nswitch/     # NRO 图标等平台资源
 │   │   └── config/                # 构建使用的源码清单
 │   ├── data/
@@ -137,6 +141,6 @@ KRKR-ns/
 
 本项目自身代码沿用 [krkrsdl2 的 MIT 许可](LICENSE)。引用的上游与第三方组件（krkrz、FAudio、SDL2、FFmpeg、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留原始许可证与归属，见组件目录内的 LICENSE/COPYING 文件。
 
-E-mote 与 AlphaMovie 的移植来源许可分别见 [UPSTREAM-LICENSE.txt](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt) 和 [LICENSE.krkrsdl3](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)。
+E-mote、AlphaMovie 与 LayerExRaster 的移植来源许可分别见 [E-mote 许可](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt)、[AlphaMovie 许可](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3) 和 [LayerExRaster 许可](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)。
 
 **本项目不包含、也不分发任何商业游戏资源。**
