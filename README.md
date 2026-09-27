@@ -26,18 +26,22 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 
 ## ⬇️ 获取与使用
 
+> ⚠️ **重要：Switch 真机的游戏路径不能包含中文。**
+>
+> 游戏目录、入口 `.xp3` 文件名，以及实际位于 SD 卡上的游戏资源路径都必须遵守此限制。请使用英文、数字、下划线等 ASCII 名称，例如 `sdmc:/switch/KRKR-ns/Game/Game01/data.xp3`。
+>
+> 更改游戏目录名会影响存档和图片设置的匹配，改名前请先备份存档。不要随意重命名 XP3 包内部资源；需要改名的散装资源，也应同步检查脚本中的文件引用。
+
 1. 从 [Releases](https://github.com/DrFlyingPig/krkr-ns/releases/latest) 下载 `krkrsdl2.nro`，放到 SD 卡的 `sdmc:/switch/KRKR-ns/` 目录下。升级时替换 NRO，保留已有游戏、存档和图片设置。
 2. **真机**：使用完整内存模式打开 HBMenu，通常按住 `R` 启动一个已安装游戏，再加载 NRO；直接从相册进入的模式内存较小。入口按键可随 [Atmosphère 配置](https://github.com/Atmosphere-NX/Atmosphere/blob/master/config_templates/override_config.ini)改变。
 3. **模拟器**：直接加载 NRO；下文的 SD 卡路径对应模拟器的虚拟 SD 卡目录。
-4. 将游戏放到 `sdmc:/switch/KRKR-ns/Game/<游戏目录>/`，保留游戏原有文件与目录结构。在启动器选中游戏，按 `A` 开始；按 `X` 可选择启动用的 `.xp3`。同目录的其他 `.xp3` 会作为资源包挂载，下次启动会优先使用上次选择的入口。
-5. 存档默认按游戏目录分开保存于 `sdmc:/switch/KRKR-ns/saves/<游戏目录>/`；同一游戏目录下的多个启动包共用该存档目录。
+4. 将游戏放到 `sdmc:/switch/KRKR-ns/Game/<GameFolder>/`，按上述规则命名，并保留资源之间的目录结构与脚本引用。在启动器选中游戏，按 `A` 开始；按 `X` 可选择启动用的 `.xp3`。同目录的其他 `.xp3` 会作为资源包挂载，下次启动会优先使用上次选择的入口。
+5. 存档默认按游戏目录分开保存于 `sdmc:/switch/KRKR-ns/saves/<GameFolder>/`；同一游戏目录下的多个启动包共用该存档目录。
 6. 自定义图片放到 `sdmc:/switch/KRKR-ns/Artwork/`。选中游戏后打开图片设置，分别为预览图和头像选择游戏图片或自定义图片，确认后会自动保存。
 
 > **启动入口**：目前启动器需要 `.xp3` 入口，仅有展开的 `startup.tjs`、没有 `.xp3` 的游戏还不能直接从游戏库启动。
 >
-> **文件与目录名**：程序按 UTF-8 处理路径，不要求把中文名称全部改成英文。请保留游戏内部资源名和目录结构，避免破坏脚本引用。更改游戏目录名会影响存档和图片设置的匹配，改名前请先备份存档。
->
-> **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["实际目录名"] = "显示名称";`，只改变游戏库中的名称。
+> **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["Game01"] = "中文显示名称";`，只改变游戏库中的名称。
 
 > 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份；运行时开关与源码补丁记录见 [PATCHES.md](docs/PATCHES.md)。
 >
