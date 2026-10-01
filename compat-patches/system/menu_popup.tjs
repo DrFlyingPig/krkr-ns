@@ -1,0 +1,251 @@
+// Switch menu presentation uses ordinary engine layers, so CPU and GL paths
+// share the same tree, text, and input behavior. Menu state belongs to scripts:
+// selecting a checked/radio item fires onClick without changing checked.
+if (typeof(global.__krkrnsMenuPopup) == "undefined") {
+class KrkrnsMenuPopup {
+    var window, layer, menu, history, entries;
+    var selected = -1, first = 0, rows = 1;
+    var left = 0, top = 0, width = 320, height = 180;
+    var rowHeight = 36, header = 40, pressed = -1;
+    function KrkrnsMenuPopup(root, owner, x, y) {
+        window = owner;
+        menu = root;
+        history = new Array();
+        layer = new Layer(window, window.primaryLayer);
+        layer.setSize(window.primaryLayer.width, window.primaryLayer.height);
+        layer.type = ltAlpha;
+        layer.hitThreshold = 0;
+        layer.bringToFront();
+        layer.font.height = -20;
+        try {
+            var fonts = Font.addFont("file://?/romfs:/notosanssc.ttf");
+            if (fonts.count > 0) layer.font.face = fonts[0];
+        } catch (e) {}
+        width = layer.width < 460 ? layer.width : 460;
+        height = layer.height < 480 ? layer.height : 480;
+        rows = (int)((height - header - 30) / rowHeight);
+        if (rows < 1) rows = 1;
+        height = header + rows * rowHeight + 30;
+        if (height > layer.height) height = layer.height;
+        left = x; top = y;
+        if (left + width > layer.width) left = layer.width - width;
+        if (top + height > layer.height) top = layer.height - height;
+        if (left < 0) left = 0;
+        if (top < 0) top = 0;
+        refresh();
+        layer.visible = true;
+    }
+    function caption(item) {
+        return ((string)item.caption).split("&").join("").split("\t")[0];
+    }
+    function refresh() {
+        entries = new Array();
+        for (var i = 0; i < menu.children.count; i++) {
+            var item = menu.children[i];
+            if (!item.visible || item.caption == "" || item.caption == "+") continue;
+            entries.add(item);
+        }
+        selected = -1; first = 0;
+        for (var i = 0; i < entries.count; i++) {
+            if (selectable(i)) { selected = i; break; }
+        }
+        render();
+    }
+    function selectable(i) {
+        return i >= 0 && i < entries.count && entries[i].enabled &&
+               entries[i].visible && entries[i].caption != "-";
+    }
+    function render() {
+        layer.fillRect(0, 0, layer.width, layer.height, 0);
+        layer.fillRect(left, top, width, height, 0xff18232f);
+        layer.fillRect(left, top, width, header, 0xff30465b);
+        var title = caption(menu);
+        if (title == "") title = "Menu";
+        if (history.count > 0) title = "<  " + title;
+        layer.drawText(left + 12, top + 8, title, 0xffffff);
+        if (selected >= 0) {
+            if (selected < first) first = selected;
+            if (selected >= first + rows) first = selected - rows + 1;
+        }
+        for (var r = 0; r < rows && first + r < entries.count; r++) {
+            var i = first + r, item = entries[i];
+            var yy = top + header + r * rowHeight;
+            if (item.caption == "-") {
+                layer.fillRect(left + 10, yy + rowHeight / 2, width - 20, 1, 0xff526273);
+                continue;
+            }
+            if (selected == i) layer.fillRect(left + 4, yy + 1, width - 8, rowHeight - 2, 0xff3e607f);
+            var mark = "    ";
+            if (item.radio || item.group > 0) mark = item.checked ? "(*) " : "( ) ";
+            else if (item.checked) mark = "[x] ";
+            var label = mark + caption(item);
+            if (item.children.count > 0) label += "  >";
+            layer.drawText(left + 12, yy + 6, label, item.enabled ? 0xffffff : 0x788898);
+            var shortcut = (string)item.shortcut;
+            if (shortcut != "" && shortcut != "0") {
+                var sx = left + width - 12 - layer.font.getTextWidth(shortcut);
+                layer.drawText(sx, yy + 6, shortcut, item.enabled ? 0xabc4d8 : 0x788898);
+            }
+        }
+        layer.font.height = -14;
+        layer.drawText(left + 12, top + height - 24, "A / Enter: Select    B / Esc: Back", 0xabc4d8);
+        layer.font.height = -20;
+    }
+    function move(delta) {
+        if (entries.count == 0) return;
+        var i = selected;
+        for (var n = 0; n < entries.count; n++) {
+            i += delta;
+            if (i < 0) i = entries.count - 1;
+            if (i >= entries.count) i = 0;
+            if (selectable(i)) { selected = i; render(); return; }
+        }
+    }
+    function back() {
+        if (history.count == 0) { global.__krkrnsMenuClose(); return; }
+        menu = history[history.count - 1];
+        history.erase(history.count - 1);
+        refresh();
+    }
+    function choose() {
+        if (!selectable(selected)) return;
+        var item = entries[selected];
+        if (item.children.count > 0) {
+            history.add(menu); menu = item; refresh(); return;
+        }
+        // Releasing the view first also makes reentrant popup calls safe.
+        global.__krkrnsMenuClose();
+        item.fireClick();
+    }
+    function rowAt(x, y) {
+        if (x < left || x >= left + width || y < top + header ||
+            y >= top + header + rows * rowHeight) return -1;
+        var i = first + (int)((y - top - header) / rowHeight);
+        return selectable(i) ? i : -1;
+    }
+    function input(kind, value, x, y) {
+        if (kind == "keyDown") {
+            if (value == 1073741906) move(-1);
+            else if (value == 1073741905) move(1);
+            else if (value == 1073741903 || value == 13 || value == 1073741912 || value == 32) choose();
+            else if (value == 1073741904 || value == 27 || value == 8) back();
+        } else if (kind == "wheel") {
+            if (value > 0) move(-1);
+            else if (value < 0) move(1);
+        } else if (kind == "pointerDown") {
+            pressed = rowAt(x, y);
+            if (pressed >= 0) { selected = pressed; render(); }
+        } else if (kind == "pointerUp") {
+            if (value == 3) { back(); return true; }
+            var row = rowAt(x, y);
+            if (pressed >= 0 && pressed == row) { selected = row; choose(); }
+            else if (x < left || x >= left + width || y < top || y >= top + height) global.__krkrnsMenuClose();
+            else if (y < top + header) back();
+            pressed = -1;
+        }
+        return true;
+    }
+    function close() {
+        if (layer !== null && layer !== void) { layer.visible = false; invalidate layer; }
+        layer = null; window = null; menu = null;
+        history.clear(); entries.clear();
+    }
+}
+global.__krkrnsMenuPopupClass = KrkrnsMenuPopup;
+global.__krkrnsMenuActive = false;
+global.__krkrnsMenuView = null;
+global.__krkrnsMenuClose = function(owner) {
+    var view = global.__krkrnsMenuView;
+    if (view === null || (owner !== void && owner !== null && view.window !== owner)) return false;
+    global.__krkrnsMenuActive = false;
+    global.__krkrnsMenuView = null;
+    view.close();
+    return true;
+} incontextof global;
+global.__krkrnsMenuPopup = function(root, flags, x, y) {
+    var owner = root.window;
+    if (owner === null || owner === void || owner.primaryLayer === null || owner.primaryLayer === void) return 0;
+    var ancestor = root;
+    while (ancestor !== null) {
+        if (!ancestor.enabled || !ancestor.visible) return 0;
+        ancestor = ancestor.parent;
+    }
+    if (root.children.count == 0) return 0;
+    var any = false;
+    for (var i = 0; i < root.children.count; i++) {
+        var item = root.children[i];
+        if (item.visible && item.caption != "" && item.caption != "+") { any = true; break; }
+    }
+    if (!any) return 0;
+    global.__krkrnsMenuClose();
+    var view = new global.__krkrnsMenuPopupClass(root, owner, x, y);
+    global.__krkrnsMenuView = view;
+    global.__krkrnsMenuActive = true;
+    return 1;
+} incontextof global;
+global.__krkrnsMenuInput = function(kind, value, x, y) {
+    if (!global.__krkrnsMenuActive) return false;
+    return global.__krkrnsMenuView.input(kind, value, x, y);
+} incontextof global;
+// SDL modifiers: SHIFT=0x0003, CTRL=0x00c0, ALT=0x0300, GUI=0x0c00.
+// Pass matching state explicitly: TJS functions do not capture local variables.
+global.__krkrnsMenuShortcutMatch = function(item, key, mods) {
+        if (!item.enabled || !item.visible) return false;
+        var parts = ((string)item.shortcut).toUpperCase().split("+");
+        var ctrl = false, alt = false, shift = false, gui = false, code = -1, valid = true;
+        for (var i = 0; i < parts.count; i++) {
+            var token = parts[i].trim();
+            if (token == "CTRL" || token == "CONTROL") ctrl = true;
+            else if (token == "ALT") alt = true;
+            else if (token == "SHIFT") shift = true;
+            else if (token == "CMD" || token == "META" || token == "WIN") gui = true;
+            else if (token.length == 1) {
+                var letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(token);
+                var digit = "0123456789".indexOf(token);
+                if (letter >= 0) code = 65 + letter;
+                else if (digit >= 0) code = 48 + digit;
+                else valid = false;
+            }
+            else if (token.substring(0, 1) == "F" && (int)token.substring(1) >= 1 && (int)token.substring(1) <= 12)
+                code = 1073741882 + (int)token.substring(1) - 1;
+            else if (token == "ENTER" || token == "RETURN") code = 13;
+            else if (token == "ESC" || token == "ESCAPE") code = 27;
+            else if (token == "SPACE") code = 32;
+            else if (token == "TAB") code = 9;
+            else if (token == "BKSP" || token == "BACKSPACE") code = 8;
+            else if (token == "DEL" || token == "DELETE") code = 127;
+            else if (token == "INS" || token == "INSERT") code = 1073741897;
+            else if (token == "HOME") code = 1073741898;
+            else if (token == "END") code = 1073741901;
+            else if (token == "PGUP" || token == "PAGEUP") code = 1073741899;
+            else if (token == "PGDN" || token == "PAGEDOWN") code = 1073741902;
+            else if (token == "UP") code = 1073741906;
+            else if (token == "DOWN") code = 1073741905;
+            else if (token == "LEFT") code = 1073741904;
+            else if (token == "RIGHT") code = 1073741903;
+            else valid = false;
+        }
+        var actual = key;
+        if (actual == 1073741912) actual = 13; // SDL keypad Enter
+        if (actual >= 97 && actual <= 122) actual -= 32;
+        if (valid && code >= 0 && code == actual && ctrl == ((mods & 0x00c0) != 0) &&
+            alt == ((mods & 0x0300) != 0) && shift == ((mods & 3) != 0) &&
+            gui == ((mods & 0x0c00) != 0) && item.caption != "-" && item.children.count == 0) {
+            item.fireClick(); return true;
+        }
+        for (var i = 0; i < item.children.count; i++) {
+            if (global.__krkrnsMenuShortcutMatch(item.children[i], key, mods)) return true;
+        }
+        return false;
+} incontextof global;
+global.__krkrnsMenuShortcut = function(key, mods, owner) {
+    if (owner === null || owner === void || typeof(owner.menu) == "undefined" ||
+        typeof(owner.menu) == "void") return false;
+    var root = owner.menu;
+    if (root === void || root === null) return false;
+    if (typeof(root.__krkrnsGameMenuRoot) != "undefined" && root.__krkrnsGameMenuRoot) return false;
+    if (typeof(root.__krkrnsScriptMenu) == "undefined" &&
+        typeof(root.__krkrnsNativeMenu) == "undefined") return false;
+    return global.__krkrnsMenuShortcutMatch(root, key, mods);
+} incontextof global;
+}

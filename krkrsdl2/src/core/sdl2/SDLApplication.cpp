@@ -8,6 +8,7 @@
 #include "tjsCommHead.h"
 #include "tjsDebug.h"
 #include <thread>
+#include <set>
 #include "WindowImpl.h"
 #include "LayerIntf.h"
 #include "LayerBitmapImpl.h"
@@ -192,6 +193,7 @@ static uint64_t krkrsdl2_prof_freq()
 static struct {
 	double seg[4];          // main-loop segments, ms
 	double compose_ms;      // engine software raster (CompleteForWindow)
+	double layer_prepare_ms, layer_raster_ms, layer_finish_ms;
 	double surf_copy_ms;    // compose -> SDL surface memcpy
 	double upload_ms;       // SDL_UpdateTexture
 	double present_ms;      // RenderClear + RenderCopy + RenderPresent
@@ -207,6 +209,9 @@ static struct {
 	unsigned long long blt_n[2];      // [0]=layer dest, [1]=compose dest
 	unsigned long long blt_px[2];
 	double blt_ms[2];
+
+	double bitmap_work_ms[3];
+	unsigned long long bitmap_work_n[3], bitmap_work_px[3], bitmap_work_parallel[3];
 	unsigned long long blt_method[16];
 	unsigned long long upload_bytes;
 	unsigned long long layer_count;   // NotifyBitmapCompleted calls
@@ -294,6 +299,13 @@ void krkrsdl2_prof_accum_surface_copy(double ms)
 	g_krkrns_prof.surf_copy_ms += ms;
 }
 
+void krkrsdl2_prof_layer_complete(double prepare_ms, double raster_ms, double finish_ms)
+{
+	g_krkrns_prof.layer_prepare_ms += prepare_ms;
+	g_krkrns_prof.layer_raster_ms += raster_ms;
+	g_krkrns_prof.layer_finish_ms += finish_ms;
+}
+
 void krkrsdl2_prof_accum_layer(unsigned w, unsigned h)
 {
 	g_krkrns_prof.layer_count++;
@@ -367,6 +379,15 @@ void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px)
 	g_krkrns_prof.blt_method[method & 15]++;
 }
 
+void krkrsdl2_prof_bitmap_work(int operation, double ms, unsigned px, bool parallel)
+{
+	if (operation < 0 || operation >= 3) return;
+	g_krkrns_prof.bitmap_work_ms[operation] += ms;
+	g_krkrns_prof.bitmap_work_n[operation]++;
+	g_krkrns_prof.bitmap_work_px[operation] += px;
+	g_krkrns_prof.bitmap_work_parallel[operation] += parallel ? 1 : 0;
+}
+
 /* window_ms is the wall time covering the whole reporting window (all
  * update-frames since the previous emit), not a single frame — the caller
  * measures it from a timestamp it resets only when it emits. Dividing by the
@@ -426,6 +447,20 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 		(double)g_krkrns_prof.blt_method[6] / (double)n,
 		(double)g_krkrns_prof.blt_method[7] / (double)n);
 	prevPoolB = poolB;
+	KRKRNS_LOG("[prof] layer complete: prepare=%.2f raster=%.2f finish=%.2fms/f",
+		g_krkrns_prof.layer_prepare_ms / n,
+		g_krkrns_prof.layer_raster_ms / n,
+		g_krkrns_prof.layer_finish_ms / n);
+	KRKRNS_LOG("[prof] bitmap: fill=%.2fms n=%.1f pxM=%.2f | crossfade=%.2fms n=%.1f par=%.1f | universal=%.2fms n=%.1f par=%.1f",
+		g_krkrns_prof.bitmap_work_ms[0] / n,
+		(double)g_krkrns_prof.bitmap_work_n[0] / n,
+		(double)g_krkrns_prof.bitmap_work_px[0] / n / 1048576.0,
+		g_krkrns_prof.bitmap_work_ms[1] / n,
+		(double)g_krkrns_prof.bitmap_work_n[1] / n,
+		(double)g_krkrns_prof.bitmap_work_parallel[1] / n,
+		g_krkrns_prof.bitmap_work_ms[2] / n,
+		(double)g_krkrns_prof.bitmap_work_n[2] / n,
+		(double)g_krkrns_prof.bitmap_work_parallel[2] / n);
 	prevPoolBig = poolBig;
 	// Frame-request sources and pump wakeups for the same window (see the
 	// struct comment).  "coal" >> 0 means the game asked for updates faster
@@ -477,6 +512,16 @@ extern void TVPLoadMessage();
 
 class TVPWindowWindow;
 static TVPWindowWindow *_lastWindowWindow, *_currentWindowWindow;
+namespace
+{
+// Only menu-owned presses survive a Window/engine replacement, until their
+// physical releases arrive. These SDL values retain no script-engine objects.
+std::set<SDL_Keycode> krkrns_menu_consumed_keys;
+std::set<Uint8> krkrns_menu_consumed_pointer_buttons;
+std::set<std::pair<SDL_JoystickID, Uint8>> krkrns_menu_consumed_controller_buttons;
+std::set<std::pair<SDL_JoystickID, Uint8>> krkrns_menu_consumed_joystick_buttons;
+std::set<std::pair<SDL_TouchID, SDL_FingerID>> krkrns_menu_consumed_fingers;
+}
 static SDL_GameController **sdl_controllers = nullptr;
 static int sdl_controller_num = 0;
 
@@ -578,6 +623,7 @@ struct ns_gamepad_state_t
 };
 static ns_gamepad_state_t ns_gp;
 static Uint16 ns_gp_prev_buttons = 0;
+static Uint16 ns_gp_menu_face_buttons = 0;
 
 static Uint16 ns_gp_read_buttons(SDL_GameController *c)
 {
@@ -637,7 +683,7 @@ static void ns_gp_push_mouse_button(SDL_Window *window, Uint8 state, Uint8 butto
 	SDL_PushEvent(&ev);
 }
 
-static void ns_gp_push_key(SDL_Window *window, Uint8 state, SDL_Scancode scancode)
+static void ns_gp_push_key(SDL_Window *window, Uint8 state, SDL_Scancode scancode, bool menuOwned = false)
 {
 	g_krkrns_prof.gp_push_key++;
 	KRKRNS_LOG("[keytrace] synth push %s sc=%d",
@@ -652,6 +698,7 @@ static void ns_gp_push_key(SDL_Window *window, Uint8 state, SDL_Scancode scancod
 	// drops REAL arrow-key events, and only this marker lets a synthesized
 	// arrow through it.
 	ev.key.padding2 = 0xA5;
+	ev.key.padding3 = menuOwned ? 0xA6 : 0;
 	ev.key.keysym.scancode = scancode;
 	ev.key.keysym.sym = SDL_GetKeyFromScancode(scancode);
 	ev.key.keysym.mod = KMOD_NONE;
@@ -1167,6 +1214,9 @@ protected:
 	int frameStartMouseX;
 	int frameStartMouseY;
 	bool redispatchingPointer;
+	std::set<std::pair<SDL_Keycode, bool>> menuRealArrowsThisPoll;
+	std::set<std::pair<SDL_Keycode, bool>> menuPadArrowsThisPoll;
+	bool menuInputOwnedThisPoll = false;
 
 #ifdef KRKRSDL2_ENABLE_ZOOM
 	tTVPRect FullScreenDestRect;
@@ -1395,6 +1445,14 @@ public:
 	   from sdl_process_events). */
 	void note_frame_cursor() { this->frameStartMouseX = this->lastMouseX; this->frameStartMouseY = this->lastMouseY; }
 	void flush_deferred_pointer_buttons();
+	void begin_menu_input_poll() {
+		this->menuInputOwnedThisPoll = false;
+		this->menuRealArrowsThisPoll.clear();
+		this->menuPadArrowsThisPoll.clear();
+	}
+	bool consume_menu_arrow_input(const SDL_Event &event);
+	bool consume_menu_input(const SDL_Event &event);
+	void discard_menu_pointer_buttons(const std::vector<SDL_Event> &events, size_t first = 0);
 	bool window_receive_event_input(SDL_Event event);
 };
 
@@ -4721,6 +4779,8 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 }
 
 #ifdef __SWITCH__
+namespace { bool krkrns_menu_is_active(); }
+
 void TVPWindowWindow::switch_process_gamepad_input()
 {
 	extern bool krkrsdl2_game_mode;
@@ -4781,6 +4841,8 @@ void TVPWindowWindow::switch_process_gamepad_input()
 	// button edges -> synthetic mouse / key events
 	Uint16 changed = (Uint16)(buttons ^ ns_gp_prev_buttons);
 	ns_gp_prev_buttons = buttons;
+	const bool menuActive = krkrns_menu_is_active();
+	if (menuActive) this->menuInputOwnedThisPoll = true;
 	for (int b = 0; b < NS_GP_BTN_COUNT; b += 1)
 	{
 		Uint16 bit = (Uint16)(1 << b);
@@ -4789,11 +4851,24 @@ void TVPWindowWindow::switch_process_gamepad_input()
 			continue;
 		}
 		bool pressed = !!(buttons & bit);
+		const bool faceButton = b >= NS_GP_BTN_A && b <= NS_GP_BTN_Y;
+		if (faceButton && ((pressed && menuActive) || (!pressed && (ns_gp_menu_face_buttons & bit))))
+		{
+			// A selects the highlighted row, B goes back. Keep each menu
+			// press mapped to the same key until release, even after closing;
+			// it must not become a game mouse-up at the old cursor position.
+			if (pressed) ns_gp_menu_face_buttons |= bit;
+			else ns_gp_menu_face_buttons &= (Uint16)~bit;
+			const SDL_Scancode key = b == NS_GP_BTN_A ? SDL_SCANCODE_ESCAPE :
+				b == NS_GP_BTN_X ? SDL_SCANCODE_SPACE : SDL_SCANCODE_RETURN;
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, key, true);
+			continue;
+		}
 		// The launcher handles native PAD1..PAD4 as Nintendo A/B/X/Y.
 		// Game-only click/Space/Enter synthesis would deliver a second action
 		// to that UI (for example X opening options and then confirming them).
 		// Keep the existing pointer/keyboard controls inside game sessions.
-		if (!krkrsdl2_game_mode && b >= NS_GP_BTN_A && b <= NS_GP_BTN_Y)
+		if (!krkrsdl2_game_mode && faceButton)
 			continue;
 		switch (b)
 		{
@@ -4861,6 +4936,197 @@ void TVPWindowWindow::switch_process_gamepad_input()
 }
 #endif
 
+namespace
+{
+// Look up the helper in the current engine on every call.  A cached closure
+// would retain the previous game's Window and Layer objects across a restart.
+struct tKRKRNSMenuGlobal
+{
+	iTJSDispatch2 *dispatch = TVPGetScriptDispatch();
+	~tKRKRNSMenuGlobal() { if (dispatch) dispatch->Release(); }
+};
+
+bool krkrns_menu_is_active()
+{
+	tKRKRNSMenuGlobal global;
+	if (!global.dispatch) return false;
+	tTJSVariant active;
+	return TJS_SUCCEEDED(global.dispatch->PropGet(0,
+		TJS_W("__krkrnsMenuActive"), nullptr, &active, global.dispatch)) &&
+		active.operator bool();
+}
+
+bool krkrns_menu_call(const tjs_char *name, tjs_int count, tTJSVariant **args)
+{
+	tKRKRNSMenuGlobal global;
+	if (!global.dispatch) return false;
+	tTJSVariant callback;
+	if (TJS_FAILED(global.dispatch->PropGet(0, name, nullptr, &callback, global.dispatch)) ||
+		callback.Type() != tvtObject || !callback.AsObjectNoAddRef())
+		return false;
+	tTJSVariant result;
+	return TJS_SUCCEEDED(callback.AsObjectClosureNoAddRef().FuncCall(0,
+		nullptr, nullptr, &result, count, args, global.dispatch)) && result.operator bool();
+}
+}
+
+void TVPWindowWindow::discard_menu_pointer_buttons(const std::vector<SDL_Event> &events, size_t first)
+{
+	for (size_t i = first; i < events.size(); ++i)
+	{
+		if (events[i].type == SDL_MOUSEBUTTONDOWN)
+			krkrns_menu_consumed_pointer_buttons.insert(events[i].button.button);
+		else if (events[i].type == SDL_MOUSEBUTTONUP)
+			krkrns_menu_consumed_pointer_buttons.erase(events[i].button.button);
+	}
+}
+
+bool TVPWindowWindow::consume_menu_arrow_input(const SDL_Event &event)
+{
+	const auto edge = std::make_pair(event.key.keysym.sym, event.type == SDL_KEYDOWN);
+	const bool synthesized = event.key.padding2 == 0xA5;
+	auto &seen = synthesized ? this->menuPadArrowsThisPoll : this->menuRealArrowsThisPoll;
+	const auto &other = synthesized ? this->menuRealArrowsThisPoll : this->menuPadArrowsThisPoll;
+	// Allow a real keyboard's arrows only while the popup owns the input (or
+	// for its matching release). Games retain the existing d-pad dedup policy.
+	const bool active = krkrns_menu_is_active();
+	const bool paired = krkrns_menu_consumed_keys.count(event.key.keysym.sym) != 0;
+	if (!active && !paired && !seen.count(edge) && !other.count(edge))
+	{
+		// An explicit Ctrl+Up-style accelerator is owned by the menu even
+		// while its popup is closed. No match retains the old game policy.
+		return !synthesized && event.type == SDL_KEYDOWN && this->consume_menu_input(event);
+	}
+	if (other.count(edge) || (!active && !paired)) return true;
+	seen.insert(edge);
+	// A host arrow may accompany the pad's synthesized arrow in the same poll.
+	// The first source owns that edge; repeats from the same source still work.
+	this->consume_menu_input(event);
+	return true;
+}
+
+bool TVPWindowWindow::consume_menu_input(const SDL_Event &event)
+{
+	const bool active = krkrns_menu_is_active();
+	if (active) this->menuInputOwnedThisPoll = true;
+	const tjs_char *kind = nullptr;
+	tjs_int value = 0;
+	int x = 0, y = 0;
+	switch (event.type)
+	{
+		case SDL_KEYDOWN:
+		{
+			if (!active && event.key.padding3 == 0xA6)
+			{
+				// A previous face-button event may have closed the menu or
+				// replaced its Window before this queued menu press is read.
+				krkrns_menu_consumed_keys.insert(event.key.keysym.sym);
+				return true;
+			}
+			if (!active && !krkrns_menu_consumed_keys.count(event.key.keysym.sym))
+			{
+				tTJSVariant key(static_cast<tjs_int>(event.key.keysym.sym));
+				tTJSVariant mods(static_cast<tjs_int>(event.key.keysym.mod));
+				iTJSDispatch2 *owner = this->TJSNativeInstance ? this->TJSNativeInstance->GetOwnerNoAddRef() : nullptr;
+				tTJSVariant window(owner, owner);
+				tTJSVariant *args[] = { &key, &mods, &window };
+				krkrns_menu_consumed_keys.insert(event.key.keysym.sym);
+				if (krkrns_menu_call(TJS_W("__krkrnsMenuShortcut"), 3, args)) return true;
+				krkrns_menu_consumed_keys.erase(event.key.keysym.sym);
+				return false;
+			}
+			krkrns_menu_consumed_keys.insert(event.key.keysym.sym);
+			kind = TJS_W("keyDown");
+			value = event.key.keysym.sym;
+			break;
+		}
+		case SDL_KEYUP:
+		{
+			const bool paired = krkrns_menu_consumed_keys.erase(event.key.keysym.sym) != 0;
+			if (!active && !paired && event.key.padding3 != 0xA6) return false;
+			kind = TJS_W("keyUp");
+			value = event.key.keysym.sym;
+			break;
+		}
+		case SDL_MOUSEBUTTONDOWN:
+		case SDL_MOUSEBUTTONUP:
+		{
+			const bool down = event.type == SDL_MOUSEBUTTONDOWN;
+			const bool paired = krkrns_menu_consumed_pointer_buttons.count(event.button.button) != 0;
+			if (!active && !paired) return false;
+			if (down) krkrns_menu_consumed_pointer_buttons.insert(event.button.button);
+			else krkrns_menu_consumed_pointer_buttons.erase(event.button.button);
+			kind = down ? TJS_W("pointerDown") : TJS_W("pointerUp");
+			value = event.button.button;
+			x = event.button.x;
+			y = event.button.y;
+#ifdef __SWITCH__
+			if (this->hostWindow && this->hostDst.w > 0)
+			{
+				x -= this->hostDst.x;
+				y -= this->hostDst.y;
+			}
+#endif
+			this->TranslateWindowToDrawArea(x, y);
+			break;
+		}
+		case SDL_MOUSEWHEEL:
+			if (!active) return false;
+			kind = TJS_W("wheel");
+			value = event.wheel.y;
+			break;
+		case SDL_CONTROLLERBUTTONDOWN:
+		case SDL_CONTROLLERBUTTONUP:
+		case SDL_JOYBUTTONDOWN:
+		case SDL_JOYBUTTONUP:
+		{
+			const bool controller = event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_CONTROLLERBUTTONUP;
+			const bool down = event.type == SDL_CONTROLLERBUTTONDOWN || event.type == SDL_JOYBUTTONDOWN;
+			auto &pressed = controller ? krkrns_menu_consumed_controller_buttons : krkrns_menu_consumed_joystick_buttons;
+			const auto button = controller ? std::make_pair(event.cbutton.which, event.cbutton.button)
+				: std::make_pair(event.jbutton.which, event.jbutton.button);
+			if (!this->menuInputOwnedThisPoll && !pressed.count(button)) return false;
+			if (down) pressed.insert(button);
+			else pressed.erase(button);
+			return true; // the pad's synthesized key/pointer event owns the action
+		}
+		case SDL_FINGERDOWN:
+		case SDL_FINGERUP:
+		case SDL_FINGERMOTION:
+		{
+			const auto finger = std::make_pair(event.tfinger.touchId, event.tfinger.fingerId);
+			if (!this->menuInputOwnedThisPoll && !krkrns_menu_consumed_fingers.count(finger)) return false;
+			if (event.type == SDL_FINGERDOWN) krkrns_menu_consumed_fingers.insert(finger);
+			else if (event.type == SDL_FINGERUP) krkrns_menu_consumed_fingers.erase(finger);
+			return true; // SDL's accompanying mouse event is the menu's pointer
+		}
+		case SDL_CONTROLLERAXISMOTION:
+		case SDL_JOYAXISMOTION:
+		case SDL_JOYBALLMOTION:
+		case SDL_JOYHATMOTION:
+		case SDL_MULTIGESTURE:
+		case SDL_DOLLARGESTURE:
+		case SDL_DOLLARRECORD:
+			return this->menuInputOwnedThisPoll;
+		case SDL_TEXTINPUT:
+		case SDL_TEXTEDITING:
+			return active || !krkrns_menu_consumed_keys.empty();
+		case SDL_MOUSEMOTION:
+			return active;
+		default:
+			return false;
+	}
+	// A handler can close the popup or invalidate its Window.  Record all
+	// pairing state before entering script and never dereference this after it.
+	if (active && kind)
+	{
+		tTJSVariant eventKind(kind), eventValue(value), eventX(x), eventY(y);
+		tTJSVariant *args[] = { &eventKind, &eventValue, &eventX, &eventY };
+		krkrns_menu_call(TJS_W("__krkrnsMenuInput"), 4, args);
+	}
+	return true;
+}
+
 void TVPWindowWindow::flush_deferred_pointer_buttons()
 {
 	if (this->deferredPointerButtons.empty())
@@ -4869,6 +5135,14 @@ void TVPWindowWindow::flush_deferred_pointer_buttons()
 	}
 	if (this->isBeingDeleted)
 	{
+		this->deferredPointerButtons.clear();
+		this->deferredPointerDue = 0;
+		return;
+	}
+	if (krkrns_menu_is_active())
+	{
+		this->menuInputOwnedThisPoll = true;
+		this->discard_menu_pointer_buttons(this->deferredPointerButtons);
 		this->deferredPointerButtons.clear();
 		this->deferredPointerDue = 0;
 		return;
@@ -4887,6 +5161,15 @@ void TVPWindowWindow::flush_deferred_pointer_buttons()
 		{
 			return; // the handler deleted this window; drop what is left
 		}
+		if (krkrns_menu_is_active())
+		{
+			// Opening a popup cancels clicks already deferred for the game;
+			// they must not be reinterpreted as a choice in the new popup.
+			this->menuInputOwnedThisPoll = true;
+			this->discard_menu_pointer_buttons(pending, i);
+			break;
+		}
+		if (this->consume_menu_input(pending[i])) continue;
 		// Straight back into the input path: the event was already routed (and
 		// carries untouched coordinates), so it must not be routed again.
 		this->window_receive_event_input(pending[i]);
@@ -4909,6 +5192,7 @@ void sdl_process_events()
 		// (it is the reference for what counts as a jump), then let the clicks
 		// held back for that frame go out before this frame's own events.
 		_currentWindowWindow->note_frame_cursor();
+		_currentWindowWindow->begin_menu_input_poll();
 		_currentWindowWindow->flush_deferred_pointer_buttons();
 	}
 #ifdef __SWITCH__
@@ -4943,12 +5227,14 @@ void sdl_process_events()
 		// press used to arrive as both a REAL arrow key event and the
 		// synthesized one -- KAG navigation moved two rows per press.  Drop
 		// real arrow-key events; synthesized ones (padding2 marker) pass.
-		if ((event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) &&
+		const bool arrowEvent = (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) &&
 			(event.key.keysym.scancode == SDL_SCANCODE_UP ||
 			 event.key.keysym.scancode == SDL_SCANCODE_DOWN ||
 			 event.key.keysym.scancode == SDL_SCANCODE_LEFT ||
-			 event.key.keysym.scancode == SDL_SCANCODE_RIGHT) &&
-			event.key.padding2 != 0xA5)
+			 event.key.keysym.scancode == SDL_SCANCODE_RIGHT);
+		if (arrowEvent && _currentWindowWindow &&
+			_currentWindowWindow->consume_menu_arrow_input(event)) continue;
+		if (arrowEvent && event.key.padding2 != 0xA5)
 		{
 			KRKRNS_LOG("[keytrace] real arrow dropped sc=%d %s",
 				(int)event.key.keysym.scancode,
@@ -4956,6 +5242,8 @@ void sdl_process_events()
 			continue;
 		}
 #endif
+		if (_currentWindowWindow && _currentWindowWindow->consume_menu_input(event))
+			continue;
 		if (event.type == SDL_CONTROLLERDEVICEADDED || event.type == SDL_CONTROLLERDEVICEREMOVED)
 		{
 			refresh_controllers();
@@ -5832,6 +6120,9 @@ void krkrsdl2_release_leftover_windows()
 		tTJSNI_Window *w = TVPGetWindowListAt(0);
 		if (!w) break;
 		iTJSDispatch2 *owner = w->GetOwnerNoAddRef();
+		// Invalidation breaks Window/menu-root references and can release the
+		// last owner reference. Keep its native instance alive through fallback.
+		tTJSVariant ownerGuard(owner, owner);
 		if (owner)
 		{
 			try

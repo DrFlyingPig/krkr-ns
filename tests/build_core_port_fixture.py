@@ -34,7 +34,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--nro", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--fixture", choices=("core_port", "menu_contract", "movie_contract", "layer_raster", "movie_audio"),
+    parser.add_argument("--fixture", choices=("core_port", "menu_contract", "menu_game_layer", "menu_ui", "menu_native", "movie_contract", "movie_seek", "movie_seek_overlay", "layer_raster", "movie_audio"),
                         default="core_port")
     parser.add_argument("--media", type=Path,
                         help="Local movie to include as sample.mp4 in a movie fixture")
@@ -49,14 +49,14 @@ def main() -> None:
     romfs.mkdir(parents=True, exist_ok=True)
     shutil.copy2(repo / "tests/fixtures" / args.fixture / "startup.tjs", romfs / "startup.tjs")
     shutil.copy2(repo / "krkrsdl2/data/notosanssc.ttf", romfs / "notosanssc.ttf")
-    if args.fixture == "menu_contract":
+    if args.fixture in ("menu_contract", "menu_game_layer", "menu_ui", "menu_native"):
         compat = romfs / "compat/system"
         compat.mkdir(parents=True, exist_ok=True)
         # ScriptMgnIntf also invokes the namespace reinstall hook when this
         # basename is executed, including in a self-contained test package.
-        for name in ("k2compat.tjs", "k2compat_reinstall.tjs"):
+        for name in ("k2compat.tjs", "k2compat_reinstall.tjs", "menu_popup.tjs"):
             shutil.copy2(repo / "compat-patches/system" / name, compat / name)
-    if args.fixture in ("movie_contract", "movie_audio"):
+    if args.fixture in ("movie_contract", "movie_seek", "movie_seek_overlay", "movie_audio"):
         if args.media is None:
             parser.error(args.fixture + " requires --media pointing to a local test movie")
         shutil.copy2(args.media, romfs / "sample.mp4")

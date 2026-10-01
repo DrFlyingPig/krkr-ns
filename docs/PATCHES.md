@@ -8,6 +8,70 @@
 
 ## 已应用补丁 (源码层)
 
+### P102: 并行绘制失败回退与视频资源清理（2026-10-01）
+
+- **线程池**：扩容前预留容器容量，未加入池的线程由 RAII 持有；创建失败停止扩容并保留已有工作线程，按实际线程容量派发，其余任务在调用线程执行。保持原转场分行、绘制顺序和像素计算，避免线程资源不足将可串行完成的绘制变成异常或泄漏。
+- **视频清理**：关闭 FFmpeg format 后显式释放自定义 AVIO 的当前 buffer，再释放 context，避免反复打开影片遗留输入缓冲。
+- **平台边界**：视频时间和帧跳转中的 Switch 专用呈现帧状态只在 Switch 分支重置，避免 Windows VIDEOOVERLAY 分支引用不存在的成员。
+- **涉及文件**：`external/krkrz/utils/ThreadIntf.cpp`、`src/core/visual/sdl2/SwitchMovieOverlay.cpp`、`VideoOvlImpl.cpp`，新增线程创建失败注入回归。
+
+### P101: 未完成基类构造的 Window 实例安全清理（2026-10-01）
+
+- **故障**：游戏的辅助类可继承 `Window`，却不调用 `Window` 构造。TJS 已挂载原生实例，脚本 `invalidate` 仍会进入原生窗口清理；原 `Owner` 字段未初始化，菜单清理为它建立对象引用时可能读取垃圾虚表并崩溃。《晴菜花》标题快速读档销毁 `TitleObject` 等辅助对象时命中该路径。
+- **修复**：在 `tTJSNI_BaseWindow` 的 C++ 构造中初始化 `Owner = NULL`；只有真正调用脚本窗口基类构造后才绑定 owner。未完成构造的实例保留无所属对象状态，正常窗口、菜单与事件清理仍走原流程。
+- **范围**：不修改游戏辅助类、不为它们额外创建真实窗口、不改存档内容或读取语义。
+- **涉及文件**：`external/krkrz/visual/WindowIntf.cpp`，新增窗口构造生命周期回归检查。
+
+### P100: 参照 Kirikiroid2 的 FFmpeg 波形后备解码（2026-10-01）
+
+- **故障**：部分人物/系统语音以 `.ogg` 命名，实际为 MP4/M4A 中的 AAC；现有专用解码器均不识别，`WaveSoundBuffer.open` 抛异常。BGM/SE 的 Opus 路径正常。
+- **实现**：将 TVP storage 接到 FFmpeg 的自定义 AVIO，按内容探测，使用当前 send/receive 解码接口。WAV、Vorbis、Opus 保持原注册优先级，只有它们全部不匹配时才尝试后备解码。
+- **PCM 与定位**：保留采样率、声道及 S16/S32/float 精度，输出按引擎 sample-granule 接口交错，单声道 planar 直接整块复制。定位时保留 AAC 首包的负预热时间戳，重建 codec 并预解码至指定 sample；正确排空末帧、处理短读和释放自定义 AVIO。
+- **范围**：沿用现有 Switch 静态 FFmpeg 的格式配置，不改游戏文件、音量配置、BGM/SE 混音或脚本语音 API；没有把视频音轨支持直接视为独立音频已经可用。
+- **涉及文件**：`src/core/sound/sdl2/FFWaveDecoder.cpp/.h`、`external/krkrz/sound/WaveIntf.cpp`、`CMakeLists.txt`。
+
+### P99: E-mote 的行间纹理坐标复用（2026-10-01）
+
+- **纹理坐标**：只在普通混合、无蒙版、无目标自引用，且 U 不随 Y、V 不随 X 变化的大网格中建立本次调用的 X 索引表。表沿用原四像素浮点递推、融合乘加、取整与夹取，标量尾部保留原路径；双 UV 矩形必须逐组得到相同 X，不同源 Y 的行继续回退。表在所有行带任务结束后释放，每个网格最多使用 64 KiB。
+- **像素规则**：沿用原浮点 RGB/alpha 混合、特殊混合、蒙版覆盖与几何覆盖规则。
+- **参考关系**：延续 Kirikiroid2 软件矩形/拉伸路径按源行处理像素的策略；索引表是对本项目现有 E-mote 取样过程的等价优化，不声称来自其未公开的 E-mote 插件。
+- **涉及文件**：`src/plugins/emoteplayer/EmoteSWRenderBackend.cpp`。不改变分辨率、游戏时钟、后端选择或资源内容。
+
+### P98: 参照 Kirikiroid2 并行处理内置转场（2026-09-30）
+
+- **参考实现**：Kirikiroid2 `d1c2b125` 的 `TransIntf.cpp` 将 crossfade 与规则图转场交给渲染器，软件 `RenderManager.cpp` 的 `tTVPRenderMethod_TransBlt/UnivTransBlt` 按面积选择行带任务。本补丁适配现有 Switch 线程池，不迁移其纹理或 GPU 架构。
+- **并行范围**：仅内置 crossfade 与 universal 的混合阶段。调用线程先取得位图指针并完成共享位图写时复制；足够大的操作按独立目标行分配，每线程至少 32 行，使用原像素内核、Phase、Vague 与 BlendTable。源图或规则图的实际内存范围与目标重叠时保持原串行循环；支持负 pitch，目标行本身重叠时也不并行。
+- **边界**：保留转场起止状态、回调次序、小区域处理以及自定义转场插件行为；不改变游戏帧间隔、转场持续时间、分辨率或图层更新区域。非 Switch 平台沿用原实现。
+- **计时**：增加 Fill、crossfade 和 universal 的汇总耗时与并行调用数，填补 Blt/CopyRect 之外的像素处理统计。
+- **涉及文件**：`external/krkrz/visual/TransIntf.cpp`、`LayerBitmapIntf.cpp`、`src/core/sdl2/KrkrNSProf.h`、`SDLApplication.cpp`。
+
+### P95: 参照 Kirikiroid2 的网格批处理与矩形快路径（2026-09-30）
+
+- **参考实现**：Kirikiroid2 `d1c2b125` 的软件 `RenderManager.cpp`：`OperateTriangles` 批量提交任务，普通像素操作按面积选择行带并行；矩形四边形优先转入 `OperateRect/OperateStretch`。公开源码没有其私有 E-mote 插件，本补丁将这些通用渲染策略适配到现有 CPU 后端。
+- **网格任务**：将同一网格内逐三角形的线程提交/等待合并为一次行带任务。各线程处理独立行，每行仍按索引顺序混合；小面积操作沿用同步绘制，自引用源或蒙版保留既有路径。
+- **矩形识别**：仅合并扫描范围相同、共享边严格互补，且外边在原浮点递推下覆盖整个扫描范围的大矩形。UV 系数相同直接沿用；系数不同时保留两套原始递推，按原共享边覆盖规则逐像素选择，不用近似系数替代。保留原取样、蒙版阈值与混合公式；不能严格判定时仍使用三角形路径。
+- **矩形行绘制**：源 V 不随 X 变化的无蒙版矩形，每行计算源行位置，保留原四像素 U 递推、融合乘加取整和标量尾部；两套 UV 得出不同源行时，该行回到通用路径。连续四个 texel 批量读取，不透明像素直接复制，其余像素沿用原浮点 alpha / GL_MAX-alpha 公式。完整纹理更新后可记录全不透明状态；部分更新也检查整张纹理，`LockTexture` 暴露可写指针后永久停止缓存该断言。
+- **三角形源行复用**：无蒙版的大三角形在普通混合且源 V 的 X 步长严格为零时，每行复用一次原纹理 Y 取整结果与源行指针；仅在四个像素均被覆盖且取样位置连续时合并读取。几何覆盖、U 浮点递推、逐像素 alpha 与标量尾部仍执行原规则；旋转/剪切 UV 保留原路径。
+- **涉及文件**：`src/plugins/emoteplayer/EmoteSWRenderBackend.cpp/.h`。沿用既有目标尺寸、后端选择和图层更新语义。
+
+### P96: 按进程授予的 Switch 核心数配置自动绘制线程（2026-09-30）
+
+- **问题**：SDL 在 Horizon 上报告一个 CPU，原回退强制使用四个绘制线程，但标准应用能力只允许核心 0–2。
+- **修复**：自动数量通过 `svcGetInfo(InfoType_CoreMask)` 统计进程实际可用核心，查询失败时使用至少为一的 SDL 数量；不修改线程优先级或亲和性。记录调用线程及池工作线程的实际掩码、核心和优先级，帮助区分绘制成本与调度问题。
+- **涉及文件**：`external/krkrz/utils/ThreadIntf.cpp`；非 Switch 平台行为不变。
+
+### P97: 图层合成分段计时与 E-mote 回拷中的不变像素处理（2026-09-30）
+
+- **诊断**：只在根图层 `CompleteForWindow` 分别计时 `BeforeCompletion`、原绘制过程与 `AfterCompletion`，每 60 次画面更新汇总，帮助区分 onPaint / 转场准备、像素绘制和完成回调成本。不改变回调调用时机、图层遍历、更新区域或游戏时钟。
+- **回拷**：RGBA → BGRA 的 NEON 比较只写入发生变化的四像素组；每行首个变化组确定左边界，最后一个变化组在行末确定右边界，减少重复提取向量 lane。保留原负 pitch、最小复制尺寸、透明擦除和精确脏区域规则。
+- **涉及文件**：`external/krkrz/visual/LayerIntf.cpp`、`src/core/sdl2/KrkrNSProf.h`、`SDLApplication.cpp`、`src/plugins/emoteplayer/emoteplayerclass.cpp`；非 Switch 平台不增加计时，沿用原标量回拷。
+
+### P94: CPU 绘制与大型资源索引优化（2026-09-30）
+
+- **E-mote**：无蒙版且扫描宽度至少 64 像素的网格使用 NEON 批量换算、取整和夹取纹理坐标，保留原 Switch 融合乘加舍入。蒙版与小网格继续沿用原路径；覆盖、混合、裁剪、分辨率和后端选择不变。
+- **资源索引**：AutoPath 表从 1024 扩展为 16384 个固定哈希桶，减少大型游戏索引的冲突链遍历；保留原哈希函数、路径覆盖顺序、增量追加和 compact/reset 清理语义。首次重建记录实际桶数。
+- **涉及文件**：`src/plugins/emoteplayer/EmoteSWRenderBackend.cpp`、`external/krkrz/base/StorageIntf.cpp`。这两项优化没有迁移内部 Layer 合成到 GPU，也没有改变游戏更新频率。
+
 ### P93: 设置页的内置插件探测与会话事件清理（2026-09-26）
 
 - **故障与证据**：进入 `option.ks` 的 `SysTransEffectOpen` 后读取 `kag.sysTransitionEffect` 抛缺成员异常，游戏结束并返回启动器。`uisystem.tjs` 只在 `CanLoadPlugin("layerStwCopy.dll")` 为真时创建该对象；游戏 `initialize.tjs` 后定义的探测函数覆盖了启动前的脚本包装。引擎已有 `Layer.stitchWrappedCopy`，但内置插件表漏了该名称，游戏原生的 storage 探测因此返回假。
@@ -22,7 +86,7 @@
 - **解码与存储**：通过 TVP storage 读取 XP3 内的 AJPM revision 0，支持 alpha mode 1 的 Huffman/DCT alpha 和 mode 2 的 zlib alpha。建立帧索引并逐帧解码，缓存上限 32 MiB，不全片展开。对容器跨度、输入边界、熵编码、图像尺寸和 alpha 解压长度做检查。
 - **接口语义**：根据原插件手册和 64 位原 DLL 实测，保留零起始的 `showNextImage` 返回值、`frame` seek、播放重启、停止、循环、下一段切换与元数据切换、预读及清理。非循环播放持有末帧直至脚本 stop，空帧不改动目标图层；游戏自己的 GenericFlip / handler 控制显示时钟。
 - **图层输出**：按原 DLL 写入 BGRA，保留完整编码矩形、位置与 padding，支持负 pitch。原 DLL 在 `ltAddAlpha/dfAddAlpha` 目标上也直接写入像素，故不额外做预乘或提前裁剪到画布尺寸。
-- **验证**：主机单元检查通过；原始素材 6 段和兼容补丁素材 6 段共 1882 帧完整解码通过。9 个抽样帧与移植参考解码器逐字节一致；与原 DLL 对照，zlib alpha 完全一致，DCT/颜色存在最大 4 个灰度级的整数 IDCT/色彩舍入差异。Switch 原生脚本集成与最终设备画面验收另见 [ALPHAMOVIE_SUPPORT.md](ALPHAMOVIE_SUPPORT.md)。
+- **验证**：主机单元检查通过；原始素材 6 段和兼容补丁素材 6 段共 1882 帧完整解码通过。9 个抽样帧与移植参考解码器逐字节一致；与原 DLL 对照，zlib alpha 完全一致，DCT/颜色存在最大 4 个灰度级的整数 IDCT/色彩舍入差异。Switch 原生脚本集成与最终设备画面验收另见 [模块说明](MODULES.md)。
 
 ### P91: 保留无独立启动脚本的补丁包优先级，避免旧存档 ID 不匹配（2026-09-26）
 
@@ -198,7 +262,7 @@
 - 位图记录保存实际容量，新增周期内存计数及分配失败/重试快照，避免把进程保留的整个堆误判为活跃对象用量。
 - 修复单个 TextRender 光栅器析构时关闭全局 FreeType 库、使其他字体 face 失效的问题；全局库统一在引擎最终清理阶段释放。
 - 补齐 TextRender `valign=0` 居中分支，按当前字体 ascent 定位；用户实际游戏截图已确认居中。
-- 验证：5 项本地测试、22,813 项完整 ARM 引擎校验通过，包括并发位图复用、300 轮大图写时复制、16 轮文字对象创建销毁。内存区版本约 18 分钟真实剧情运行未复现位图分配失败；最终版真机长期复验仍待完成。原始证据、复现方法与边界见本地开发文档《FREEZE_DIAGNOSIS》（未随仓库发布）。
+- 验证：5 项本地测试、22,813 项完整 ARM 引擎校验通过，包括并发位图复用、300 轮大图写时复制、16 轮文字对象创建销毁。内存区版本约 18 分钟真实剧情运行未复现位图分配失败；最终版真机长期复验仍待完成。原始证据、复现方法与边界保存在本地开发记录（未随仓库发布）。
 
 ### P62: 菜单首次使用、存档与资源加载优化（2026-09-12）
 
@@ -207,7 +271,7 @@
 - PSB 媒体使用共享只读资源切片，避免枚举、注册、打开时复制全量数据；预留大字典哈希容量，共享写时复制字符串，重载后旧流与旧 root 仍有效。
 - 固实 7z 保留一个最多 16 MiB 的共享解压块，打开相邻成员不再重复解压；保留成员 CRC 和边界检查。
 - 修正图像缓存同键替换重复计费、插入后超预算问题，缓存命中免去路径日志；增加 `[slow]` 与单次 `[stall]` 记录定位真机首次点击。
-- 验证：4 项本地测试通过；完整 ARM 引擎前后各通过 22,151 项校验，文字和测试视口像素一致，六种存档内容一致。模拟器中 10,000 键 PSB 解析 102→29 ms，固实归档 32 次读取 4,539→269 ms；**真机待复验**。实现边界、完整计时和复现命令见本地开发文档《MENU_PERFORMANCE》（未随仓库发布）。
+- 验证：4 项本地测试通过；完整 ARM 引擎前后各通过 22,151 项校验，文字和测试视口像素一致，六种存档内容一致。模拟器中 10,000 键 PSB 解析 102→29 ms，固实归档 32 次读取 4,539→269 ms；**真机待复验**。实现边界、完整计时和复现命令保存在本地开发记录（未随仓库发布）。
 
 ### P1: romfs 构建 copy 替代 symlink
 `krkrsdl2/CMakeLists.txt` — Windows 无管理员权限无法建符号链接。
@@ -298,7 +362,7 @@ Nextendo 的 chkfeat 无条件返回 0(谎称 GCS 存在)且未实现 `gcspr_el0
 两者均为既有日志基建（见旧记忆「已就位，别删」），只修编译、不删功能。
 
 ## 性能优化方案
-见本地开发文档《OPTIMIZATION_PLAN》（未随仓库发布）：Phase 0（剖析）已完成，Phase 1（simde SIMD 激活/脏矩形上传/RGBA8888/libpng NEON/XP3 缓存）进行中，Phase 2（E-mote GPU）后续，Phase 3（Kirikiroid2 式全套 GPU 合成）go/no-go，Phase 4（WA2-ns 式视频）独立阶段。
+以下阶段是早期方案，完整记录保存在本地、不随仓库发布：Phase 0（剖析），Phase 1（simde SIMD 激活/脏矩形上传/RGBA8888/libpng NEON/XP3 缓存），Phase 2（E-mote GPU），Phase 3（Kirikiroid2 式全套 GPU 合成），Phase 4（WA2-ns 式视频）。当前进展以本文件最新补丁和 [性能与故障记录](RUNTIME_NOTES.md) 为准。
 
 
 ### P11: 激活 simde SIMD 混合内核 (Phase 1, 2026-09-07)

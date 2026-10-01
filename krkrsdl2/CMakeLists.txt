@@ -599,6 +599,7 @@ src/plugins/emoteplayer/EmoteSWRenderBackend.cpp
 src/plugins/emoteplayer/EmoteGLRenderBackend.cpp
 src/plugins/emoteplayer/TVPCompositor.cpp
 src/core/sound/sdl2/VorbisWaveDecoder.cpp
+src/core/sound/sdl2/FFWaveDecoder.cpp
 )
 list(APPEND KRKRSDL2COMMON_INCLUDES
 src/plugins
@@ -629,6 +630,7 @@ list(APPEND KRKRSDL2_DEFINITIONS
 	KRKRSDL2_ENABLE_EMOTEPLAYER
 	KRKRSDL2_ENABLE_ALPHAMOVIE
 	TVP_VORBIS_DECODER_IMPLEMENT
+	TVP_FFMPEG_DECODER_IMPLEMENT
 	TVP_IMAGE_ENABLE_WEBP
 	USE_OBSOLETE_FUNCTIONS
 )

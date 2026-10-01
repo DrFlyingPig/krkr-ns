@@ -9,6 +9,7 @@
 
 #ifdef __SWITCH__
 #include <arm_neon.h>
+#include <switch.h>
 #elif defined(KRKRNS_EMOTE_TEST_NEON)
 // Exercise the Switch pixel loop on the host with the same NEON operations.
 #define SIMDE_ENABLE_NATIVE_ALIASES
@@ -670,6 +671,17 @@ void EmoteSWRenderBackend::UpdateTexture(void* handle, const uint8_t* pixels, in
         std::memcpy(texture->pixels.data() + (size_t)y * texture->width * 4,
                     pixels + std::ptrdiff_t(y) * pitch, (size_t)width * 4);
     }
+    // Inspect the actual complete image, including any untouched part of a
+    // partial update. A retained LockTexture pointer can mutate pixels later;
+    // once exposed, never cache an opacity assertion for this texture again.
+    texture->opaquePixels = !texture->pixelAccessExposed;
+    if (texture->opaquePixels)
+        for (size_t i = 3; i < texture->pixels.size(); i += 4)
+            if (texture->pixels[i] != 255)
+            {
+                texture->opaquePixels = false;
+                break;
+            }
     texture->gpuAlphaDirty = true;
     if (EnsureTextureGpu(texture))
     {
@@ -683,6 +695,8 @@ uint8_t* EmoteSWRenderBackend::LockTexture(void* handle, int& pitch)
     Texture* texture = FindTexture(handle);
     if (!texture)
         return nullptr;
+    texture->pixelAccessExposed = true;
+    texture->opaquePixels = false;
     pitch = texture->width * 4;
     return texture->pixels.data();
 }
@@ -934,6 +948,15 @@ namespace
 {
 struct SwBandJob
 {
+    const int32_t* textureXs = nullptr;
+    bool sourceAliased = false;
+    bool fullCoverage = false;
+    bool splitUVs = false;
+    float splitA = 0, splitB = 0, splitC = 0;
+    bool splitInclusive = false;
+    bool opaqueTexture = false;
+    float secondAu = 0, secondBu = 0, secondCu = 0;
+    float secondAv = 0, secondBv = 0, secondCv = 0;
     float sx;
     float a01, b01, c01, a12, b12, c12, a20, b20, c20;
     float A_u, B_u, C_u, A_v, B_v, C_v;
@@ -953,7 +976,9 @@ struct SwBandJob
 };
 }
 
-static void SwRasterizeBand(SwBandJob& j)
+template<bool vectorTexelCoordinates, bool fullCoverage = false, bool splitUVs = false,
+         bool rowTexels = false, bool cachedX = false>
+static void SwRasterizeBandImpl(SwBandJob& j)
 {
     const int texW_1 = j.texW - 1, texH_1 = j.texH - 1;
     const float sx = j.sx;
@@ -965,6 +990,13 @@ static void SwRasterizeBand(SwBandJob& j)
         float f20_row = j.a20 * sx + j.b20 * fy + j.c20;
         float tu_row = j.A_u * sx + j.B_u * fy + j.C_u;
         float tv_row = j.A_v * sx + j.B_v * fy + j.C_v;
+        float split_row = 0, secondU_row = 0, secondV_row = 0;
+        if constexpr (splitUVs)
+        {
+            split_row = j.splitA * sx + j.splitB * fy + j.splitC;
+            secondU_row = j.secondAu * sx + j.secondBu * fy + j.secondCu;
+            secondV_row = j.secondAv * sx + j.secondBv * fy + j.secondCv;
+        }
 
         ColorRGBA* row = (ColorRGBA*)(j.dst + (size_t)py * j.pitch);
         const uint32_t* maskRow = j.maskRowBase ? j.maskRowBase + (size_t)py * j.width : nullptr;
@@ -1000,31 +1032,57 @@ static void SwRasterizeBand(SwBandJob& j)
             const uint32x4_t mIncl20 = vdupq_n_u32(j.include20 ? 0xffffffffu : 0u);
             const uint32x4_t vByte = vdupq_n_u32(0xffu);
             const uint32x4_t vAlphaKeep = vdupq_n_u32(0xff000000u);
+            const float32x4_t vTexWidth = vdupq_n_f32(static_cast<float>(texW_1));
+            const float32x4_t vTexHeight = vdupq_n_f32(static_cast<float>(texH_1));
+            const int32x4_t vIntZero = vdupq_n_s32(0);
+            const int32x4_t vMaxTexX = vdupq_n_s32(texW_1);
+            const int32x4_t vMaxTexY = vdupq_n_s32(texH_1);
+            const ColorRGBA* textureRow = nullptr;
+            if constexpr (rowTexels)
+            {
+                // A_v is exactly zero. Match lane zero of the original
+                // FMLA, fused texel rounding and saturating conversion once
+                // per row; covered groups retain their original U stepping.
+                const float rowV = vgetq_lane_f32(
+                    vmlaq_f32(vdupq_n_f32(tv_row), kLane, vAV), 0);
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_FMA)
+                const float texY = std::fma(rowV, static_cast<float>(texH_1), 0.5f);
+#else
+                const float texY = rowV * texH_1 + 0.5f;
+#endif
+                const int ty = vgetq_lane_s32(vminq_s32(vmaxq_s32(
+                    vcvtq_s32_f32(vdupq_n_f32(texY)), vIntZero), vMaxTexY), 0);
+                textureRow = j.texData + static_cast<size_t>(ty) * j.texW;
+            }
             for (; px + 4 <= j.maxX + 1; px += 4)
             {
-                const float32x4_t f01 = vmlaq_f32(vdupq_n_f32(f01_row), kLane, vA01);
-                const float32x4_t f12 = vmlaq_f32(vdupq_n_f32(f12_row), kLane, vA12);
-                const float32x4_t f20 = vmlaq_f32(vdupq_n_f32(f20_row), kLane, vA20);
-                uint32x4_t m01, m12, m20;
-                if (j.ccw)
+                uint32x4_t inside = vdupq_n_u32(0xffffffffu);
+                if constexpr (!fullCoverage)
                 {
-                    m01 = vorrq_u32(vcgtq_f32(f01, vZero),
-                                    vandq_u32(vceqq_f32(f01, vZero), mIncl01));
-                    m12 = vorrq_u32(vcgtq_f32(f12, vZero),
-                                    vandq_u32(vceqq_f32(f12, vZero), mIncl12));
-                    m20 = vorrq_u32(vcgtq_f32(f20, vZero),
-                                    vandq_u32(vceqq_f32(f20, vZero), mIncl20));
+                    const float32x4_t f01 = vmlaq_f32(vdupq_n_f32(f01_row), kLane, vA01);
+                    const float32x4_t f12 = vmlaq_f32(vdupq_n_f32(f12_row), kLane, vA12);
+                    const float32x4_t f20 = vmlaq_f32(vdupq_n_f32(f20_row), kLane, vA20);
+                    uint32x4_t m01, m12, m20;
+                    if (j.ccw)
+                    {
+                        m01 = vorrq_u32(vcgtq_f32(f01, vZero),
+                                        vandq_u32(vceqq_f32(f01, vZero), mIncl01));
+                        m12 = vorrq_u32(vcgtq_f32(f12, vZero),
+                                        vandq_u32(vceqq_f32(f12, vZero), mIncl12));
+                        m20 = vorrq_u32(vcgtq_f32(f20, vZero),
+                                        vandq_u32(vceqq_f32(f20, vZero), mIncl20));
+                    }
+                    else
+                    {
+                        m01 = vorrq_u32(vcltq_f32(f01, vZero),
+                                        vandq_u32(vceqq_f32(f01, vZero), mIncl01));
+                        m12 = vorrq_u32(vcltq_f32(f12, vZero),
+                                        vandq_u32(vceqq_f32(f12, vZero), mIncl12));
+                        m20 = vorrq_u32(vcltq_f32(f20, vZero),
+                                        vandq_u32(vceqq_f32(f20, vZero), mIncl20));
+                    }
+                    inside = vandq_u32(vandq_u32(m01, m12), m20);
                 }
-                else
-                {
-                    m01 = vorrq_u32(vcltq_f32(f01, vZero),
-                                    vandq_u32(vceqq_f32(f01, vZero), mIncl01));
-                    m12 = vorrq_u32(vcltq_f32(f12, vZero),
-                                    vandq_u32(vceqq_f32(f12, vZero), mIncl12));
-                    m20 = vorrq_u32(vcltq_f32(f20, vZero),
-                                    vandq_u32(vceqq_f32(f20, vZero), mIncl20));
-                }
-                uint32x4_t inside = vandq_u32(vandq_u32(m01, m12), m20);
                 if (j.hasStencil)
                 {
                     const uint32x4_t st = vld1q_u32(maskRow + px);
@@ -1033,30 +1091,118 @@ static void SwRasterizeBand(SwBandJob& j)
                 }
                 if (vmaxvq_u32(inside) != 0)
                 {
-                    const float32x4_t tu = vmlaq_f32(vdupq_n_f32(tu_row), kLane, vAU);
-                    const float32x4_t tv = vmlaq_f32(vdupq_n_f32(tv_row), kLane, vAV);
-                    float txa[4], tya[4];
-                    vst1q_f32(txa, tu);
-                    vst1q_f32(tya, tv);
+                    float32x4_t tu = vZero;
+                    if constexpr (!cachedX)
+                        tu = vmlaq_f32(vdupq_n_f32(tu_row), kLane, vAU);
+                    float32x4_t tv = vZero;
+                    if constexpr (!rowTexels)
+                        tv = vmlaq_f32(vdupq_n_f32(tv_row), kLane, vAV);
+                    if constexpr (splitUVs)
+                    {
+                        const float32x4_t edge = vmlaq_f32(vdupq_n_f32(split_row),
+                                                         kLane, vdupq_n_f32(j.splitA));
+                        const uint32x4_t primary = vorrq_u32(
+                            j.ccw ? vcgtq_f32(edge, vZero) : vcltq_f32(edge, vZero),
+                            vandq_u32(vceqq_f32(edge, vZero),
+                                      vdupq_n_u32(j.splitInclusive ? 0xffffffffu : 0u)));
+                        tu = vbslq_f32(primary, tu,
+                            vmlaq_f32(vdupq_n_f32(secondU_row), kLane, vdupq_n_f32(j.secondAu)));
+                        tv = vbslq_f32(primary, tv,
+                            vmlaq_f32(vdupq_n_f32(secondV_row), kLane, vdupq_n_f32(j.secondAv)));
+                    }
                     uint32_t insideLane[4];
                     vst1q_u32(insideLane, inside);
                     uint32_t texel[4] = {0u, 0u, 0u, 0u};
-                    for (int l = 0; l < 4; ++l)
+                    if constexpr (cachedX)
                     {
-                        if (!insideLane[l])
-                            continue;
-                        int tx = (int)(txa[l] * texW_1 + 0.5f);
-                        int ty = (int)(tya[l] * texH_1 + 0.5f);
-                        if (tx < 0)
-                            tx = 0;
-                        else if (tx > texW_1)
-                            tx = texW_1;
-                        if (ty < 0)
-                            ty = 0;
-                        else if (ty > texH_1)
-                            ty = texH_1;
-                        texel[l] = *reinterpret_cast<const uint32_t*>(
-                            &j.texData[(size_t)ty * j.texW + tx]);
+                        const int32_t* x = j.textureXs + px - j.minX;
+                        if (vminvq_u32(inside) != 0 && x[1] == x[0] + 1 &&
+                            x[2] == x[0] + 2 && x[3] == x[0] + 3)
+                            vst1q_u32(texel, vld1q_u32(reinterpret_cast<const uint32_t*>(textureRow + x[0])));
+                        else
+                            for (int l = 0; l < 4; ++l)
+                                if (insideLane[l])
+                                    texel[l] = *reinterpret_cast<const uint32_t*>(textureRow + x[l]);
+                    }
+                    else if constexpr (vectorTexelCoordinates)
+                    {
+                        // Switch GCC contracts the former scalar multiply/add
+                        // to FMADD; retain its half-texel boundary rounding.
+#if defined(__SWITCH__)
+                        const float32x4_t texX = vfmaq_f32(vHalf, tu, vTexWidth);
+                        float32x4_t texY = vZero;
+                        if constexpr (!rowTexels)
+                            texY = vfmaq_f32(vHalf, tv, vTexHeight);
+#elif defined(KRKRNS_EMOTE_TEST_FMA)
+                        // SIMDe may emulate vfmaq with unfused multiply/add.
+                        // This host reference forces the ARM fused rounding.
+                        float fusedX[4], fusedY[4];
+                        vst1q_f32(fusedX, tu);
+                        vst1q_f32(fusedY, tv);
+                        for (int lane = 0; lane < 4; ++lane)
+                        {
+                            fusedX[lane] = std::fma(fusedX[lane], vgetq_lane_f32(vTexWidth, 0), 0.5f);
+                            if constexpr (!rowTexels)
+                                fusedY[lane] = std::fma(fusedY[lane], vgetq_lane_f32(vTexHeight, 0), 0.5f);
+                        }
+                        const float32x4_t texX = vld1q_f32(fusedX);
+                        const float32x4_t texY = vld1q_f32(fusedY);
+#else
+                        const float32x4_t texX = vaddq_f32(vmulq_f32(tu, vTexWidth), vHalf);
+                        float32x4_t texY = vZero;
+                        if constexpr (!rowTexels)
+                            texY = vaddq_f32(vmulq_f32(tv, vTexHeight), vHalf);
+#endif
+                        int32_t txa[4], tya[4];
+                        vst1q_s32(txa, vminq_s32(vmaxq_s32(vcvtq_s32_f32(texX), vIntZero), vMaxTexX));
+                        if constexpr (rowTexels)
+                        {
+                            if (vminvq_u32(inside) != 0 && txa[1] == txa[0] + 1 &&
+                                txa[2] == txa[0] + 2 && txa[3] == txa[0] + 3)
+                                vst1q_u32(texel, vld1q_u32(reinterpret_cast<const uint32_t*>(textureRow + txa[0])));
+                            else
+                                for (int l = 0; l < 4; ++l)
+                                    if (insideLane[l])
+                                        texel[l] = *reinterpret_cast<const uint32_t*>(textureRow + txa[l]);
+                        }
+                        else
+                        {
+                            vst1q_s32(tya, vminq_s32(vmaxq_s32(vcvtq_s32_f32(texY), vIntZero), vMaxTexY));
+                            for (int l = 0; l < 4; ++l)
+                            {
+                                if (!insideLane[l]) continue;
+                                texel[l] = *reinterpret_cast<const uint32_t*>(
+                                    &j.texData[(size_t)tya[l] * j.texW + txa[l]]);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        float txa[4], tya[4];
+                        vst1q_f32(txa, tu);
+                        vst1q_f32(tya, tv);
+                        for (int l = 0; l < 4; ++l)
+                        {
+                            if (!insideLane[l])
+                                continue;
+#if defined(KRKRNS_EMOTE_TEST_FMA) && !defined(__SWITCH__)
+                            int tx = (int)std::fma(txa[l], static_cast<float>(texW_1), 0.5f);
+                            int ty = (int)std::fma(tya[l], static_cast<float>(texH_1), 0.5f);
+#else
+                            int tx = (int)(txa[l] * texW_1 + 0.5f);
+                            int ty = (int)(tya[l] * texH_1 + 0.5f);
+#endif
+                            if (tx < 0)
+                                tx = 0;
+                            else if (tx > texW_1)
+                                tx = texW_1;
+                            if (ty < 0)
+                                ty = 0;
+                            else if (ty > texH_1)
+                                ty = texH_1;
+                            texel[l] = *reinterpret_cast<const uint32_t*>(
+                                &j.texData[(size_t)ty * j.texW + tx]);
+                        }
                     }
                     const uint32x4_t srcv = vld1q_u32(texel);
                     uint32_t* dstRow = reinterpret_cast<uint32_t*>(row) + px;
@@ -1119,6 +1265,12 @@ static void SwRasterizeBand(SwBandJob& j)
                 f20_row += j.a20 * 4.0f;
                 tu_row += j.A_u * 4.0f;
                 tv_row += j.A_v * 4.0f;
+                if constexpr (splitUVs)
+                {
+                    split_row += j.splitA * 4.0f;
+                    secondU_row += j.secondAu * 4.0f;
+                    secondV_row += j.secondAv * 4.0f;
+                }
             }
         }
 #endif
@@ -1127,13 +1279,24 @@ static void SwRasterizeBand(SwBandJob& j)
             const float e01 = j.ccw ? f01_row : -f01_row;
             const float e12 = j.ccw ? f12_row : -f12_row;
             const float e20 = j.ccw ? f20_row : -f20_row;
-            const bool inside = (e01 > 0 || (e01 == 0 && j.include01)) &&
+            const bool inside = fullCoverage ||
+                               ((e01 > 0 || (e01 == 0 && j.include01)) &&
                                 (e12 > 0 || (e12 == 0 && j.include12)) &&
-                                (e20 > 0 || (e20 == 0 && j.include20));
+                                (e20 > 0 || (e20 == 0 && j.include20)));
             if (inside)
             {
-                int tx = (int)(tu_row * texW_1 + 0.5f);
-                int ty = (int)(tv_row * texH_1 + 0.5f);
+                float tu = tu_row, tv = tv_row;
+                if constexpr (splitUVs)
+                {
+                    const float edge = j.ccw ? split_row : -split_row;
+                    if (!(edge > 0 || (edge == 0 && j.splitInclusive)))
+                    {
+                        tu = secondU_row;
+                        tv = secondV_row;
+                    }
+                }
+                int tx = (int)(tu * texW_1 + 0.5f);
+                int ty = (int)(tv * texH_1 + 0.5f);
                 if (tx < 0)
                     tx = 0;
                 else if (tx > texW_1)
@@ -1155,13 +1318,429 @@ static void SwRasterizeBand(SwBandJob& j)
             f20_row += j.a20;
             tu_row += j.A_u;
             tv_row += j.A_v;
+            if constexpr (splitUVs)
+            {
+                split_row += j.splitA;
+                secondU_row += j.secondAu;
+                secondV_row += j.secondAv;
+            }
         }
     }
+}
+
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
+static bool SwCanDrawRectangleRows(const SwBandJob& j)
+{
+    return j.fullCoverage && !j.hasStencil &&
+        j.blendMode != 1 && j.blendMode != 4 && j.blendMode != 6 && j.blendMode != 21 &&
+        j.maxX - j.minX + 1 >= 64 && j.A_v == 0.f &&
+        (!j.splitUVs || j.secondAv == 0.f);
+}
+
+static bool SwBuildTextureXs(SwBandJob& j, std::vector<int32_t>& coordinates)
+{
+    const int width = j.maxX - j.minX + 1;
+    if (j.sourceAliased || j.hasStencil || j.B_u != 0.f || j.A_v != 0.f ||
+        j.blendMode == 1 || j.blendMode == 4 || j.blendMode == 6 || j.blendMode == 21 ||
+        width < 64 || j.rows < 96 || (uint64_t)width * j.rows < 66 * 500 ||
+        (j.splitUVs && (j.secondBu != 0.f || j.secondAv != 0.f)))
+        return false;
+
+    // Reuse the original four-lane recurrence, not a newly calculated affine
+    // mapping. With B_u exactly zero these texel X values are row-invariant.
+    // A split rectangle is eligible only if both original UV maps quantize
+    // to the same X at every vector lane; its per-row Y check stays in place.
+    const float32x4_t lanes = {0.f, 1.f, 2.f, 3.f};
+    const float32x4_t half = vdupq_n_f32(0.5f);
+    const float32x4_t texWidth = vdupq_n_f32(float(j.texW - 1));
+    const int32x4_t zero = vdupq_n_s32(0), maxX = vdupq_n_s32(j.texW - 1);
+    const auto quantize = [&](float u, float step) {
+        const float32x4_t values = vmlaq_f32(vdupq_n_f32(u), lanes, vdupq_n_f32(step));
+#if defined(__SWITCH__)
+        const float32x4_t x = vfmaq_f32(half, values, texWidth);
+#elif defined(KRKRNS_EMOTE_TEST_FMA)
+        float fused[4];
+        vst1q_f32(fused, values);
+        for (int lane = 0; lane < 4; ++lane)
+            fused[lane] = std::fma(fused[lane], float(j.texW - 1), 0.5f);
+        const float32x4_t x = vld1q_f32(fused);
+#else
+        const float32x4_t x = vaddq_f32(vmulq_f32(values, texWidth), half);
+#endif
+        return vminq_s32(vmaxq_s32(vcvtq_s32_f32(x), zero), maxX);
+    };
+    const float fy = j.minY + 0.5f;
+    float u = j.A_u * j.sx + j.B_u * fy + j.C_u;
+    float secondU = j.secondAu * j.sx + j.secondBu * fy + j.secondCu;
+    coordinates.resize(width / 4 * 4);
+    for (int offset = 0; offset < (int)coordinates.size(); offset += 4)
+    {
+        const int32x4_t x = quantize(u, j.A_u);
+        if (j.splitUVs && vminvq_u32(vceqq_s32(x, quantize(secondU, j.secondAu))) == 0)
+        {
+            coordinates.clear();
+            return false;
+        }
+        vst1q_s32(coordinates.data() + offset, x);
+        u += j.A_u * 4.f;
+        secondU += j.secondAu * 4.f;
+    }
+    j.textureXs = coordinates.data();
+    return true;
+}
+
+static uint32x4_t SwBlendRectanglePixels(uint32x4_t src, uint32x4_t dst, float opacity)
+{
+    // The same source-alpha/GL_MAX-alpha equation and operation order as
+    // SwRasterizeBandImpl, with all four pixels known to be covered.
+    const float32x4_t zero = vdupq_n_f32(0.f), one = vdupq_n_f32(1.f);
+    const float32x4_t half = vdupq_n_f32(0.5f), max = vdupq_n_f32(255.f);
+    const uint32x4_t byte = vdupq_n_u32(255u);
+    const float32x4_t sa = vmulq_f32(
+        vmulq_f32(vcvtq_f32_u32(vshrq_n_u32(src, 24)), vdupq_n_f32(1.f / 255.f)),
+        vdupq_n_f32(std::max(0.f, std::min(1.f, opacity))));
+    const float32x4_t inv = vsubq_f32(one, sa);
+    const float32x4_t sr = vcvtq_f32_u32(vandq_u32(src, byte));
+    const float32x4_t sg = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(src, 8), byte));
+    const float32x4_t sb = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(src, 16), byte));
+    const float32x4_t dr = vcvtq_f32_u32(vandq_u32(dst, byte));
+    const float32x4_t dg = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(dst, 8), byte));
+    const float32x4_t db = vcvtq_f32_u32(vandq_u32(vshrq_n_u32(dst, 16), byte));
+    const float32x4_t da = vcvtq_f32_u32(vshrq_n_u32(dst, 24));
+    const float32x4_t r = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_f32(sr, sa), vmulq_f32(dr, inv)), half), zero), max);
+    const float32x4_t g = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_f32(sg, sa), vmulq_f32(dg, inv)), half), zero), max);
+    const float32x4_t b = vminq_f32(vmaxq_f32(vaddq_f32(vaddq_f32(vmulq_f32(sb, sa), vmulq_f32(db, inv)), half), zero), max);
+    const float32x4_t a = vminq_f32(vmaxq_f32(vaddq_f32(vmaxq_f32(vmulq_f32(sa, max), da), half), zero), max);
+    const uint32x4_t blended = vorrq_u32(
+        vorrq_u32(vcvtq_u32_f32(r), vshlq_n_u32(vcvtq_u32_f32(g), 8)),
+        vorrq_u32(vshlq_n_u32(vcvtq_u32_f32(b), 16), vshlq_n_u32(vcvtq_u32_f32(a), 24)));
+    return vbslq_u32(vcgeq_f32(sa, one), vorrq_u32(src, vdupq_n_u32(0xff000000u)), blended);
+}
+
+template<bool splitUVs, bool cachedX = false>
+static void SwDrawRectangleRows(SwBandJob& j)
+{
+    // Kirikiroid2 sends opaque rectangular operations to its copy/stretch
+    // kernels. Retain our nearest-texel float recurrence, but copy the row
+    // directly where opaque, using the original blend for transparent pixels.
+    const float32x4_t lanes = {0.f, 1.f, 2.f, 3.f};
+    const float32x4_t zero = vdupq_n_f32(0.f);
+    const float32x4_t half = vdupq_n_f32(0.5f);
+    const float32x4_t texWidth = vdupq_n_f32(float(j.texW - 1));
+    const int32x4_t intZero = vdupq_n_s32(0);
+    const int32x4_t maxX = vdupq_n_s32(j.texW - 1);
+    for (int py = j.minY; py < j.minY + j.rows; ++py)
+    {
+        const float fy = py + 0.5f;
+        float u = j.A_u * j.sx + j.B_u * fy + j.C_u;
+        const float v = j.A_v * j.sx + j.B_v * fy + j.C_v;
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_FMA)
+        int ty = static_cast<int>(std::fma(v, float(j.texH - 1), 0.5f));
+#else
+        int ty = static_cast<int>(v * (j.texH - 1) + 0.5f);
+#endif
+        ty = std::max(0, std::min(ty, j.texH - 1));
+        float secondU = 0, secondV = 0, edge = 0;
+        if constexpr (splitUVs)
+        {
+            secondU = j.secondAu * j.sx + j.secondBu * fy + j.secondCu;
+            secondV = j.secondAv * j.sx + j.secondBv * fy + j.secondCv;
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_FMA)
+            int secondY = static_cast<int>(std::fma(secondV, float(j.texH - 1), 0.5f));
+#else
+            int secondY = static_cast<int>(secondV * (j.texH - 1) + 0.5f);
+#endif
+            secondY = std::max(0, std::min(secondY, j.texH - 1));
+            if (secondY != ty)
+            {
+                // A rounding boundary can select different source rows for
+                // the two halves. Keep the general, exact path for this row.
+                SwBandJob row = j;
+                row.minY = py; row.rows = 1;
+                SwRasterizeBandImpl<true, true, true>(row);
+                continue;
+            }
+            edge = j.splitA * j.sx + j.splitB * fy + j.splitC;
+        }
+        const auto* src = reinterpret_cast<const uint32_t*>(j.texData) + size_t(ty) * j.texW;
+        auto* dst = j.dst + size_t(py) * j.pitch;
+        int px = j.minX;
+        for (; px + 4 <= j.maxX + 1; px += 4)
+        {
+            int32_t computedX[4];
+            const int32_t* x;
+            if constexpr (cachedX)
+                x = j.textureXs + px - j.minX;
+            else
+            {
+                float32x4_t tu = vmlaq_f32(vdupq_n_f32(u), lanes, vdupq_n_f32(j.A_u));
+                if constexpr (splitUVs)
+                {
+                    const float32x4_t values = vmlaq_f32(vdupq_n_f32(edge), lanes,
+                                                        vdupq_n_f32(j.splitA));
+                    const uint32x4_t primary = vorrq_u32(
+                        j.ccw ? vcgtq_f32(values, zero) : vcltq_f32(values, zero),
+                        vandq_u32(vceqq_f32(values, zero),
+                                  vdupq_n_u32(j.splitInclusive ? 0xffffffffu : 0u)));
+                    tu = vbslq_f32(primary, tu,
+                        vmlaq_f32(vdupq_n_f32(secondU), lanes, vdupq_n_f32(j.secondAu)));
+                }
+#if defined(__SWITCH__)
+                const float32x4_t texX = vfmaq_f32(half, tu, texWidth);
+#elif defined(KRKRNS_EMOTE_TEST_FMA)
+                float values[4];
+                vst1q_f32(values, tu);
+                for (int l = 0; l < 4; ++l)
+                    values[l] = std::fma(values[l], float(j.texW - 1), 0.5f);
+                const float32x4_t texX = vld1q_f32(values);
+#else
+                const float32x4_t texX = vaddq_f32(vmulq_f32(tu, texWidth), half);
+#endif
+                vst1q_s32(computedX, vminq_s32(vmaxq_s32(vcvtq_s32_f32(texX), intZero), maxX));
+                x = computedX;
+            }
+            uint32x4_t pixels;
+            if (x[1] == x[0] + 1 && x[2] == x[0] + 2 && x[3] == x[0] + 3)
+                pixels = vld1q_u32(src + x[0]);
+            else
+            {
+                const uint32_t values[4] = {src[x[0]], src[x[1]], src[x[2]], src[x[3]]};
+                pixels = vld1q_u32(values);
+            }
+            const uint32x4_t alpha = vshrq_n_u32(pixels, 24);
+            if (j.opacity >= 1.f && (j.opaqueTexture || vminvq_u32(alpha) == 255u))
+                vst1q_u32(dst + px, pixels);
+            else if (vmaxvq_u32(alpha) != 0)
+                vst1q_u32(dst + px, SwBlendRectanglePixels(pixels, vld1q_u32(dst + px), j.opacity));
+            u += j.A_u * 4.f;
+            if constexpr (splitUVs)
+            {
+                secondU += j.secondAu * 4.f;
+                edge += j.splitA * 4.f;
+            }
+        }
+        for (; px <= j.maxX; ++px)
+        {
+            float tu = u, tv = v;
+            if constexpr (splitUVs)
+            {
+                const float value = j.ccw ? edge : -edge;
+                if (!(value > 0 || (value == 0 && j.splitInclusive)))
+                {
+                    tu = secondU;
+                    tv = secondV;
+                }
+            }
+            int tx = static_cast<int>(tu * (j.texW - 1) + 0.5f);
+            tx = std::max(0, std::min(tx, j.texW - 1));
+            int tailY = static_cast<int>(tv * (j.texH - 1) + 0.5f);
+            tailY = std::max(0, std::min(tailY, j.texH - 1));
+            const ColorRGBA source = j.texData[size_t(tailY) * j.texW + tx];
+            auto* row = reinterpret_cast<ColorRGBA*>(dst);
+            row[px] = BlendPixels(source, row[px], j.blendMode, j.opacity, j.uniformColor);
+            u += j.A_u;
+            if constexpr (splitUVs)
+            {
+                secondU += j.secondAu;
+                edge += j.splitA;
+            }
+        }
+    }
+}
+#endif
+
+static void SwRasterizeBand(SwBandJob& j)
+{
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
+    if (SwCanDrawRectangleRows(j))
+    {
+        if (j.textureXs)
+        {
+            if (j.splitUVs) SwDrawRectangleRows<true, true>(j);
+            else SwDrawRectangleRows<false, true>(j);
+        }
+        else if (j.splitUVs) SwDrawRectangleRows<true>(j);
+        else SwDrawRectangleRows<false>(j);
+        return;
+    }
+#endif
+    if (j.fullCoverage)
+    {
+        if (j.splitUVs)
+        {
+            if (!j.hasStencil && j.maxX - j.minX + 1 >= 64)
+                SwRasterizeBandImpl<true, true, true>(j);
+            else
+                SwRasterizeBandImpl<false, true, true>(j);
+            return;
+        }
+        if (!j.hasStencil && j.maxX - j.minX + 1 >= 64)
+            SwRasterizeBandImpl<true, true>(j);
+        else
+            SwRasterizeBandImpl<false, true>(j);
+        return;
+    }
+    // Limit coordinate vectorization to wide, unmasked scan bands; keep
+    // the original lane conversion for stencil-heavy and narrow geometry.
+    if (!j.hasStencil && j.maxX - j.minX + 1 >= 64)
+    {
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
+        if (!j.sourceAliased && j.A_v == 0.f && j.blendMode != 1 && j.blendMode != 4 &&
+            j.blendMode != 6 && j.blendMode != 21)
+        {
+            if (j.textureXs) SwRasterizeBandImpl<true, false, false, true, true>(j);
+            else SwRasterizeBandImpl<true, false, false, true>(j);
+        }
+        else
+#endif
+            SwRasterizeBandImpl<true>(j);
+    }
+    else
+        SwRasterizeBandImpl<false>(j);
 }
 
 static void SwRasterizeBandEntry(void* p)
 {
     SwRasterizeBand(*(SwBandJob*)p);
+}
+
+struct SwMeshBandJob
+{
+    const SwBandJob* triangles;
+    size_t triangleCount;
+    int minY, endY;
+#ifdef __SWITCH__
+    bool measure = false;
+    Uint64 start = 0, finish = 0;
+    unsigned core = 0;
+#endif
+};
+
+static void SwRasterizeMeshBandEntry(void* p)
+{
+    auto& mesh = *static_cast<SwMeshBandJob*>(p);
+#ifdef __SWITCH__
+    if (mesh.measure)
+    {
+        mesh.start = SDL_GetPerformanceCounter();
+        mesh.core = svcGetCurrentProcessorNumber();
+    }
+#endif
+    // Every worker owns the same rows for the whole mesh. Within those rows,
+    // triangles still blend in index order, with the original row/UV setup.
+    for (size_t i = 0; i < mesh.triangleCount; ++i)
+    {
+        SwBandJob job = mesh.triangles[i];
+        const int endY = std::min(mesh.endY, job.minY + job.rows);
+        job.minY = std::max(mesh.minY, job.minY);
+        job.rows = endY - job.minY;
+        if (job.rows > 0)
+            SwRasterizeBand(job);
+    }
+#ifdef __SWITCH__
+    if (mesh.measure)
+        mesh.finish = SDL_GetPerformanceCounter();
+#endif
+}
+
+static bool SwTryMergeRectangle(SwBandJob& first, const SwBandJob& second)
+{
+    // Kirikiroid2's OperateTriangles recognizes rectangular quad pairs and
+    // dispatches them through OperateRect/OperateStretch. Here we retain the
+    // existing float UV stepping and exactly complementary shared edges.
+    // Differing maps retain both recurrences, selected by the original
+    // shared-edge rule, rather than approximating them by one rectangle map.
+    if (first.ccw != second.ccw || first.minX != second.minX ||
+        first.maxX != second.maxX || first.minY != second.minY ||
+        first.rows != second.rows)
+        return false;
+
+    struct Edge { float a, b, c; bool inclusive; };
+    const Edge edges[2][3] = {
+        {{first.a01, first.b01, first.c01, first.include01},
+         {first.a12, first.b12, first.c12, first.include12},
+         {first.a20, first.b20, first.c20, first.include20}},
+        {{second.a01, second.b01, second.c01, second.include01},
+         {second.a12, second.b12, second.c12, second.include12},
+         {second.a20, second.b20, second.c20, second.include20}}};
+    int shared[2] = {-1, -1};
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k)
+            if (edges[0][i].a != 0 && edges[0][i].b != 0 &&
+                edges[0][i].a == -edges[1][k].a &&
+                edges[0][i].b == -edges[1][k].b &&
+                edges[0][i].c == -edges[1][k].c &&
+                edges[0][i].inclusive != edges[1][k].inclusive)
+                shared[0] = i, shared[1] = k;
+    if (shared[0] < 0)
+        return false;
+
+    const bool neonBlend = first.blendMode != 6 && first.blendMode != 21 &&
+                           first.blendMode != 1 && first.blendMode != 4;
+    for (int t = 0; t < 2; ++t)
+        for (int i = 0; i < 3; ++i)
+        {
+            if (i == shared[t]) continue;
+            const Edge& edge = edges[t][i];
+            if ((edge.a == 0) == (edge.b == 0)) return false;
+            const auto accepted = [&](float value) {
+                return std::isfinite(value) && (first.ccw ? value > 0 : value < 0);
+            };
+            if (edge.a == 0)
+            {
+                // Horizontal edges are constant along a row and monotonic
+                // over rows. Require both extreme pixel centres to be inside.
+                const float fy0 = first.minY + 0.5f;
+                const float fy1 = first.minY + first.rows - 1 + 0.5f;
+                if (!accepted(edge.a * first.sx + edge.b * fy0 + edge.c) ||
+                    !accepted(edge.a * first.sx + edge.b * fy1 + edge.c))
+                    return false;
+            }
+            else
+            {
+                // Vertical edges are constant over rows. Walk the original
+                // rounded recurrence to its last group/tail; a multiply by
+                // the span would change boundary rounding on large targets.
+                const float fy = first.minY + 0.5f;
+                float value = edge.a * first.sx + edge.b * fy + edge.c;
+                if (!accepted(value)) return false;
+                int x = first.minX;
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
+                if (neonBlend)
+                {
+                    for (; x + 4 <= first.maxX + 1; x += 4)
+                    {
+                        const float32x4_t lanes = {0.f, 1.f, 2.f, 3.f};
+                        const float32x4_t values = vmlaq_f32(vdupq_n_f32(value), lanes,
+                                                           vdupq_n_f32(edge.a));
+                        if (!accepted(vminvq_f32(values)) || !accepted(vmaxvq_f32(values)))
+                            return false;
+                        value += edge.a * 4.0f;
+                    }
+                }
+#else
+                (void)neonBlend;
+#endif
+                for (; x <= first.maxX; ++x)
+                {
+                    if (!accepted(value)) return false;
+                    value += edge.a;
+                }
+            }
+        }
+    first.splitUVs = first.A_u != second.A_u || first.B_u != second.B_u ||
+        first.C_u != second.C_u || first.A_v != second.A_v ||
+        first.B_v != second.B_v || first.C_v != second.C_v;
+    if (first.splitUVs)
+    {
+        const Edge& edge = edges[0][shared[0]];
+        first.splitA = edge.a; first.splitB = edge.b; first.splitC = edge.c;
+        first.splitInclusive = edge.inclusive;
+        first.secondAu = second.A_u; first.secondBu = second.B_u; first.secondCu = second.C_u;
+        first.secondAv = second.A_v; first.secondBv = second.B_v; first.secondCv = second.C_v;
+    }
+    first.fullCoverage = true;
+    return true;
 }
 
 void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
@@ -1183,11 +1762,35 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
     const int texH = texture ? texture->height : targetAsTexture->height;
     if (!texData)
         return;
+#ifdef __SWITCH__
+    static bool coordinatePathLogged = false;
+    if (!coordinatePathLogged)
+    {
+        coordinatePathLogged = true;
+        KRKRNS_LOG("[emote] CPU raster: vector texel coordinates (FMA)");
+    }
+#endif
     const bool hasStencil = (maskRowBase != nullptr);
     const int pitch = width;
 
     ColorRGBA uniformColor = {(uint8_t)(uniformColor_[0] * 255), (uint8_t)(uniformColor_[1] * 255),
                               (uint8_t)(uniformColor_[2] * 255), (uint8_t)(uniformColor_[3] * 255)};
+
+    // Kirikiroid2's software RenderManager batches OperateTriangles and
+    // divides rectangular pixel operations into rows with an area cutoff.
+    // Use that task scope here, keeping arbitrary overlapping triangles in
+    // index order within every row. Complementary quad halves also balance
+    // across the same workers instead of waiting at a barrier per triangle.
+    // Keep the existing path when sampling/masking the destination itself:
+    // those reads can depend on triangles completed in other row bands.
+    const bool batchMesh = indexCount > 3 && TVPGetThreadNum() > 1 &&
+                           targetAsTexture != currentTarget_ &&
+                           maskTarget_ != currentTarget_;
+    std::vector<SwBandJob> triangles;
+    if (batchMesh)
+        triangles.reserve(static_cast<size_t>(indexCount / 3));
+    int meshMinY = height, meshEndY = 0;
+    uint64_t meshPixels = 0;
 
     for (int idx = 0; idx + 2 < indexCount; idx += 3)
     {
@@ -1251,6 +1854,7 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
         float df01_dy = b01, df12_dy = b12, df20_dy = b20;
 
         SwBandJob job;
+        job.sourceAliased = targetAsTexture == currentTarget_ || maskTarget_ == currentTarget_;
         job.sx = sampleX;
         job.a01 = a01; job.b01 = b01; job.c01 = c01;
         job.a12 = a12; job.b12 = b12; job.c12 = c12;
@@ -1274,6 +1878,16 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
         job.opacity = opacity;
         job.uniformColor = uniformColor;
         job.texData = texData;
+        job.opaqueTexture = texture && texture->opaquePixels;
+
+        if (batchMesh)
+        {
+            triangles.push_back(job);
+            meshMinY = std::min(meshMinY, minY);
+            meshEndY = std::max(meshEndY, maxY + 1);
+            meshPixels += static_cast<uint64_t>(maxX - minX + 1) * job.rows;
+            continue;
+        }
 
         const int totalRows = job.rows;
         int bandCount = 1;
@@ -1330,5 +1944,108 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
         (void)f01; (void)f12; (void)f20; (void)tu0; (void)tv0;
         (void)df01_dx; (void)df12_dx; (void)df20_dx; (void)df01_dy; (void)df12_dy; (void)df20_dy;
     }
+
+    if (triangles.empty())
+        return;
+
+    if (meshPixels >= 66 * 500 && triangles.size() == 2 &&
+        SwTryMergeRectangle(triangles[0], triangles[1]))
+    {
+        triangles.resize(1);
+#ifdef __SWITCH__
+        static bool rectangleLogged = false;
+        if (!rectangleLogged)
+        {
+            rectangleLogged = true;
+            KRKRNS_LOG("[emote] CPU raster: exact rectangular mesh splitUVs=%d",
+                       triangles[0].splitUVs);
+        }
+#endif
+    }
+
+    const int totalRows = meshEndY - meshMinY;
+#if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
+    std::vector<std::vector<int32_t>> textureCoordinateRows;
+    size_t coordinateCount = 0;
+    constexpr size_t coordinateBudget = 16384; // at most 64 KiB per mesh
+    for (auto& job : triangles)
+    {
+        if (job.B_u != 0.f || job.A_v != 0.f || job.hasStencil || job.sourceAliased ||
+            job.rows < 96 || job.maxX - job.minX + 1 < 64) continue;
+        const size_t count = size_t(job.maxX - job.minX + 1) / 4 * 4;
+        if (count > coordinateBudget - coordinateCount) continue;
+        textureCoordinateRows.emplace_back();
+        SwBuildTextureXs(job, textureCoordinateRows.back());
+        coordinateCount += count;
+    }
+#endif
+    int bandCount = 1;
+    if (totalRows >= 96 && meshPixels >= 66 * 500)
+    {
+        bandCount = std::min<int>(TVPGetThreadNum(), TVPMaxThreadNum);
+        bandCount = std::min(bandCount, totalRows / 48);
+    }
+    if (bandCount <= 1)
+    {
+        for (auto& job : triangles)
+            SwRasterizeBand(job);
+        return;
+    }
+#ifdef __SWITCH__
+    static bool meshBandsLogged = false;
+    if (!meshBandsLogged)
+    {
+        meshBandsLogged = true;
+        KRKRNS_LOG("[emote] CPU raster: ordered mesh row bands triangles=%zu bands=%d",
+                   triangles.size(), bandCount);
+    }
+#endif
+    SwMeshBandJob bands[TVPMaxThreadNum];
+#ifdef __SWITCH__
+    // Bounded samples expose actual worker execution, without logging from
+    // pixel loops or changing the render target or game update interval.
+    static unsigned meshSamples = 0;
+    ++meshSamples;
+    const bool measureBands = (texture && !texture->cpuMeshProfiled) || meshSamples <= 8 ||
+        (meshSamples <= 2048 && meshSamples % 128 == 0);
+    if (texture && measureBands) texture->cpuMeshProfiled = true;
+    const Uint64 meshStart = measureBands ? SDL_GetPerformanceCounter() : 0;
+#endif
+    TVPBeginThreadTask(bandCount);
+    for (int b = 0; b < bandCount; ++b)
+    {
+        bands[b] = {triangles.data(), triangles.size(),
+                    meshMinY + totalRows * b / bandCount,
+                    meshMinY + totalRows * (b + 1) / bandCount};
+#ifdef __SWITCH__
+        bands[b].measure = measureBands;
+#endif
+        TVPExecThreadTask(SwRasterizeMeshBandEntry, &bands[b]);
+    }
+    TVPEndThreadTask();
+#ifdef __SWITCH__
+    if (measureBands)
+    {
+        const Uint64 finish = SDL_GetPerformanceCounter();
+        const double msPerTick = 1000.0 / SDL_GetPerformanceFrequency();
+        const auto& first = triangles[0];
+        const bool rowSample = SwCanDrawRectangleRows(first) || (!first.fullCoverage &&
+            !first.sourceAliased && !first.hasStencil && first.maxX - first.minX + 1 >= 64 &&
+            first.A_v == 0.f && first.blendMode != 1 && first.blendMode != 4 &&
+            first.blendMode != 6 && first.blendMode != 21);
+        KRKRNS_LOG("[emote] mesh sample=%u target=%dx%d texture=%dx%d mode=%d stencil=%d vertices=%d indices=%d boundsPx=%llu bands=%d rect=%d splitUVs=%d opaque=%d rowCopy=%d rowSample=%d xMap=%d opacity=%.3f wall=%.2fms",
+                   meshSamples, width, height, texW, texH, blendMode_, hasStencil,
+                   vertexCount, indexCount, (unsigned long long)meshPixels,
+                   bandCount, triangles[0].fullCoverage, triangles[0].splitUVs,
+                   triangles[0].opaqueTexture, SwCanDrawRectangleRows(triangles[0]),
+                   rowSample, first.textureXs != nullptr, opacity, (finish - meshStart) * msPerTick);
+        for (int b = 0; b < bandCount; ++b)
+            KRKRNS_LOG("[emote] band sample=%u band=%d core=%u start=%.2fms work=%.2fms rows=%d",
+                       meshSamples, b, bands[b].core,
+                       (bands[b].start - meshStart) * msPerTick,
+                       (bands[b].finish - bands[b].start) * msPerTick,
+                       bands[b].endY - bands[b].minY);
+    }
+#endif
 }
 } // namespace krkrsdl3

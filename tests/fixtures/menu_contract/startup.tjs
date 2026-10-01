@@ -3,6 +3,16 @@
 global.__krkrns_game_k2compat = "";
 Scripts.execStorage("romfs:/compat/system/k2compat.tjs");
 
+// Keep the first/MainWindow alive. Invalidating a main Window exits the engine;
+// lifecycle checks below deliberately exercise secondary Windows instead.
+var anchorWindow = new Window();
+anchorWindow.setInnerSize(640, 360);
+anchorWindow.caption = "KRKR NS menu contract";
+var anchorLayer = new Layer(anchorWindow, null);
+anchorLayer.setSize(640, 360); anchorLayer.type = ltOpaque;
+anchorLayer.fillRect(0, 0, 640, 360, 0xff205040);
+anchorLayer.visible = true; anchorWindow.visible = true;
+
 var menuChecks = 0;
 function menuAssert(value, label) {
     if (!value) throw new Exception("MENU CONTRACT FAIL: " + label);
@@ -73,13 +83,93 @@ middle.shortcut = 0;
 menuAssert(typeof(middle.shortcut) == "String" && middle.shortcut == "0",
            "shortcut keeps the string property contract");
 
-Debug.message("[menu-contract] COMPLETE " + menuChecks + " checks; script model only");
-
 var menuWindow = new Window();
-menuWindow.setInnerSize(320, 180);
+menuWindow.setInnerSize(640, 360);
 menuWindow.caption = "KRKR NS menu contract";
 var menuLayer = new Layer(menuWindow, null);
-menuLayer.setSize(320, 180);
-menuLayer.fillRect(0, 0, 320, 180, 0xff205040);
+menuLayer.setSize(640, 360);
+menuLayer.type = ltOpaque;
+menuLayer.fillRect(0, 0, 640, 360, 0x205040);
 menuLayer.visible = true;
 menuWindow.visible = true;
+
+var secondWindow = new Window();
+menuAssert(menuWindow.menu !== secondWindow.menu, "each Window owns a separate root");
+menuAssert(menuWindow.menu.window === menuWindow && menuWindow.menu.root === menuWindow.menu,
+           "root resolves its owning Window");
+var scriptSubclassClicks = 0;
+class ScriptMenuSubclass extends MenuItem {
+    function ScriptMenuSubclass(owner, caption) { super.MenuItem(owner, caption); }
+    function onClick() { scriptSubclassClicks++; }
+}
+var scriptSubclass = new ScriptMenuSubclass(null, "Script subclass");
+menuWindow.menu.add(scriptSubclass); scriptSubclass.fireClick();
+menuAssert(scriptSubclass.caption == "Script subclass" && scriptSubclass.window === menuWindow &&
+           scriptSubclassClicks == 1, "script subclass preserves super.MenuItem and overridden onClick");
+menuWindow.menu.remove(scriptSubclass); invalidate scriptSubclass;
+var cachedChildren = menuWindow.menu.children;
+menuAssert(cachedChildren === menuWindow.menu.children, "children property keeps Array identity");
+var a = new MenuItem(null, "A"), b = new MenuItem(null, "B"), c = new MenuItem(null, "C");
+menuWindow.menu.add(a); menuWindow.menu.add(b); menuWindow.menu.add(c);
+c.index = 0;
+menuAssert(menuWindow.menu.children[0] === c && a.index == 1 && b.index == 2,
+           "index setter reorders the sibling tree");
+menuAssert(cachedChildren === menuWindow.menu.children && cachedChildren.count == 3 && cachedChildren[0] === c,
+           "tree mutations refresh the cached Array in place");
+menuWindow.menu.add(a);
+menuAssert(menuWindow.menu.children.count == 3 && a.index == 1, "duplicate add preserves index");
+secondWindow.menu.add(a);
+menuAssert(menuWindow.menu.children.count == 2 && secondWindow.menu.children.count == 1 &&
+           a.parent === secondWindow.menu && a.window === secondWindow,
+           "cross-parent add detaches old parent and resolves new Window");
+var cycleRejected = false;
+try { c.add(menuWindow.menu); } catch (e) { cycleRejected = true; }
+menuAssert(cycleRejected && c.parent === menuWindow.menu, "cycles are rejected without changing the tree");
+b.radio = true; c.radio = true; b.group = 3; c.group = 3;
+b.checked = true; c.checked = true;
+menuAssert(c.checked && !b.checked, "checking radio unchecks same-group siblings");
+b.group = 4; b.checked = true;
+menuAssert(b.checked && c.checked, "different radio groups keep their checks");
+
+var clicked = 0, viewClosedAtClick = false;
+var action = new Dictionary();
+action.action = function(event) {
+    if (event.type != "onClick" || event.target !== choice) throw new Exception("script action event envelope mismatch");
+    clicked++; viewClosedAtClick = !global.__krkrnsMenuActive;
+} incontextof global;
+var choice = new MenuItem(action, "Choice");
+choice.shortcut = "Ctrl+S";
+menuWindow.menu.add(choice);
+choice.fireClick();
+menuAssert(clicked == 1, "action-owner action receives onClick event and target");
+choice.fireClick();
+menuAssert(clicked == 2, "successive fireClick calls each deliver one event");
+menuWindow.menu.enabled = false; choice.fireClick();
+menuAssert(clicked == 2, "disabled ancestor suppresses clicks");
+menuWindow.menu.enabled = true;
+menuAssert(global.__krkrnsMenuShortcut(115, 0x0040, menuWindow) && clicked == 3,
+           "Ctrl+S accelerator delivers one action-owner click");
+menuAssert(!global.__krkrnsMenuShortcut(115, 0, menuWindow) && clicked == 3,
+           "unmodified key does not match Ctrl accelerator");
+choice.visible = false;
+menuAssert(!global.__krkrnsMenuShortcut(115, 0x0040, menuWindow) && clicked == 3,
+           "hidden item suppresses accelerators");
+choice.visible = true;
+
+menuWindow.menu.remove(b); menuWindow.menu.remove(c);
+choice.checked = true;
+menuAssert(menuWindow.menu.popup(0, 20, 20) == 1 && global.__krkrnsMenuActive,
+           "popup opens an actual layer view");
+global.__krkrnsMenuInput("keyDown", 13, 0, 0);
+menuAssert(clicked == 4 && viewClosedAtClick && choice.checked && !global.__krkrnsMenuActive,
+           "selection closes first and preserves script-controlled checked state");
+menuWindow.menu.popup(0, 20, 20);
+global.__krkrnsMenuInput("keyDown", 27, 0, 0);
+menuAssert(clicked == 4 && !global.__krkrnsMenuActive, "Escape cancels without click");
+menuWindow.menu.popup(0, 20, 20);
+invalidate menuWindow;
+menuAssert(!global.__krkrnsMenuActive, "Window invalidation closes its popup");
+invalidate secondWindow;
+Debug.message("[menu-contract] COMPLETE " + menuChecks + " checks; script tree and layer popup");
+
+anchorLayer.fillRect(0, 0, 640, 360, 0xff205040);

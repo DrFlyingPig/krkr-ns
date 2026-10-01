@@ -83,7 +83,7 @@ protected:
 	virtual bool CanDeliverEvents() const = 0; // must be implemented in each platforms
 
 protected:
-	void AddChild(tTJSNI_BaseMenuItem *item);
+	void AddChild(tTJSNI_BaseMenuItem *item, tjs_int index = -1);
 	void RemoveChild(tTJSNI_BaseMenuItem *item);
 
 public:
@@ -141,6 +141,8 @@ extern tTJSNativeClass * TVPCreateNativeClass_MenuItem();
 
 //---------------------------------------------------------------------------
 extern iTJSDispatch2 * TVPCreateMenuItemObject(iTJSDispatch2 * window);
+extern void TVPRegisterMenuPlugin();
+extern void TVPUnregisterMenuPlugin();
 //---------------------------------------------------------------------------
 
 

@@ -37,31 +37,81 @@ class iTJSDispatch2 {
 public:
     tTJSNI_Window *Window = nullptr;
     bool ThrowFinalize = false;
+    bool DeleteOnZero = false;
+    int RefCount = 1;
     int Finalizes = 0;
+    void AddRef() { ++RefCount; }
+    void Release();
     void Invalidate();
+};
+struct WindowLifetime {
+    bool Alive = true, DestroyedDuringCleanup = false, FallbackComplete = false;
+    int NativeCalls = 0, RefCountAfterRootRelease = 0, Destructions = 0;
+};
+class tTJSVariant {
+    iTJSDispatch2 *Object, *ObjThis;
+public:
+    tTJSVariant(iTJSDispatch2 *object, iTJSDispatch2 *objthis)
+        : Object(object), ObjThis(objthis) {
+        if(Object) Object->AddRef();
+        if(ObjThis) ObjThis->AddRef();
+    }
+    ~tTJSVariant() {
+        if(Object) Object->Release();
+        if(ObjThis) ObjThis->Release();
+    }
+    tTJSVariant(const tTJSVariant&) = delete;
+    tTJSVariant& operator=(const tTJSVariant&) = delete;
 };
 class tTJSNI_Window {
 public:
     iTJSDispatch2 *Owner = nullptr;
     TTVPWindowForm *Form = new TVPWindowWindow;
     bool ThrowNativeChild = false, ThrowBeforeUnregister = false;
+    bool DropRootReference = false;
+    WindowLifetime *Lifetime = nullptr;
     int Invalidates = 0;
     tTJSNI_Window() {
         static_cast<TVPWindowWindow*>(Form)->TJSNativeInstance = this;
         Registry.push_back(this);
     }
+    ~tTJSNI_Window() {
+        Registry.erase(std::remove(Registry.begin(), Registry.end(), this), Registry.end());
+        if(Lifetime) {
+            Lifetime->Alive = false;
+            Lifetime->DestroyedDuringCleanup = !Lifetime->FallbackComplete;
+            ++Lifetime->Destructions;
+        }
+    }
     iTJSDispatch2 *GetOwnerNoAddRef() { return Owner; }
     TTVPWindowForm *GetForm() { return Form; }
-    void NotifyWindowClose() { Form = nullptr; }
+    void NotifyWindowClose() {
+        Form = nullptr;
+        if(Lifetime) Lifetime->FallbackComplete = true;
+    }
     void Invalidate() {
         ++Invalidates;
+        if(Lifetime) ++Lifetime->NativeCalls;
         if (ThrowBeforeUnregister) throw std::runtime_error("native failure before unregister");
+        if(DropRootReference) {
+            DropRootReference = false;
+            // The root was the last owner of this Window before the production
+            // guard took references. Its invalidation releases that reference.
+            Owner->Release();
+            if(Lifetime) Lifetime->RefCountAfterRootRelease = Owner->RefCount;
+        }
         Registry.erase(std::remove(Registry.begin(), Registry.end(), this), Registry.end());
         if (ThrowNativeChild) throw std::runtime_error("child invalidation failed");
         if (Form) Form->InvalidateClose();
         Form = nullptr;
     }
 };
+void iTJSDispatch2::Release() {
+    if(--RefCount == 0 && DeleteOnZero) {
+        delete Window;
+        delete this;
+    }
+}
 void iTJSDispatch2::Invalidate() {
     ++Finalizes;
     if (ThrowFinalize) throw std::runtime_error("extractTrigger is already invalidated");
@@ -122,6 +172,28 @@ int main() {
                 "aliased form pointers cannot cause a second deletion");
 
         Reset();
+        WindowLifetime menuRootLifetime;
+        auto *menuRootWindow = new tTJSNI_Window;
+        auto *menuRootOwner = new iTJSDispatch2;
+        menuRootWindow->Owner = menuRootOwner; menuRootOwner->Window = menuRootWindow;
+        menuRootOwner->DeleteOnZero = true;
+        menuRootOwner->ThrowFinalize = true;
+        menuRootWindow->DropRootReference = true;
+        menuRootWindow->ThrowNativeChild = true;
+        menuRootWindow->Lifetime = &menuRootLifetime;
+        // RefCount == 1 models a game that dropped its Window reference: the
+        // menu root alone retains the dispatch. A failed script finalizer sends
+        // production cleanup through native fallback, which breaks that cycle.
+        krkrsdl2_release_leftover_windows();
+        Require(menuRootLifetime.RefCountAfterRootRelease == 2,
+                "the real dispatch guard retains both closure references after root release");
+        Require(menuRootLifetime.FallbackComplete && !menuRootLifetime.DestroyedDuringCleanup,
+                "Window stays alive through fallback GetForm and NotifyWindowClose");
+        Require(!menuRootLifetime.Alive && menuRootLifetime.Destructions == 1 &&
+                menuRootLifetime.NativeCalls == 1 && Registry.empty() && FormsFreed == 1,
+                "the guard releases and destroys Window exactly once after fallback completes");
+
+        Reset();
         tTJSNI_Window registeredChildFailure;
         iTJSDispatch2 registeredChildOwner;
         registeredChildFailure.Owner = &registeredChildOwner;
@@ -155,7 +227,7 @@ int main() {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;
     }
-    std::cout << "PASS: normal cleanup, failed finalize, failed native child, ownerless window, and no-progress bound\n";
+    std::cout << "PASS: normal cleanup, failed finalize, menu-root lifetime, failed native child, ownerless window, and no-progress bound\n";
 }
 '''
 

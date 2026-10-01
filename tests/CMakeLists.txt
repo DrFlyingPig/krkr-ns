@@ -91,10 +91,20 @@ if(MSVC)
     target_compile_options(movie_audio_queue_test PRIVATE /EHsc)
 endif()
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_test(NAME draw_thread_failure COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/draw_thread_failure_test.py"
+    --cmake "${CMAKE_COMMAND}"
+    --sdl-dir "${SDL2_DIR}"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/draw-thread-failure")
+set_tests_properties(draw_thread_failure PROPERTIES TIMEOUT 300)
 add_test(NAME window_cleanup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/window_cleanup_test.py"
     --cmake "${CMAKE_COMMAND}"
     --output-dir "${CMAKE_CURRENT_BINARY_DIR}/window-cleanup")
+add_test(NAME window_construction COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/window_construction_test.py"
+    --cmake "${CMAKE_COMMAND}"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/window-construction")
 if(WIN32)
     add_custom_command(TARGET bitmap_bridge_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E
         copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:bitmap_bridge_test>)

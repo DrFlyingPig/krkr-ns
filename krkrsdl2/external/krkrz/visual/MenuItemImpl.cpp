@@ -18,96 +18,65 @@
 #include "Application.h"
 #include "tjsDictionary.h"
 #include "ScriptMgnIntf.h"
-#include <map>
-
-static std::map<tTVInteger, iTJSDispatch2*> MENU_LIST;
-static void AddMenuDispatch(tTVInteger hWnd, iTJSDispatch2* menu) {
-	MENU_LIST.insert(std::map<tTVInteger, iTJSDispatch2*>::value_type(hWnd, menu));
-}
-iTJSDispatch2* TVPGetMenuDispatch(tTVInteger hWnd) {
-	std::map<tTVInteger, iTJSDispatch2*>::iterator i = MENU_LIST.find(hWnd);
-	if (i != MENU_LIST.end()) {
-		return i->second;
-	}
-	return NULL;
-}
-static void DelMenuDispatch(tTVInteger hWnd) {
-	MENU_LIST.erase(hWnd);
-}
-static bool _IsWindow(tTVInteger hWnd) {
-	tjs_int count = TVPGetWindowCount();
-	for (tjs_int i = 0; i < count; ++i) {
-		if (TVPGetWindowListAt(i) == (tTJSNI_Window*)(hWnd))
-			return true;
-	}
-	return false;
+static void TVPEnsureMenuPopupScript()
+{
+    tTJS *engine = TVPGetScriptEngine();
+    if(!engine) return;
+    iTJSDispatch2 *global = engine->GetGlobalNoAddRef();
+    tTJSVariant helper;
+    if(TJS_FAILED(global->PropGet(0, TJS_W("__krkrnsMenuPopup"), NULL,
+        &helper, global)) || helper.Type() != tvtObject || !helper.AsObjectNoAddRef())
+        TVPExecuteStorage(TJS_W("file://?/romfs:/compat/system/menu_popup.tjs"));
 }
 
-static void UpdateMenuList() {
-	std::map<tTVInteger, iTJSDispatch2*>::iterator i = MENU_LIST.begin();
-	for (; i != MENU_LIST.end();) {
-		tTVInteger hWnd = i->first;
-		bool exist = _IsWindow(hWnd);
-		if (exist == false) {
-			// 既になくなったWindow
-			std::map<tTVInteger, iTJSDispatch2*>::iterator target = i;
-			i++;
-			iTJSDispatch2* menu = target->second;
-			MENU_LIST.erase(target);
-			menu->Release();
-			//TVPDeleteAcceleratorKeyTable(hWnd);
-		} else {
-			i++;
-		}
-	}
-}
-
+// Keep menu roots in their Window instance and class objects in the current
+// script global. Neither may survive an engine restart in a process-wide map.
 class WindowMenuProperty : public tTJSDispatch {
-	tjs_error TJS_INTF_METHOD PropGet(tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint, tTJSVariant *result, iTJSDispatch2 *objthis) {
-		tTJSNI_Window *win = NULL;
-		if (TJS_FAILED(objthis->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
-			tTJSNC_Window::ClassID, (iTJSNativeInstance**)&win)) || !win) {
-			return TJS_E_INVALIDOBJECT;
-		}
-		tTVInteger hWnd = (tTVInteger)(void*)win;
-		iTJSDispatch2* menu = TVPGetMenuDispatch(hWnd);
-		if (menu == NULL) {
-			UpdateMenuList();
-			menu = TVPCreateMenuItemObject(objthis);
-			AddMenuDispatch(hWnd, menu);
-		}
-		*result = tTJSVariant(menu, menu);
-		return TJS_S_OK;
-	}
-	tjs_error TJS_INTF_METHOD PropSet(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint, const tTJSVariant *param, iTJSDispatch2 *objthis) {
-		return TJS_E_ACCESSDENYED;
-	}
-} *gWindowMenuProperty;
-
-// WindowEx-era implementations also expose the main window through
-// Window.mainWindow, and the shipped Kirikiroid2 compat layers read it
-// back (their stayOnTop property does `Window.mainWindow...`).  The
-// native static declaration in WindowIntf.cpp is not visible through that
-// lookup, so the Window class object carries this property dispatch as
-// well -- the same mechanism as the `menu` member above.
-extern tTJSNI_Window * TVPMainWindow;
-class WindowMainWindowProperty : public tTJSDispatch {
-	tjs_error TJS_INTF_METHOD PropGet(tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint, tTJSVariant *result, iTJSDispatch2 *objthis) {
-		if (result) {
-			if (TVPMainWindow) {
-				iTJSDispatch2 *dsp = TVPMainWindow->GetOwnerNoAddRef();
-				*result = tTJSVariant(dsp, dsp);
-			} else {
-				*result = tTJSVariant((iTJSDispatch2*)NULL);
-			}
-		}
-		return TJS_S_OK;
-	}
-	tjs_error TJS_INTF_METHOD PropSet(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint, const tTJSVariant *param, iTJSDispatch2 *objthis) {
-		return TJS_E_ACCESSDENYED;
-	}
+    tjs_error TJS_INTF_METHOD PropGet(tjs_uint32, const tjs_char *, tjs_uint32 *,
+        tTJSVariant *result, iTJSDispatch2 *objthis) {
+        if(!objthis) return TJS_E_INVALIDOBJECT;
+        tTJSNI_Window *window = NULL;
+        if(TJS_FAILED(objthis->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+            tTJSNC_Window::ClassID, (iTJSNativeInstance**)&window)) || !window)
+            return TJS_E_INVALIDOBJECT;
+        tTJSVariant value;
+        if(TJS_FAILED(objthis->PropGet(TJS_MEMBERMUSTEXIST,
+            TJS_W("_krkrnsNativeMenu"), NULL, &value, objthis)) ||
+            value.Type() != tvtObject || !value.AsObjectNoAddRef() ||
+            value.AsObjectNoAddRef()->IsValid(0, NULL, NULL,
+                value.AsObjectNoAddRef()) != TJS_S_TRUE) {
+            iTJSDispatch2 *menu = TVPCreateMenuItemObject(objthis);
+            value = tTJSVariant(menu, menu);
+            menu->Release();
+            tjs_error hr = objthis->PropSet(TJS_MEMBERENSURE,
+                TJS_W("_krkrnsNativeMenu"), NULL, &value, objthis);
+            if(TJS_FAILED(hr)) return hr;
+        }
+        if(result) *result = value;
+        return TJS_S_OK;
+    }
+    tjs_error TJS_INTF_METHOD PropSet(tjs_uint32, const tjs_char *, tjs_uint32 *,
+        const tTJSVariant *, iTJSDispatch2 *) {
+        return TJS_E_ACCESSDENYED;
+    }
 };
-static WindowMainWindowProperty * gWindowMainWindowProperty = NULL;
+
+// This dispatch owns its table together with the native MenuItem class.
+class MenuShortcutProperty : public tTJSDispatch {
+    iTJSDispatch2 *Table;
+public:
+    explicit MenuShortcutProperty(iTJSDispatch2 *table) : Table(table) {}
+    ~MenuShortcutProperty() { Table->Release(); }
+    tjs_error TJS_INTF_METHOD PropGet(tjs_uint32, const tjs_char *, tjs_uint32 *,
+        tTJSVariant *result, iTJSDispatch2 *) {
+        if(result) *result = tTJSVariant(Table, Table);
+        return TJS_S_OK;
+    }
+    tjs_error TJS_INTF_METHOD PropSet(tjs_uint32, const tjs_char *, tjs_uint32 *,
+        const tTJSVariant *, iTJSDispatch2 *) {
+        return TJS_E_ACCESSDENYED;
+    }
+};
 
 //---------------------------------------------------------------------------
 // tTJSNI_MenuItem
@@ -197,20 +166,16 @@ void tTJSNI_MenuItem::Add(tTJSNI_MenuItem * item)
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::Insert(tTJSNI_MenuItem *item, tjs_int index)
 {
-	// Public indices name insertion positions; -1 is only Add's sentinel.
-	if(index < 0 || index > static_cast<tjs_int>(Children.size()))
-		TVPThrowExceptionMessage(TJS_W("Menu item index out of range."));
-// 	if(MenuItem && item->MenuItem)
-// 	{
-// 		MenuItem->Insert(index, item->MenuItem);
-	if (Children.Add(item, index))
-	{
-		ChildrenArrayValid = false;
-		if (item->Owner) item->Owner->AddRef();
-		item->Parent = this;
-	}
-		//AddChild(item);
-	//}
+    if(!Owner || !item || !item->Owner)
+        TVPThrowExceptionMessage(TJS_W("Cannot attach to an invalid menu item."));
+    if(index < 0 || index > static_cast<tjs_int>(Children.size()))
+        TVPThrowExceptionMessage(TJS_W("Menu item index out of range."));
+    if(item->Parent == this) {
+        // An insertion at the end of the same tree means its last position.
+        item->SetIndex(std::min(index, static_cast<tjs_int>(Children.size()) - 1));
+        return;
+    }
+    AddChild(item, index);
 }
 //---------------------------------------------------------------------------
 void tTJSNI_MenuItem::Remove(tTJSNI_MenuItem *item)
@@ -363,93 +328,29 @@ bool tTJSNI_MenuItem::GetVisible() const
 // 	if(Window) return Window->GetMenuBarVisible(); else return MenuItem->getVisible();
 }
 
-void TVPShowPopMenu(tTJSNI_MenuItem* menu);
-// This port has no menu UI: the reference implementation renders the popup
-// through its platform layer.  Keep the entry point as a no-op so the TJS
-// model (popup() callers) stays valid.
-void TVPShowPopMenu(tTJSNI_MenuItem* menu) { (void)menu; }
-
 //---------------------------------------------------------------------------
 tjs_int tTJSNI_MenuItem::TrackPopup(tjs_uint32 flags, tjs_int x, tjs_int y) const
 {
-	//if (!MenuItem) return 0;
-	// TODO
-	TVPShowPopMenu((tTJSNI_MenuItem*)this);
-	return 1;
-// 
-// 	HWND  hWindow;
-// 	if (GetRootMenuItem() && GetRootMenuItem()->GetWindow()) {
-// 		hWindow = GetRootMenuItem()->GetWindow()->GetMenuOwnerWindowHandle();
-// 	} else {
-// 		return 0;
-// 	}
-// 	HMENU hMenuItem = GetMenuItemHandleForPlugin();
-// 
-// 	// we assume where that x and y are in client coordinates.
-// 	// TrackPopupMenuEx requires screen coordinates, so here converts them.
-// 	POINT scrPoint;	// screen
-// 	scrPoint.x = x;
-// 	scrPoint.y = y;
-// 	BOOL rvScr = ::ClientToScreen(hWindow, &scrPoint);
-// 	if (!rvScr)
-// 	{
-// 		// TODO
-// 	}
-// 
-// 	BOOL rvPopup = TrackPopupMenuEx(hMenuItem, flags, scrPoint.x, scrPoint.y, hWindow, NULL);
-// 	if (!rvPopup)
-// 	{
-// 		// TODO
-// 		// should raise an exception when the API fails
-// 	}
-// 
-// 	return rvPopup;
-}
-
-
-static iTJSDispatch2* textToKeycodeMap = nullptr;
-static iTJSDispatch2* keycodeToTextList = nullptr;
-
-static bool SetShortCutKeyCode(ttstr text, int key, bool force) {
-	tTJSVariant vtext(text);
-	tTJSVariant vkey(key);
-
-	text.ToLowerCase();
-	if (TJS_FAILED(textToKeycodeMap->PropSet(TJS_MEMBERENSURE, text.c_str(), nullptr, &vkey, textToKeycodeMap)))
-		return false;
-	if (force == false) {
-		tTJSVariant var;
-		keycodeToTextList->PropGetByNum(0, key, &var, keycodeToTextList);
-		if (var.Type() == tvtString) return true;
-	}
-	return TJS_SUCCEEDED(keycodeToTextList->PropSetByNum(TJS_MEMBERENSURE, key, &vtext, keycodeToTextList));
-}
-
-static void CreateShortCutKeyCodeTable() {
-	textToKeycodeMap = TJSCreateDictionaryObject();
-	keycodeToTextList = TJSCreateArrayObject();
-	if (textToKeycodeMap == nullptr || keycodeToTextList == nullptr) return;
-#if 0
-	tjs_char tempKeyText[32];
-	for (int key = 8; key <= 255; key++) {
-		int code = (::MapVirtualKey(key, 0) << 16) | (1 << 25);
-		if (::GetKeyNameText(code, tempKeyText, 32) > 0) {
-			ttstr text(tempKeyText);
-			// special for NumPad key
-			if (TJS_strnicmp(text.c_str(), TJS_W("Num "), 4) == 0) {
-				bool numpad = (key >= VK_NUMPAD0 && key <= VK_DIVIDE);
-				if (!numpad && ::GetKeyNameText(code | (1 << 24), tempKeyText, 32) > 0) {
-					text = tempKeyText;
-				}
-			}
-			SetShortCutKeyCode(text, key, true);
-		}
-	}
-#endif
-
-	// 吉里吉里２互換用ショートカット文字列
-	// The three default shortcut-key mappings of the reference are dropped:
-	// the win32 VK_* constants and SetShortCutKeyCode helper are not carried here.
+    if(!Owner || !CanDeliverEvents()) return 0;
+    tTJS *engine = TVPGetScriptEngine();
+    if(!engine) return 0;
+    iTJSDispatch2 *global = engine->GetGlobalNoAddRef();
+    tTJSVariant helper;
+    if(TJS_FAILED(global->PropGet(0, TJS_W("__krkrnsMenuPopup"), NULL,
+        &helper, global)) || helper.Type() != tvtObject || !helper.AsObjectNoAddRef()) {
+        TVPEnsureMenuPopupScript();
+        if(TJS_FAILED(global->PropGet(0, TJS_W("__krkrnsMenuPopup"), NULL,
+            &helper, global)) || helper.Type() != tvtObject || !helper.AsObjectNoAddRef())
+            return 0;
+    }
+    tTJSVariant args[] = {tTJSVariant(Owner, Owner), tTJSVariant((tjs_int64)flags),
+        tTJSVariant(x), tTJSVariant(y)};
+    tTJSVariant *params[] = {args, args + 1, args + 2, args + 3};
+    tTJSVariant result;
+    tjs_error hr = helper.AsObjectClosureNoAddRef().FuncCall(0, NULL, NULL,
+        &result, 4, params, global);
+    if(TJS_FAILED(hr)) return 0;
+    return result.Type() == tvtVoid ? 1 : (tjs_int)result;
 }
 
 //---------------------------------------------------------------------------
@@ -486,83 +387,141 @@ TJS_BEGIN_NATIVE_PROP_DECL(HMENU)
 }
 TJS_END_NATIVE_PROP_DECL_OUTER(cls, HMENU)
 //---------------------------------------------------------------------------
-TJS_BEGIN_NATIVE_PROP_DECL(textToKeycode)
+TJS_BEGIN_NATIVE_PROP_DECL(__krkrnsNativeMenu)
 {
-	TJS_BEGIN_NATIVE_PROP_GETTER
-	{
-		if (result) *result = tTJSVariant(textToKeycodeMap, textToKeycodeMap);
-		return TJS_S_OK;
-	}
-	TJS_END_NATIVE_PROP_GETTER
-
-	TJS_DENY_NATIVE_PROP_SETTER
+    TJS_BEGIN_NATIVE_PROP_GETTER
+    {
+        if(result) *result = true;
+        return TJS_S_OK;
+    }
+    TJS_END_NATIVE_PROP_GETTER
+    TJS_DENY_NATIVE_PROP_SETTER
 }
-TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, textToKeycode)
-//---------------------------------------------------------------------------
-TJS_BEGIN_NATIVE_PROP_DECL(keycodeToText)
+TJS_END_NATIVE_PROP_DECL_OUTER(cls, __krkrnsNativeMenu)
+    iTJSDispatch2 *textToKeycode = TJSCreateDictionaryObject();
+    iTJSDispatch2 *keycodeToText = TJSCreateArrayObject();
+    // The platform key names use Kirikiri virtual-key values. Modifiers are
+    // interpreted by the popup/accelerator adapter, not by this table.
+    auto addKey = [&](const ttstr &name, tjs_int key) {
+        ttstr lower = name.AsLowerCase();
+        tTJSVariant code(key), text(name);
+        textToKeycode->PropSet(TJS_MEMBERENSURE, lower.c_str(), NULL, &code, textToKeycode);
+        keycodeToText->PropSetByNum(TJS_MEMBERENSURE, key, &text, keycodeToText);
+    };
+    for(tjs_int key = '0'; key <= '9'; ++key) {
+        tjs_char text[] = {(tjs_char)key, 0};
+        addKey(ttstr(text), key);
+    }
+    for(tjs_int key = 'A'; key <= 'Z'; ++key) {
+        tjs_char text[] = {(tjs_char)key, 0};
+        addKey(ttstr(text), key);
+    }
+    for(tjs_int key = 1; key <= 24; ++key)
+        addKey(ttstr(TJS_W("F")) + ttstr(key), 0x6f + key);
+    const struct { const tjs_char *name; tjs_int key; } keys[] = {
+        {TJS_W("Backspace"), 8}, {TJS_W("Tab"), 9}, {TJS_W("Enter"), 13},
+        {TJS_W("Escape"), 27}, {TJS_W("Space"), 32}, {TJS_W("PageUp"), 33},
+        {TJS_W("PageDown"), 34}, {TJS_W("End"), 35}, {TJS_W("Home"), 36},
+        {TJS_W("Left"), 37}, {TJS_W("Up"), 38}, {TJS_W("Right"), 39},
+        {TJS_W("Down"), 40}, {TJS_W("Insert"), 45}, {TJS_W("Delete"), 46}
+    };
+    for(const auto &key : keys) addKey(ttstr(key.name), key.key);
+    for(tjs_int digit = 0; digit <= 9; ++digit)
+        addKey(ttstr(TJS_W("Num ")) + ttstr(digit), 0x60 + digit);
+    const struct { const tjs_char *name; tjs_int key; } aliases[] = {
+        {TJS_W("BkSp"), 8}, {TJS_W("Back"), 8}, {TJS_W("Return"), 13},
+        {TJS_W("Esc"), 27}, {TJS_W("PgUp"), 33}, {TJS_W("PgDn"), 34},
+        {TJS_W("Ins"), 45}, {TJS_W("Del"), 46}, {TJS_W("Num *"), 106},
+        {TJS_W("Num +"), 107}, {TJS_W("Num -"), 109}, {TJS_W("Num ."), 110},
+        {TJS_W("Num /"), 111}, {TJS_W(";"), 186}, {TJS_W("="), 187},
+        {TJS_W(","), 188}, {TJS_W("-"), 189}, {TJS_W("."), 190},
+        {TJS_W("/"), 191}, {TJS_W("`"), 192}, {TJS_W("["), 219},
+        {TJS_W("\\"), 220}, {TJS_W("]"), 221}, {TJS_W("'"), 222}
+    };
+    for(const auto &alias : aliases) {
+        tTJSVariant key(alias.key);
+        ttstr name(alias.name);
+        name.ToLowerCase();
+        textToKeycode->PropSet(TJS_MEMBERENSURE, name.c_str(), NULL, &key, textToKeycode);
+        tTJSVariant existing;
+        keycodeToText->PropGetByNum(0, alias.key, &existing, keycodeToText);
+        if(existing.Type() != tvtString) {
+            tTJSVariant text(alias.name);
+            keycodeToText->PropSetByNum(TJS_MEMBERENSURE, alias.key, &text, keycodeToText);
+        }
+    }
+    cls->RegisterNCM(TJS_W("textToKeycode"), new MenuShortcutProperty(textToKeycode),
+        TJS_W("MenuItem"), nitProperty, TJS_STATICMEMBER);
+    cls->RegisterNCM(TJS_W("keycodeToText"), new MenuShortcutProperty(keycodeToText),
+        TJS_W("MenuItem"), nitProperty, TJS_STATICMEMBER);
+    return cls;
+}
+
+void TVPRegisterMenuPlugin()
 {
-	TJS_BEGIN_NATIVE_PROP_GETTER
-	{
-	if (result) *result = tTJSVariant(keycodeToTextList, keycodeToTextList);
-	return TJS_S_OK;
+    tTJS *engine = TVPGetScriptEngine();
+    if(!engine) return;
+    iTJSDispatch2 *global = engine->GetGlobalNoAddRef();
+    tTJSVariant menuClass;
+    if(TJS_SUCCEEDED(global->PropGet(0, TJS_W("__krkrnsNativeMenuClass"), NULL,
+        &menuClass, global)) && menuClass.Type() == tvtObject && menuClass.AsObjectNoAddRef() &&
+        menuClass.AsObjectNoAddRef()->IsValid(0, NULL, NULL, menuClass.AsObjectNoAddRef()) == TJS_S_TRUE) {
+        TVPEnsureMenuPopupScript();
+        return;
+    }
+    tTJSVariant windowClass;
+    if(TJS_FAILED(global->PropGet(0, TJS_W("Window"), NULL, &windowClass, global)) ||
+        windowClass.Type() != tvtObject || !windowClass.AsObjectNoAddRef())
+        TVPThrowExceptionMessage(TVPInternalError, TJS_W("TVPRegisterMenuPlugin"));
+    iTJSDispatch2 *cls = TVPCreateNativeClass_MenuItem();
+    menuClass = tTJSVariant(cls);
+    cls->Release();
+    iTJSDispatch2 *property = new WindowMenuProperty();
+    tTJSVariant menuProperty(property);
+    property->Release();
+    const tjs_uint32 flags = TJS_MEMBERENSURE | TJS_IGNOREPROP;
+    global->PropSet(flags, TJS_W("__krkrnsNativeMenuClass"), NULL, &menuClass, global);
+    global->PropSet(flags, TJS_W("__krkrnsNativeMenuProperty"), NULL, &menuProperty, global);
+    global->PropSet(flags, TJS_W("MenuItem"), NULL, &menuClass, global);
+    iTJSDispatch2 *window = windowClass.AsObjectNoAddRef();
+    window->PropSet(flags, TJS_W("menu"), NULL, &menuProperty, window);
+    // Native Window construction copies its class members. Apply an explicitly
+    // linked menu.dll to windows which were already constructed as well.
+    for(tjs_int i = 0; i < TVPGetWindowCount(); ++i) {
+        iTJSDispatch2 *owner = TVPGetWindowListAt(i)->GetOwnerNoAddRef();
+        if(owner) owner->PropSet(flags, TJS_W("menu"), NULL, &menuProperty, owner);
+    }
+    // Install the accelerator bridge when menu.dll is explicitly linked, even
+    // if the title uses shortcuts before opening its first popup.
+    TVPEnsureMenuPopupScript();
 }
-	TJS_END_NATIVE_PROP_GETTER
 
-		TJS_DENY_NATIVE_PROP_SETTER
+void TVPUnregisterMenuPlugin()
+{
+    tTJS *engine = TVPGetScriptEngine();
+    if(!engine) return;
+    iTJSDispatch2 *global = engine->GetGlobalNoAddRef();
+    tTJSVariant menuClass, menuProperty;
+    if(TJS_FAILED(global->PropGet(0, TJS_W("__krkrnsNativeMenuClass"), NULL,
+        &menuClass, global))) return;
+    global->PropGet(0, TJS_W("__krkrnsNativeMenuProperty"), NULL, &menuProperty, global);
+    auto deleteIfSame = [](iTJSDispatch2 *owner, const tjs_char *name,
+        const tTJSVariant &expected) {
+        tTJSVariant value;
+        if(expected.Type() == tvtObject && TJS_SUCCEEDED(owner->PropGet(TJS_IGNOREPROP,
+            name, NULL, &value, owner)) && value.Type() == tvtObject &&
+            value.AsObjectNoAddRef() == expected.AsObjectNoAddRef())
+            owner->DeleteMember(0, name, NULL, owner);
+    };
+    deleteIfSame(global, TJS_W("MenuItem"), menuClass);
+    tTJSVariant windowClass;
+    if(TJS_SUCCEEDED(global->PropGet(0, TJS_W("Window"), NULL, &windowClass, global)) &&
+        windowClass.Type() == tvtObject && windowClass.AsObjectNoAddRef())
+        deleteIfSame(windowClass.AsObjectNoAddRef(), TJS_W("menu"), menuProperty);
+    for(tjs_int i = 0; i < TVPGetWindowCount(); ++i) {
+        iTJSDispatch2 *owner = TVPGetWindowListAt(i)->GetOwnerNoAddRef();
+        if(owner) deleteIfSame(owner, TJS_W("menu"), menuProperty);
+    }
+    global->DeleteMember(0, TJS_W("__krkrnsNativeMenuProperty"), NULL, global);
+    global->DeleteMember(0, TJS_W("__krkrnsNativeMenuClass"), NULL, global);
 }
-TJS_END_NATIVE_STATIC_PROP_DECL_OUTER(cls, keycodeToText)
-//---------------------------------------------------------------------------
-
-	if (!textToKeycodeMap) {
-		textToKeycodeMap = TJSCreateDictionaryObject();
-		keycodeToTextList = TJSCreateDictionaryObject();
-
-		tTJSVariant val;
-
-		iTJSDispatch2 * global = TVPGetScriptDispatch();
-
-		{
-			gWindowMenuProperty = new WindowMenuProperty();
-			val = tTJSVariant(gWindowMenuProperty);
-			gWindowMenuProperty->Release();
-			tTJSVariant win;
-			if (TJS_SUCCEEDED(global->PropGet(0, TJS_W("Window"), NULL, &win, global))) {
-				iTJSDispatch2* obj = win.AsObjectNoAddRef();
-				// KRKR-ns: the native menu root is deliberately NOT installed as
-				// Window.menu.  In kirikiri2 that property belongs to menu.dll, so
-				// a title without the plugin sees no Window.menu and falls back to
-				// its own TJS menu model -- which is precisely what the Kirikiroid2
-				// compat layers these distributions ship arrange for (they delete
-				// global.MenuItem / Window.menu at window construction).  Installed
-				// unconditionally it hijacks that model: a native root only accepts
-				// native MenuItem instances, so every KAGEX title's own menu items
-				// died at boot with "Please specity MenuItem class object."
-				// (永不枯萎的世界与终焉之花).  The MenuItem class below is still
-				// registered -- KAG3's Menus.tjs does `class KAGMenuItem extends
-				// MenuItem` -- and compat-patches supplies the script-side
-				// Window.menu root, which keeps the tree contract and accepts items
-				// from either model.
-				win.Clear();
-				gWindowMainWindowProperty = new WindowMainWindowProperty();
-				val = tTJSVariant(gWindowMainWindowProperty);
-				gWindowMainWindowProperty->Release();
-				obj->PropSet(TJS_MEMBERENSURE, TJS_W("mainWindow"), NULL, &val, obj);
-			}
-			val.Clear();
-
-			//-----------------------------------------------------------------------
-			iTJSDispatch2 * tjsclass = TVPCreateNativeClass_MenuItem();
-			val = tTJSVariant(tjsclass);
-			tjsclass->Release();
-			global->PropSet(TJS_MEMBERENSURE, TJS_W("MenuItem"), NULL, &val, global);
-			//-----------------------------------------------------------------------
-
-		}
-
-		global->Release();
-	}
-
-	return cls;
-}
-//---------------------------------------------------------------------------
-

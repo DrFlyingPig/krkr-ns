@@ -57,6 +57,9 @@ private:
         SDL_Texture* gpuTexture = nullptr;
         SDL_Texture* gpuAlphaTexture = nullptr;
         bool gpuAlphaDirty = true;
+        bool cpuMeshProfiled = false;
+        bool opaquePixels = false;
+        bool pixelAccessExposed = false;
         int width = 0;
         int height = 0;
     };

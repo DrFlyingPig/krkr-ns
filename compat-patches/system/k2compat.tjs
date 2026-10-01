@@ -13,9 +13,9 @@ global.__krkrns_compat_k2compat = true;
 // Kirikiroid2-compatible distributions ship their own compat layer at
 // k2compat/k2compat.tjs.  It is deliberately NOT executed: our file shadows
 // its basename, and its main job -- deleting MenuItem / Window.menu so a KAGEX
-// title falls back to its own menu model -- is unnecessary now that the engine
-// exposes neither (kirikiri2 keeps both inside menu.dll, which this port does
-// not have).  Running it instead installs machinery of its own that expects
+// title falls back to its own menu model -- is unnecessary because native
+// menus are installed only when menu.dll is explicitly linked. Running it
+// instead installs machinery of its own that expects
 // engine members this port lacks: its stayOnTop property reads
 // Window.mainWindow, and LimeLight died at boot on exactly that read.  Its
 // presence is still what decides whether the script-side MenuItem model below
@@ -107,25 +107,93 @@ if (typeof(Krkr2CompatUtils.getWindowRect) == "undefined")
 // back to its complete built-in KAGParser when KAGParserEx.dll is unavailable;
 // an empty stand-in would discard parser state such as debugLevel/ignoreCR.
 
-// Provided by menu.dll in the original. Switch has no native desktop menu bar,
-// but KAG still builds and queries the complete menu tree during start-up.
-// Keep a script-side tree with the same observable members so menu creation is
-// harmless and controller/touch driven games can continue to their own UI.
-class MenuItem {
-    function MenuItem(owner, caption) {
+// menu.dll can explicitly install the native class. Games without their own
+// Kirikiroid2 menu layer use this tree; both paths share the layer-based popup.
+Scripts.execStorage("file://?/romfs:/compat/system/menu_popup.tjs");
+// Use a private name: TJS hoists top-level class declarations even when they
+// occur inside an if block. Naming this class MenuItem replaces menu.dll's
+// native class before the conditional publication below can run.
+class KrkrnsScriptMenuItem {
+    var owner, command = null, accessible = true;
+    var enabled = true, visible = true, radio = false, group = 0;
+    var _parent = null, _children, _windowOwner = null, _caption = "";
+    var _childrenView, _childrenValid = false;
+    var _checked = false;
+    var __krkrnsScriptMenu = true;
+    var __krkrnsGameMenuRoot = false;
+    function KrkrnsScriptMenuItem(owner, caption) {
+        __krkrnsInitializeMenu(owner, caption);
+    }
+    // KAG subclasses call super.MenuItem(...) by the public constructor name.
+    function MenuItem(owner, caption) { __krkrnsInitializeMenu(owner, caption); }
+    function __krkrnsInitializeMenu(owner, caption) {
         this.owner = owner;
-        this.caption = caption;
-        this.text = caption;
-        this.command = null;
-        this.enabled = true;
-        this.accessible = true;
-        this.checked = false;
-        this.visible = true;
-        this.radio = false;
-        this.group = 0;
-        this.index = 0;
-        this.parent = null;
-        this.children = new Array();
+        _children = new Array();
+        _childrenView = new Array();
+        // The second argument is either the caption or a Window for a root,
+        // matching the native MenuItem(actionOwner, caption/window) overload.
+        if (typeof(caption) == "Object" && caption !== null) _windowOwner = caption;
+        else _caption = caption === void ? "" : (string)caption;
+    }
+    property caption {
+        getter { return _caption; }
+        setter(v) { _caption = (string)v; }
+    }
+    property text {
+        getter { return _caption; }
+        setter(v) { _caption = (string)v; }
+    }
+    property parent { getter { return _parent; } }
+    // Game-provided DummyMenuItem walks these fields directly rather than
+    // calling the public getters (its parent property is read-only).
+    property parent_ {
+        getter { return _parent; }
+        setter(v) { _parent = v; }
+    }
+    property children_ { getter { return _children; } }
+    property window_ { getter { return _windowOwner; } }
+    property children {
+        getter {
+            if (!_childrenValid) {
+                _childrenView.clear();
+                for (var i = 0; i < _children.count; i++) _childrenView.add(_children[i]);
+                _childrenValid = true;
+            }
+            return _childrenView;
+        }
+    }
+    property root {
+        getter {
+            var item = this;
+            while (item._parent !== null) item = item._parent;
+            return item;
+        }
+    }
+    property window { getter { return root._windowOwner; } }
+    property index {
+        getter { return _parent === null ? 0 : _parent._children.find(this); }
+        setter(v) {
+            if (_parent === null) return;
+            v = (int)v;
+            if (v < 0 || v >= _parent._children.count) throw new Exception("Menu item index out of range.");
+            var siblings = _parent._children;
+            siblings.erase(siblings.find(this));
+            siblings.insert(v, this);
+            _parent._childrenValid = false;
+        }
+    }
+    property checked {
+        getter { return _checked; }
+        setter(v) {
+            v = !!v;
+            if (v && radio && _parent !== null) {
+                for (var i = 0; i < _parent._children.count; i++) {
+                    var sibling = _parent._children[i];
+                    if (sibling.radio && sibling.group == group) sibling._checked = false;
+                }
+            }
+            _checked = v;
+        }
     }
     // shortcut is a STRING here, exactly as in kirikiri2: its native property
     // stores what SetShortcut(ttstr) produced, so an integer assignment comes
@@ -151,57 +219,132 @@ class MenuItem {
     function getCommand() { return this.command; }
     function add(item) {
         if (item === void || item === null) return this;
-        item.parent = this;
-        this.children.add(item);
+        validateChild(item);
+        var previous = childParent(item);
+        if (previous === this) return item;
+        if (previous !== null && previous !== void) previous.remove(item);
+        setChildParent(item, this);
+        _children.add(item);
+        _childrenValid = false;
         return item;
+    }
+    function validateChild(item) {
+        if (typeof(item) != "Object" || item === null ||
+            typeof(item.__krkrnsNativeMenu) != "undefined")
+            throw new Exception("Please specify a script MenuItem class object.");
+        if (typeof(item.__krkrnsScriptMenu) != "undefined" && item._windowOwner !== null)
+            throw new Exception("A Window menu root cannot be attached as a child.");
+        var ancestor = this;
+        while (ancestor !== null) {
+            if (ancestor === item) throw new Exception("Menu tree cannot contain a cycle.");
+            ancestor = childParent(ancestor);
+        }
+    }
+    function childParent(item) {
+        if (typeof(item.__krkrnsScriptMenu) != "undefined") return item._parent;
+        if (typeof(item.parent_) != "undefined") return item.parent_;
+        return typeof(item.parent) == "undefined" ? null : item.parent;
+    }
+    function setChildParent(item, parent) {
+        if (typeof(item.__krkrnsScriptMenu) != "undefined") item._parent = parent;
+        // Kirikiroid2/KAGEX dummy MenuItem exposes a read-only parent getter;
+        // its own add/remove implementation writes this public backing field.
+        else if (typeof(item.parent_) != "undefined") item.parent_ = parent;
+        else item.parent = parent;
     }
     function insert(item, index) {
         if (item === void || item === null) return this;
-        item.parent = this;
-        if (index < 0 || index >= this.children.count) this.children.add(item);
-        else this.children.insert(index, item);
+        validateChild(item);
+        index = (int)index;
+        if (index < 0 || index > _children.count) throw new Exception("Menu item index out of range.");
+        var previous = childParent(item);
+        if (previous !== null && previous !== void) previous.remove(item);
+        if (index > _children.count) index = _children.count;
+        setChildParent(item, this);
+        _children.insert(index, item);
+        _childrenValid = false;
         return item;
     }
     function remove(item) {
-        var index = this.children.find(item);
+        var index = _children.find(item);
         // Array.remove takes a VALUE; erase takes an INDEX. Removing the
         // numeric index left the item in children after clearing its parent.
         if (index >= 0) {
-            this.children.erase(index);
-            if (item !== void && item !== null && item.parent === this)
-                item.parent = null;
+            _children.erase(index);
+            _childrenValid = false;
+            if (item !== void && item !== null && childParent(item) === this)
+                setChildParent(item, null);
         }
         return item;
     }
     function click() {
-        if (!this.enabled || !this.accessible) return null;
+        var ancestor = this;
+        while (ancestor !== null) {
+            if (!ancestor.enabled || !ancestor.accessible) return null;
+            ancestor = ancestor._parent;
+        }
+        if (window === null || window === void) return null;
         if (this.command !== null && typeof this.command == "Object")
             return this.command(this);
         return this.onClick();
     }
     function fireClick() { return this.click(); }
-    function popup(flags, x, y) { return 0; }
-    function onClick() { return null; }
+    function popup(flags, x, y) { return global.__krkrnsMenuPopup(this, flags, x, y); }
+    function onClick() {
+        if (owner !== null && owner !== void && typeof(owner.action) == "Object") {
+            var event = new Dictionary();
+            event.type = "onClick";
+            event.target = this;
+            return owner.action(event);
+        }
+        return null;
+    }
+    // These historical extra members are not Kirikiroid2 MenuItem events.
+    // Window/KAG hooks remain with their owning game code; clicks use onClick.
     function addHook(h) { return this; }
     function removeHook(h) { return this; }
-    function finalize() { this.children.clear(); this.parent = null; return null; }
+    function finalize() {
+        // Global functions may already have been removed during engine teardown.
+        // Only guard their presence; errors inside a live close handler propagate.
+        if (_windowOwner !== null && typeof(global.__krkrnsMenuClose) == "Object" &&
+            typeof(global.__krkrnsMenuView) == "Object")
+            global.__krkrnsMenuClose(_windowOwner);
+        if (_parent !== null) _parent.remove(this);
+        var children = _children;
+        _children = null; // Finalizers must not create objects from teardown globals.
+        for (var i = 0; i < children.count; i++) {
+            var child = children[i];
+            setChildParent(child, null);
+            // Game-provided trees keep their own listeners and lifetime rules.
+            // The compatibility root only owns project MenuItem instances.
+            if (typeof(child.__krkrnsScriptMenu) != "undefined") invalidate child;
+        }
+        children.clear(); _childrenView.clear();
+        _windowOwner = null; owner = null; command = null;
+        return null;
+    }
 }
 
 // Publish the model as a global.  KAG3's system/Menus.tjs declares
 // `class KAGMenuItem extends MenuItem` at global scope (and builds its whole
-// system menu from it), so the name has to be reachable there; a class
-// declared inside this guard block is block-scoped and never becomes a global
-// on its own.  Titles that ship a Kirikiroid2 compat layer are excluded --
-// they bring their own menu model and never reference this name.  Keep it a
-// plain global member so a title's layer can still delete it.
+// system menu from it), so the public alias has to be reachable there.
+// Preserve the released capability boundary for every title. The old class
+// declaration was hoisted to global even for games with a compat layer.
+// Keep a plain alias so an explicitly linked native or game class takes priority.
 if (typeof(global.MenuItem) == "undefined") {
-	if (typeof(global.__krkrns_no_game_layer) != "undefined") global.MenuItem = MenuItem;
+	global.MenuItem = KrkrnsScriptMenuItem;
 }
+global.__krkrnsScriptMenuClass = KrkrnsScriptMenuItem;
 
-// Kirikiri's Window.menu property lazily returns a root MenuItem.  Native
-// desktop ports attach a platform menu here; on Switch one shared inert root
-// provides the same script contract without trying to create OS widgets.
-if (typeof(Window.menu) == "undefined") Window.menu = new MenuItem(null, "");
+// Window constructs and owns one root per instance, and invalidates that root
+// on close. KAGEX supplies its own tree and must not get a native/script mix.
+global.__krkrnsCreateMenuRoot = function(owner) {
+    if (typeof(global.__krkrnsNativeMenuClass) != "undefined") return null;
+    var root = new global.__krkrnsScriptMenuClass(null, owner);
+    if (typeof(global.__krkrns_no_game_layer) == "undefined" || !global.__krkrns_no_game_layer)
+        root.__krkrnsGameMenuRoot = true;
+    return root;
+} incontextof global;
 // Native window handles are a Win32-only implementation detail.  Scripts pass
 // this value to optional desktop plugins; zero is the conventional null handle.
 if (typeof(Window.HWND) == "undefined") Window.HWND = 0;

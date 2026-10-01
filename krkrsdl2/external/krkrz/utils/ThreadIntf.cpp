@@ -15,10 +15,15 @@
 #include "MsgIntf.h"
 #include "KrkrNSLog.h"
 
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
+
 #ifdef _WIN32
 #include <process.h>
 #endif
 #include <algorithm>
+#include <memory>
 #include <assert.h>
 #if 1
 #include <system_error>
@@ -266,15 +271,17 @@ tjs_int TVPGetProcessorNum( void )
 {
 #ifdef KRKRZ_USE_SDL_THREADS
 #ifdef __SWITCH__
-	// libnx sysconf(_SC_NPROCESSORS_ONLN) is stubbed to 1 for homebrew
-	// applets, which would collapse the adaptive draw pool to a single
-	// worker (KRKR-ns Phase 1 device log: cpus=1; E-mote band raster and
-	// large layer blends all serialized). The Switch has 4 Cortex-A57
-	// cores and homebrew has access to all of them (WA2-ns parallelizes
-	// across cores on the same device). Report at least 4 so the pool and
-	// the E-mote band rasterizer actually parallelize.
-	tjs_int n = SDL_GetCPUCount();
-	return n >= 2 ? n : 4;
+	// SDL's sysconf fallback reports one CPU on Horizon. Count the cores
+	// actually granted to this process instead of assuming all four are
+	// available (the standard application capability grants cores 0..2).
+	static const tjs_int processors = []() -> tjs_int {
+		u64 mask = 0;
+		const Result rc = svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+		if (R_SUCCEEDED(rc) && mask)
+			return static_cast<tjs_int>(__builtin_popcountll(mask));
+		return std::max<tjs_int>(1, SDL_GetCPUCount());
+	}();
+	return processors;
 #else
 	return SDL_GetCPUCount();
 #endif
@@ -423,7 +430,12 @@ public:
 		// A one-item batch is executed synchronously by ExecTask.  Avoid doing
 		// thread-pool bookkeeping for the hundreds of tiny layer operations in
 		// an animated E-mote frame.
-		if( taskNum > 1 ) PoolThread( taskNum );
+		if( taskNum > 1 ) {
+			PoolThread( taskNum );
+			// Creating a worker can fail under resource pressure. Preserve all
+			// submitted tasks, but run those beyond the available workers here.
+			task_num = std::min(taskNum, static_cast<tjs_int>(workers.size()) + 1);
+		}
 #endif
 	}
 	void ExecTask( TVP_THREAD_TASK_FUNC func, TVP_THREAD_PARAM param ) {
@@ -466,6 +478,16 @@ public:
 };
 //---------------------------------------------------------------------------
 void DrawThread::Execute() {
+#ifdef __SWITCH__
+	s32 preferred = -1, priority = -1;
+	u64 affinity = 0;
+	const Handle handle = threadGetCurHandle();
+	const Result maskRc = svcGetThreadCoreMask(&preferred, &affinity, handle);
+	const Result priorityRc = svcGetThreadPriority(&priority, handle);
+	KRKRNS_LOG("[pool] worker core=%u preferred=%d affinity=%llx priority=%d maskRc=%x priorityRc=%x",
+		svcGetCurrentProcessorNumber(), preferred, (unsigned long long)affinity,
+		priority, maskRc, priorityRc);
+#endif
 #ifdef KRKRZ_USE_SDL_THREADS
 	while( !GetTerminated() ) {
 		SDL_LockMutex(mtx);
@@ -496,6 +518,23 @@ void DrawThread::Execute() {
 void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 	tjs_int extraThreadNum = TVPGetThreadNum() - 1;
 
+#ifdef __SWITCH__
+	static bool coreInfoLogged = false;
+	if (!coreInfoLogged) {
+		coreInfoLogged = true;
+		u64 allowed = 0, affinity = 0;
+		s32 preferred = -1, priority = -1;
+		const Handle handle = threadGetCurHandle();
+		const Result allowedRc = svcGetInfo(&allowed, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+		const Result maskRc = svcGetThreadCoreMask(&preferred, &affinity, handle);
+		const Result priorityRc = svcGetThreadPriority(&priority, handle);
+		KRKRNS_LOG("[pool] caller core=%u preferred=%d affinity=%llx allowed=%llx priority=%d cpus=%d allowedRc=%x maskRc=%x priorityRc=%x",
+			svcGetCurrentProcessorNumber(), preferred, (unsigned long long)affinity,
+			(unsigned long long)allowed, priority, TVPGetProcessorNum(),
+			allowedRc, maskRc, priorityRc);
+	}
+#endif
+
 #ifdef _WIN32
 	if( processor_ids.empty() ) {
 #ifndef TJS_64BIT_OS
@@ -520,8 +559,24 @@ void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 
 	// スレッド数がextraThreadNumに達していないので(suspend状態で)生成する
 	while( (tjs_int)workers.size() < extraThreadNum ) {
-		DrawThread* th = new DrawThread( this );
-		th->StartTread();
+		std::unique_ptr<DrawThread> th;
+		try {
+			// Reserve before starting the thread: publishing it in workers must
+			// not allocate after its execution loop has begun.
+			workers.reserve(extraThreadNum);
+			th.reset(new DrawThread(this));
+			th->StartTread();
+		} catch (...) {
+			// No task has been submitted yet. The failed candidate releases its
+			// synchronization objects, while existing workers remain usable.
+			static bool creationFailureLogged = false;
+			if (!creationFailureLogged) {
+				creationFailureLogged = true;
+				KRKRNS_LOG("[pool] worker creation failed; using %d workers plus caller",
+					static_cast<int>(workers.size()));
+			}
+			break;
+		}
 #ifndef KRKRZ_USE_SDL_THREADS
 #ifdef _WIN32
 		::SetThreadIdealProcessor( (HANDLE)(th->GetHandle()), processor_ids[workers.size() % processor_ids.size()] );
@@ -538,7 +593,8 @@ void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 		int rc = pthread_setaffinity_np( th->GetHandle(), sizeof( cpu_set_t ), &cpuset );
 #endif
 #endif
-		workers.push_back( th );
+		workers.push_back(th.get());
+		th.release();
 	}
 	// KRKR-ns Phase 1b diag: confirm the pool actually spawned its workers
 	// on the device (device log showed drawT=4 yet compose barely moved).

@@ -91,7 +91,7 @@ public:
     void __stdcall Play() override;
     void __stdcall Stop() override;
     void __stdcall Pause() override;
-    void __stdcall SetPosition(unsigned long long /*tick*/) override {}
+    void __stdcall SetPosition(unsigned long long tick) override;
     void __stdcall GetPosition(unsigned long long * tick) override;
     void __stdcall GetStatus(tTVPVideoStatus * status) override;
     void __stdcall GetEvent(long * evcode, LONG_PTR * param1,
@@ -99,7 +99,7 @@ public:
     void __stdcall FreeEventParams(long /*evcode*/, LONG_PTR /*param1*/,
                                    LONG_PTR /*param2*/) override {}
     void __stdcall Rewind() override;
-    void __stdcall SetFrame(int /*f*/) override {}
+    void __stdcall SetFrame(int f) override;
     void __stdcall GetFrame(int * f) override;
     void __stdcall GetFPS(double * f) override;
     void __stdcall GetNumberOfFrame(int * f) override;
@@ -165,6 +165,7 @@ public:
 
 private:
     void CloseCodecs();
+    bool SeekToMilliseconds(uint64_t tick, int requestedFrame = -1);
     static int SDLCALL DecodeThread(void * opaque);
     void DecodeLoop();
     bool PublishFrame(AVFrame * frame);
@@ -195,6 +196,14 @@ private:
     std::atomic<bool> decoding_{false};
     std::atomic<int> frontBuf_{0};   // 0/1 -> which SetVideoBuffer buffer
     std::atomic<int> frameCount_{0}; // decoded frame index (0-based)
+    std::atomic<int> pendingFrame_{0}; // script-visible target until a new frame arrives
+    std::atomic<uint64_t> pendingPositionMs_{0}; // before first post-seek frame
+    int nextFrameIndex_ = 0; // absolute frame index for the decode thread
+    int64_t seekVideoTimestamp_ = 0;
+    int64_t seekAudioTimestamp_ = 0;
+    bool discardVideoPreroll_ = false;
+    bool discardAudioPreroll_ = false;
+    bool pauseAfterSeekFrame_ = false;
 
     SDL_Thread * thread_ = nullptr;
     NativeEventQueueImplement * eventQueue_ = nullptr;

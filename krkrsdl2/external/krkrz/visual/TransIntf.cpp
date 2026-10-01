@@ -21,6 +21,89 @@
 #include "KrkrNSLog.h"
 #include "DebugIntf.h"
 
+#ifdef __SWITCH__
+#include "ThreadIntf.h"
+#include "KrkrNSProf.h"
+#include <SDL_timer.h>
+#include <algorithm>
+#include <cstdint>
+
+// K2 RenderManager's TransBlt/UnivTransBlt submit independent row bands.
+// Resolve providers (including copy-on-write) on the caller first. Only the
+// existing pixel kernels run on workers; shifted or shared pixels stay serial.
+static bool KrkrTransitionRowsOverlap(const void* a, tjs_int apitch, size_t abytes,
+	const void* b, tjs_int bpitch, size_t bbytes, tjs_int height)
+{
+	const intptr_t astep = (intptr_t)apitch * (height - 1);
+	const intptr_t bstep = (intptr_t)bpitch * (height - 1);
+	const uintptr_t aaddr = reinterpret_cast<uintptr_t>(a);
+	const uintptr_t baddr = reinterpret_cast<uintptr_t>(b);
+	const uintptr_t alo = astep < 0 ? aaddr - (uintptr_t)-astep : aaddr;
+	const uintptr_t blo = bstep < 0 ? baddr - (uintptr_t)-bstep : baddr;
+	const uintptr_t ahi = (astep > 0 ? aaddr + (uintptr_t)astep : aaddr) + abytes;
+	const uintptr_t bhi = (bstep > 0 ? baddr + (uintptr_t)bstep : baddr) + bbytes;
+	return alo < bhi && blo < ahi;
+}
+
+template<typename DrawRow>
+struct KrkrTransitionRowTask
+{
+	const DrawRow* draw;
+	tjs_int begin, end;
+	static void TJS_USERENTRY Run(void* raw)
+	{
+		const auto& task = *static_cast<const KrkrTransitionRowTask*>(raw);
+		for (tjs_int y = task.begin; y < task.end; ++y) (*task.draw)(y);
+	}
+};
+
+template<typename DrawRow>
+static bool KrkrRunTransitionRows(tjs_int width, tjs_int height, tjs_int factor,
+	tjs_uint8* dest, tjs_int dpitch,
+	const tjs_uint8* src1, tjs_int s1pitch,
+	const tjs_uint8* src2, tjs_int s2pitch,
+	const tjs_uint8* rule, tjs_int rpitch, const DrawRow& draw)
+{
+	const tjs_int threads = std::min(std::min(TVPGetThreadNum(), TVPMaxThreadNum), height / 32);
+	if (threads <= 1 || width <= 0 || height <= 0 ||
+		(int64_t)width * height < factor * 500) return false;
+	const size_t bytes = (size_t)width * sizeof(tjs_uint32);
+	if (!dest || !src1 || !src2 ||
+		(dpitch < 0 ? -(int64_t)dpitch : (int64_t)dpitch) < (int64_t)bytes ||
+		KrkrTransitionRowsOverlap(dest, dpitch, bytes, src1, s1pitch, bytes, height) ||
+		KrkrTransitionRowsOverlap(dest, dpitch, bytes, src2, s2pitch, bytes, height) ||
+		(rule && KrkrTransitionRowsOverlap(dest, dpitch, bytes, rule, rpitch, width, height)))
+		return false;
+
+	KrkrTransitionRowTask<DrawRow> tasks[TVPMaxThreadNum];
+	TVPBeginThreadTask(threads);
+	for (tjs_int i = 0; i < threads; ++i)
+	{
+		tasks[i] = { &draw, height * i / threads, height * (i + 1) / threads };
+		TVPExecThreadTask(&KrkrTransitionRowTask<DrawRow>::Run, TVP_THREAD_PARAM(tasks + i));
+	}
+	TVPEndThreadTask();
+	return true;
+}
+
+struct KrkrTransitionProfile
+{
+	const Uint64 start = SDL_GetPerformanceCounter();
+	int operation;
+	unsigned px;
+	bool parallel = false;
+	KrkrTransitionProfile(int op, const tTVPDivisibleData& data)
+		: operation(op), px(data.Width > 0 && data.Height > 0
+			? (unsigned)data.Width * (unsigned)data.Height : 0) {}
+	~KrkrTransitionProfile()
+	{
+		krkrsdl2_prof_bitmap_work(operation,
+			(double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+			(double)SDL_GetPerformanceFrequency(), px, parallel);
+	}
+};
+#endif
+
 
 // #define TVP_TRANS_SHOW_FPS
 
@@ -652,6 +735,9 @@ tjs_error TJS_INTF_METHOD tTVPCrossFadeTransHandler::Process(
 //---------------------------------------------------------------------------
 void tTVPCrossFadeTransHandler::Blend(tTVPDivisibleData *data)
 {
+#ifdef __SWITCH__
+	KrkrTransitionProfile profile(KRKRNS_PROF_BITMAP_CROSSFADE, *data);
+#endif
 	// blend
 	tjs_uint8 *dest;
 	const tjs_uint8 *src1;
@@ -673,6 +759,19 @@ void tTVPCrossFadeTransHandler::Blend(tTVPDivisibleData *data)
 	src2 += data->Src2Left * sizeof(tjs_uint32);
 
 	tjs_int h = data->Height;
+
+#ifdef __SWITCH__
+	const auto blend = TVPIsTypeUsingAlpha(DestLayerType) ? TVPConstAlphaBlend_SD_d :
+		(TVPIsTypeUsingAddAlpha(DestLayerType) ? TVPConstAlphaBlend_SD_a : TVPConstAlphaBlend_SD);
+	const tjs_int width = data->Width, phase = Phase;
+	profile.parallel = KrkrRunTransitionRows(width, h, 59, dest, destpitch,
+		src1, src1pitch, src2, src2pitch, nullptr, 0, [=](tjs_int row) {
+			blend((tjs_uint32*)(dest + (intptr_t)row * destpitch),
+				(const tjs_uint32*)(src1 + (intptr_t)row * src1pitch),
+				(const tjs_uint32*)(src2 + (intptr_t)row * src2pitch), width, phase);
+		});
+	if (profile.parallel) return;
+#endif
 
 	if(TVPIsTypeUsingAlpha(DestLayerType))
 	{
@@ -843,6 +942,9 @@ tjs_error TJS_INTF_METHOD tTVPUniversalTransHandler::StartProcess(
 //---------------------------------------------------------------------------
 void tTVPUniversalTransHandler::Blend(tTVPDivisibleData *data)
 {
+#ifdef __SWITCH__
+	KrkrTransitionProfile profile(KRKRNS_PROF_BITMAP_UNIVERSAL, *data);
+#endif
 	// blend the image according with the rule graphic
 	tjs_uint8 *dest;
 	const tjs_uint8 *src1;
@@ -870,6 +972,37 @@ void tTVPUniversalTransHandler::Blend(tTVPDivisibleData *data)
 	rule += data->Left * sizeof(tjs_uint8);
 
 	tjs_int h = data->Height;
+#ifdef __SWITCH__
+	const bool alpha = TVPIsTypeUsingAlpha(DestLayerType);
+	const bool addAlpha = TVPIsTypeUsingAddAlpha(DestLayerType);
+	const tjs_int width = data->Width, phase = Phase, vague = Vague;
+	const tjs_uint32* table = BlendTable;
+	if (vague >= 512)
+	{
+		const auto blend = alpha ? TVPUnivTransBlend_d :
+			(addAlpha ? TVPUnivTransBlend_a : TVPUnivTransBlend);
+		profile.parallel = KrkrRunTransitionRows(width, h, 46, dest, destpitch,
+			src1, src1pitch, src2, src2pitch, rule, rulepitch, [=](tjs_int row) {
+				blend((tjs_uint32*)(dest + (intptr_t)row * destpitch),
+					(const tjs_uint32*)(src1 + (intptr_t)row * src1pitch),
+					(const tjs_uint32*)(src2 + (intptr_t)row * src2pitch),
+					rule + (intptr_t)row * rulepitch, table, width);
+			});
+	}
+	else
+	{
+		const auto blend = alpha ? TVPUnivTransBlend_switch_d :
+			(addAlpha ? TVPUnivTransBlend_switch_a : TVPUnivTransBlend_switch);
+		profile.parallel = KrkrRunTransitionRows(width, h, 46, dest, destpitch,
+			src1, src1pitch, src2, src2pitch, rule, rulepitch, [=](tjs_int row) {
+				blend((tjs_uint32*)(dest + (intptr_t)row * destpitch),
+					(const tjs_uint32*)(src1 + (intptr_t)row * src1pitch),
+					(const tjs_uint32*)(src2 + (intptr_t)row * src2pitch),
+					rule + (intptr_t)row * rulepitch, table, width, phase, phase - vague);
+			});
+	}
+	if (profile.parallel) return;
+#endif
 	if(Vague >= 512)
 	{
 		if(TVPIsTypeUsingAlpha(DestLayerType))

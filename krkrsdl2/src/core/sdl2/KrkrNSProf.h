@@ -13,6 +13,10 @@
 #ifndef KRKRNS_PROF_H
 #define KRKRNS_PROF_H
 
+#define KRKRNS_PROF_BITMAP_FILL 0
+#define KRKRNS_PROF_BITMAP_CROSSFADE 1
+#define KRKRNS_PROF_BITMAP_UNIVERSAL 2
+
 #ifdef __SWITCH__
 /* main-loop segment ids, see Application::Run() */
 #define KRKRNS_PROF_SEG_EVENTS   0
@@ -24,6 +28,9 @@ extern void krkrsdl2_prof_seg(int which, double ms);
 extern void krkrsdl2_prof_accum_frame();
 extern void krkrsdl2_prof_begin_compose();
 extern void krkrsdl2_prof_end_compose();
+/* Split CompleteForWindow into onPaint/transition preparation, raster and
+ * completion callbacks; measured only at the root, not per child layer. */
+extern void krkrsdl2_prof_layer_complete(double prepare_ms, double raster_ms, double finish_ms);
 extern void krkrsdl2_prof_accum_surface_copy(double ms);
 /* per-layer composition volume (called from NotifyBitmapCompleted): feeds the
  * per-frame "layers/lpxM" fields that decompose the compose segment — helps
@@ -70,6 +77,8 @@ extern void krkrsdl2_prof_timer_fire(unsigned interval_ms, unsigned pending);
  * the destination is the layer manager's compose buffer — that subset is what
  * a GPU-compositing switch would remove from the CPU. */
 extern void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px);
+/* Fill and built-in transition kernels are outside Blt/CopyRect accounting. */
+extern void krkrsdl2_prof_bitmap_work(int operation, double ms, unsigned px, bool parallel);
 extern void krkrsdl2_prof_emit_and_reset(double interval_ms);
 /* pool-driven task batches (ThreadIntf.cpp); deltas per emit window */
 #ifdef __cplusplus
@@ -89,6 +98,7 @@ static inline void krkrsdl2_prof_seg(int which, double ms) {}
 static inline void krkrsdl2_prof_accum_frame() {}
 static inline void krkrsdl2_prof_begin_compose() {}
 static inline void krkrsdl2_prof_end_compose() {}
+static inline void krkrsdl2_prof_layer_complete(double prepare_ms, double raster_ms, double finish_ms) {}
 static inline void krkrsdl2_prof_accum_surface_copy(double ms) {}
 static inline void krkrsdl2_prof_accum_layer(unsigned w, unsigned h) {}
 static inline void krkrsdl2_prof_accum_upload(double ms, unsigned bytes) {}
@@ -109,6 +119,7 @@ static inline void krkrsdl2_prof_emote_prog_call() {}
 static inline void krkrsdl2_prof_emote_draw_call() {}
 static inline void krkrsdl2_prof_timer_fire(unsigned interval_ms, unsigned pending) {}
 static inline void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px) {}
+static inline void krkrsdl2_prof_bitmap_work(int operation, double ms, unsigned px, bool parallel) {}
 static inline void krkrsdl2_prof_emit_and_reset(double interval_ms) {}
 static inline unsigned krkrsdl2_pool_begins() { return 0; }
 static inline unsigned krkrsdl2_pool_bigbegins() { return 0; }

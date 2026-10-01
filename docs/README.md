@@ -1,26 +1,14 @@
 # KRKR-ns 文档索引
 
-> 根目录只保留 [README.md](../README.md)（面向使用者）；其余文档都收录在这里。
-
-## 兼容性与移植记录
+使用与安装见根目录 [README](../README.md)。公开技术文档集中在以下六份文件中；功能现状以 2026-10-01 的兼容计划为准，历史构建和测试结果不代表当前版本或物理 Switch 已验收。
 
 | 文档 | 内容 |
 |---|---|
-| [PATCHES.md](PATCHES.md) | 全部源码层补丁记录（P1 起，含背景与验证方式） |
-| [KIRIKIROID2_PORTING_PLAN.md](KIRIKIROID2_PORTING_PLAN.md) | 当前 Kirikiroid2 源码对齐优先级、完成定义与验证状态 |
-| [KIRIKIROID2_COMPARISON.md](KIRIKIROID2_COMPARISON.md) | KRKR-ns 与 Kirikiroid2 的架构、函数和插件差异审计 |
-| [COMPAT_BACKLOG.md](COMPAT_BACKLOG.md) | 兼容性缺口清单（对照 krkrsdl3，P0–P3 优先级与参考实现） |
-| [UPSTREAM_DELTA.md](UPSTREAM_DELTA.md) | 与两个上游基线的差异清单（`tools/upstream_delta.sh` 自动生成，勿手改） |
+| [兼容性与移植计划](KIRIKIROID2_PORTING_PLAN.md) | 当前能力、待办顺序、Kirikiroid2 架构差异、历史审计与完成标准 |
+| [模块说明](MODULES.md) | AlphaMovie 原生解码与接口、文件移动和快速存档轮换 |
+| [性能与故障记录](RUNTIME_NOTES.md) | 剧情冻结、影片音频、退出等待、菜单启动回归、渲染优化、人物语音及快速读档 |
+| [源码补丁记录](PATCHES.md) | P1 起的源码修改、原因与技术验证 |
+| [上游差异清单](UPSTREAM_DELTA.md) | 工具生成的源码差异快照，统计日期见文件头 |
+| 本文 | 文档入口与阅读范围 |
 
-## 规划与开发记录（本地保留，不入库）
-
-按 `.gitignore` 约定保留在本地、不提交：
-
-| 文档 | 内容 |
-|---|---|
-| [PORTING_PLAN.md](PORTING_PLAN.md) | 移植规划（历史文档，含 2026-09-05 范围纠正） |
-| [SOURCE_PORT_STATUS.md](SOURCE_PORT_STATUS.md) | 源码基线、验收边界与固定参考 |
-| [DEVLOG.md](DEVLOG.md) | 开发记录（2026-09-03 起） |
-| [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md) | 性能优化方案与阶段划分 |
-| [MENU_PERFORMANCE.md](MENU_PERFORMANCE.md) | 菜单公共路径优化与验证（P62） |
-| [FREEZE_DIAGNOSIS.md](FREEZE_DIAGNOSIS.md) | 长剧情卡死 / 字体生命周期 / 选项居中定位（P63） |
+开发者本地另保留 `LOCAL_DEVELOPMENT.md`，不入库。它合并早期开发日志、移植与性能规划、菜单性能、字体与位图故障证据，并保留本地部署和清理过程；其中的历史待办不取代当前兼容计划。

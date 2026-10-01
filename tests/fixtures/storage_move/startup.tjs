@@ -17,6 +17,7 @@ function moveSave(name, value) {
 function moveRead(name) { return Dictionary.loadStruct(movePath(name)); }
 var moveFiles = ["源.ksd", "目标.ksd", "occupied.ksd", "missing.ksd",
                  "void-from.ksd", "void-to.ksd", "archive-to.ksd",
+                 "void-copy.ksd",
                  "quick1.ksd", "quick2.ksd", "quick3.ksd"];
 for (var i = 0; i < moveFiles.count; i++) moveRemove(moveFiles[i]);
 moveCheck(typeof Storages.moveFile != "undefined", "native API exists");
@@ -47,6 +48,12 @@ moveSave("void-from.ksd", 303);
 Storages.moveFile(movePath("void-from.ksd"), movePath("void-to.ksd"));
 moveCheck(!Storages.isExistentStorage(movePath("void-from.ksd")) &&
     moveRead("void-to.ksd").value == 303, "discarded return value still executes move");
+Storages.copyFile(movePath("void-to.ksd"), movePath("void-copy.ksd"));
+moveCheck(moveRead("void-to.ksd").value == 303 && moveRead("void-copy.ksd").value == 303,
+    "discarded return value still executes copy and preserves source");
+Storages.deleteFile(movePath("void-copy.ksd"));
+moveCheck(!Storages.isExistentStorage(movePath("void-copy.ksd")),
+    "discarded return value still executes delete and invalidates cache");
 moveCheck(Storages.isExistentStorage("contract.xp3>payload.txt"), "archive member exists");
 moveCheck(!Storages.moveFile("contract.xp3>payload.txt", movePath("archive-to.ksd")), "archive source rejected");
 moveCheck(Storages.isExistentStorage("contract.xp3>payload.txt") &&

@@ -255,6 +255,22 @@ bool tTVPBaseBitmap::SetPointMask(tjs_int x, tjs_int y, tjs_int mask)
 //---------------------------------------------------------------------------
 bool tTVPBaseBitmap::Fill(tTVPRect rect, tjs_uint32 value)
 {
+#ifdef __SWITCH__
+	struct ScopedFillProf
+	{
+		Uint64 start = SDL_GetPerformanceCounter();
+		unsigned px;
+		explicit ScopedFillProf(const tTVPRect& r)
+			: px(r.right > r.left && r.bottom > r.top
+				? (unsigned)(r.right - r.left) * (unsigned)(r.bottom - r.top) : 0) {}
+		~ScopedFillProf()
+		{
+			krkrsdl2_prof_bitmap_work(KRKRNS_PROF_BITMAP_FILL,
+				(double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
+				(double)SDL_GetPerformanceFrequency(), px, false);
+		}
+	} fillProf(rect);
+#endif
 	krkrsdl2_glc_bump_version(this);
 	// fill target rectangle represented as "rect", with color ( and opacity )
 	// passed by "value".

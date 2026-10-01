@@ -26,11 +26,11 @@ Start-Sleep -Milliseconds 300
 if ([KrkrHoldKey]::GetForegroundWindow() -ne $emulator.MainWindowHandle) {
     throw 'Emulator did not take focus; refusing to send keys to another application'
 }
-$vk = [int][char]([string]$Key).ToUpper()
 if ([string]$Key -eq 'Up') { $vk = 0x26 }
 elseif ([string]$Key -eq 'Down') { $vk = 0x28 }
 elseif ([string]$Key -eq 'Left') { $vk = 0x25 }
 elseif ([string]$Key -eq 'Right') { $vk = 0x27 }
+else { $vk = [int][char]([string]$Key).ToUpper() }
 [KrkrHoldKey]::keybd_event([byte]$vk, 0, 0, [UIntPtr]::Zero)
 Start-Sleep -Milliseconds $HoldMs
 [KrkrHoldKey]::keybd_event([byte]$vk, 0, 2, [UIntPtr]::Zero)

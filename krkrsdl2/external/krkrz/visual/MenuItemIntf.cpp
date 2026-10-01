@@ -16,6 +16,8 @@
 #include "EventIntf.h"
 #include "tjsArray.h"
 #include "SystemImpl.h"
+#include "ScriptMgnIntf.h"
+#include <exception>
 
 
 //---------------------------------------------------------------------------
@@ -75,37 +77,39 @@ tjs_error TJS_INTF_METHOD
 //---------------------------------------------------------------------------
 void TJS_INTF_METHOD tTJSNI_BaseMenuItem::Invalidate()
 {
-	TVPCancelSourceEvents(Owner);
-	TVPCancelInputEvents(this);
-
-	{ // locked
-		std::lock_guard<std::mutex> holder(Children.Lock);
-		tjs_int count = Children.size();
-		for(tjs_int i = 0; i < count; i++)
-		{
-			tTJSNI_BaseMenuItem *item = Children.at(i);
-			if(!item) continue;
-
-			if(item->Owner)
-			{
-				item->Owner->Invalidate(0, NULL, NULL, item->Owner);
-				item->Owner->Release();
-			}
-		}
-		Children.clear();
-	} // locked
-
-//	Owner = NULL;
-	Window = NULL;
-	Parent = NULL;
-
-	if(ChildrenArray) ChildrenArray->Release(), ChildrenArray = NULL;
-	if(ArrayClearMethod) ArrayClearMethod->Release(), ArrayClearMethod = NULL;
-
-	ActionOwner.Release();
-	ActionOwner.ObjThis = ActionOwner.Object = NULL;
-
-	inherited::Invalidate();
+    if(!Owner) return;
+    iTJSDispatch2 *owner = Owner;
+    owner->AddRef(); // Removing the parent's reference must not destroy us here.
+    TVPCancelSourceEvents(owner);
+    TVPCancelInputEvents(this);
+    if(Parent) Parent->RemoveChild(this);
+    Owner = NULL;
+    Window = NULL;
+    std::vector<iTJSDispatch2*> children;
+    {
+        std::lock_guard<std::mutex> holder(Children.Lock);
+        for(tTJSNI_BaseMenuItem *item : Children) {
+            item->Parent = NULL;
+            if(item->Owner) children.push_back(item->Owner);
+        }
+        // Transfer the tree's references to this snapshot. Recursive invalidate
+        // may mutate the parent and must never run with Children.Lock held.
+        Children.clear();
+        ChildrenArrayValid = false;
+    }
+    std::exception_ptr failure;
+    for(iTJSDispatch2 *child : children) {
+        try { child->Invalidate(0, NULL, NULL, child); }
+        catch(...) { if(!failure) failure = std::current_exception(); }
+        child->Release();
+    }
+    if(ChildrenArray) ChildrenArray->Release(), ChildrenArray = NULL;
+    if(ArrayClearMethod) ArrayClearMethod->Release(), ArrayClearMethod = NULL;
+    ActionOwner.Release();
+    ActionOwner.ObjThis = ActionOwner.Object = NULL;
+    inherited::Invalidate();
+    owner->Release();
+    if(failure) std::rethrow_exception(failure);
 }
 //---------------------------------------------------------------------------
 tTJSNI_MenuItem * tTJSNI_BaseMenuItem::CastFromVariant(const tTJSVariant & from)
@@ -125,14 +129,25 @@ tTJSNI_MenuItem * tTJSNI_BaseMenuItem::CastFromVariant(const tTJSVariant & from)
 	return NULL;
 }
 //---------------------------------------------------------------------------
-void tTJSNI_BaseMenuItem::AddChild(tTJSNI_BaseMenuItem *item)
+void tTJSNI_BaseMenuItem::AddChild(tTJSNI_BaseMenuItem *item, tjs_int index)
 {
-	if(Children.Add(item))
-	{
-		ChildrenArrayValid = false;
-		if(item->Owner) item->Owner->AddRef();
-		item->Parent = this;
-	}
+    if(!Owner || !item || !item->Owner || item->Window)
+        TVPThrowExceptionMessage(TJS_W("Cannot attach an invalid or window-root menu item."));
+    for(tTJSNI_BaseMenuItem *ancestor = this; ancestor; ancestor = ancestor->Parent)
+        if(ancestor == item)
+            TVPThrowExceptionMessage(TJS_W("A menu item cannot contain itself or its ancestor."));
+    if(item->Parent == this) return;
+    iTJSDispatch2 *owner = item->Owner;
+    owner->AddRef(); // Transfer ownership safely when changing parents.
+    try {
+        if(item->Parent) item->Parent->RemoveChild(item);
+        if(Children.Add(item, index)) {
+            ChildrenArrayValid = false;
+            item->Parent = this;
+            return; // This reference now belongs to Children.
+        }
+    } catch(...) { owner->Release(); throw; }
+    owner->Release();
 }
 //---------------------------------------------------------------------------
 void tTJSNI_BaseMenuItem::RemoveChild(tTJSNI_BaseMenuItem *item)
@@ -547,7 +562,7 @@ TJS_BEGIN_NATIVE_PROP_DECL(window)
 	TJS_BEGIN_NATIVE_PROP_GETTER
 	{
 		TJS_GET_NATIVE_INSTANCE(/*var. name*/_this, /*var. type*/tTJSNI_MenuItem);
-		tTJSNI_Window * window = _this->GetWindow();
+		tTJSNI_Window * window = _this->GetRootMenuItem()->GetWindow();
 		if (window)
 		{
 			iTJSDispatch2 *dsp = window->GetOwnerNoAddRef();
@@ -593,22 +608,18 @@ TJS_END_NATIVE_PROP_DECL(index)
 //---------------------------------------------------------------------------
 iTJSDispatch2 * TVPCreateMenuItemObject(iTJSDispatch2 * window)
 {
-	struct tHolder
-	{
-		iTJSDispatch2 * Obj;
-		tHolder() { Obj = new tTJSNC_MenuItem(); }
-		~tHolder() { Obj->Release(); }
-	} static menuitemclass;
-
-	iTJSDispatch2 *out;
-	tTJSVariant param(window);
-	tTJSVariant *pparam[2] = {&param, &param};
-	if(TJS_FAILED(menuitemclass.Obj->CreateNew(0, NULL, NULL, &out, 2, pparam,
-		menuitemclass.Obj)))
-		TVPThrowExceptionMessage(TVPInternalError,
-			TJS_W("TVPCreateMenuItemObject"));
-
-	return out;
+    tTJS *engine = TVPGetScriptEngine();
+    tTJSVariant menuClass;
+    if(!engine || TJS_FAILED(engine->GetGlobalNoAddRef()->PropGet(0,
+        TJS_W("__krkrnsNativeMenuClass"), NULL, &menuClass, engine->GetGlobalNoAddRef())) ||
+        menuClass.Type() != tvtObject || !menuClass.AsObjectNoAddRef())
+        TVPThrowExceptionMessage(TVPInternalError, TJS_W("TVPCreateMenuItemObject"));
+    iTJSDispatch2 *cls = menuClass.AsObjectNoAddRef();
+    iTJSDispatch2 *out = NULL;
+    tTJSVariant param(window, window);
+    tTJSVariant *params[] = {&param, &param};
+    if(TJS_FAILED(cls->CreateNew(0, NULL, NULL, &out, 2, params, cls)))
+        TVPThrowExceptionMessage(TVPInternalError, TJS_W("TVPCreateMenuItemObject"));
+    return out;
 }
 //---------------------------------------------------------------------------
-

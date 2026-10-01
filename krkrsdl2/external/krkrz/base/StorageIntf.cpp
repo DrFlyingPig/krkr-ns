@@ -1064,7 +1064,10 @@ struct tTVPFileInfo
 		return ( Flag & EMPTY_FILE ) == 0;
 	}
 };
-#define TVP_AUTO_PATH_HASH_SIZE 1024
+// Large games index tens of thousands of basenames. The fixed 1024-bucket
+// table made every rebuild and uncached lookup walk long collision chains.
+// More buckets preserve the same last-path-wins and compact/reset semantics.
+#define TVP_AUTO_PATH_HASH_SIZE 16384
 std::vector<ttstr> TVPAutoPathList;
 tTJSHashCache<ttstr, ttstr> TVPAutoPathCache(TVP_DEFAULT_AUTOPATH_CACHE_NUM);
 tTJSHashTable<ttstr, tTVPFileInfo, tTJSHashFunc<ttstr>, TVP_AUTO_PATH_HASH_SIZE>
@@ -1459,6 +1462,12 @@ static tjs_uint TVPRebuildAutoPathTable()
 	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
 
 	tjs_uint64 tick = TVPGetTickCount();
+	static bool indexSizeLogged = false;
+	if(!indexSizeLogged)
+	{
+		indexSizeLogged = true;
+		KRKRNS_LOG("[autopath] index buckets=%d", TVP_AUTO_PATH_HASH_SIZE);
+	}
 	TVPAddLog( (const tjs_char*)TVPInfoRebuildingAutoPath );
 
 	tjs_uint totalcount = 0;
@@ -2922,7 +2931,8 @@ TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getTime )
 // The save-screen half of the same plugin (see the notes above).
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/deleteFile) {
 	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
-	if( result ) *result = TVPStoragesDeleteFile( *param[0] );
+	const bool deleted = TVPStoragesDeleteFile( *param[0] );
+	if( result ) *result = deleted;
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/deleteFile )
@@ -2931,7 +2941,8 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/copyFile) {
 	if( numparams < 2 ) return TJS_E_BADPARAMCOUNT;
 	// The reference's copyFile takes two arguments; KAG titles call it with a
 	// third (failIfExist) that this port ignores, like the plugin would.
-	if( result ) *result = TVPStoragesCopyFile( *param[0], *param[1] );
+	const bool copied = TVPStoragesCopyFile( *param[0], *param[1] );
+	if( result ) *result = copied;
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/copyFile )

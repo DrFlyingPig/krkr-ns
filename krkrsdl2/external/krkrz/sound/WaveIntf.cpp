@@ -795,6 +795,9 @@ tTVPWaveDecoder * tTVPWDC_RIFFWave::Create(const ttstr & storagename,
 #ifdef TVP_OPUS_DECODER_IMPLEMENT
 extern void TVPRegisterOpusDecoderCreator();
 #endif
+#ifdef TVP_FFMPEG_DECODER_IMPLEMENT
+extern void TVPRegisterFFWaveDecoderCreator();
+#endif
 #ifdef TVP_VORBIS_DECODER_IMPLEMENT
 extern void TVPRegisterVorbisWaveDecoderCreator();
 #endif
@@ -810,6 +813,11 @@ struct tTVPWaveDecoderManager
 	tTVPWaveDecoderManager()
 	{
 		TVPWaveDecoderManagerAvail = true;
+#ifdef TVP_FFMPEG_DECODER_IMPLEMENT
+		// Lookup is reversed: preserve the dedicated decoders and try the
+		// content-probed Kirikiroid2 fallback only when none accepts the file.
+		TVPRegisterFFWaveDecoderCreator();
+#endif
 		TVPRegisterWaveDecoderCreator(&RIFFWaveDecoderCreator);
 #ifdef TVP_VORBIS_DECODER_IMPLEMENT
 		// Keep Opus last: decoder lookup runs in reverse registration order,

@@ -118,7 +118,7 @@ tTJSNI_VideoOverlay::tTJSNI_VideoOverlay()
 	// 0 = "no decoded frame yet": the player's frame counter starts at 0 and
 	// only becomes 1 after the first frame is published, so an uninitialized
 	// frame buffer is never blitted.
-	LastPresentedFrame = 0;
+	LastPresentedFrame = -1;
 #endif
 
 	// Register for the overlay-mode present (the vector also feeds the
@@ -337,7 +337,7 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 			Bitmap[1]->GetBitmap()->GetHeight() - 1));
 		player->SetVideoBuffer(BmpBits[0], BmpBits[1], bmpsize);
 		VideoFramesApplied = 0;
-		LastPresentedFrame = 0;
+		LastPresentedFrame = -1;
 
 		TVPAddLog(TJS_W("[video] player ready ") +
 			ttstr(static_cast<tjs_int>(width)) + TJS_W("x") +
@@ -391,7 +391,7 @@ void tTJSNI_VideoOverlay::Close()
 	BmpBits[0] = BmpBits[1] = NULL;
 	// the frame buffers are gone; nothing may be presented until the next
 	// open publishes its first decoded frame
-	LastPresentedFrame = 0;
+	LastPresentedFrame = -1;
 	ClearWndProcMessages();
 	SetStatus(tTVPVideoOverlayStatus::Unload);
 #endif
@@ -516,7 +516,7 @@ void tTJSNI_VideoOverlay::Rewind()
 		VideoOverlay->Rewind();
 		// the player resets its frame counter on rewind; do not blit the
 		// previous pass' last frame while the new decode starts
-		LastPresentedFrame = 0;
+		LastPresentedFrame = -1;
 	}
 #endif
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
@@ -762,7 +762,23 @@ void tTJSNI_VideoOverlay::WndProc( NativeEvent& ev )
 						}
 						break;
 					case EC_UPDATE:
-						if( Mode == vomLayer && Status == tTVPVideoOverlayStatus::Play )
+						// Switch overlay, layer and mixer modes share one decoder.
+						// Process the segment boundary before choosing its display path;
+						// a paused seek may show any frame without starting a loop.
+						if( Status == tTVPVideoOverlayStatus::Play && !IsPrepare &&
+							(Mode == vomLayer || Mode == vomMixer
+#ifdef __SWITCH__
+							 || Mode == vomOverlay
+#endif
+							) && SegLoopEndFrame > 0 && GetFrame() >= SegLoopEndFrame )
+						{
+							SetFrame( SegLoopStartFrame > 0 ? SegLoopStartFrame : 0 );
+							FirePeriodEvent(perSegLoop);
+							return;
+						}
+						if( Mode == vomLayer &&
+							(Status == tTVPVideoOverlayStatus::Play ||
+							 Status == tTVPVideoOverlayStatus::Pause) )
 						{
 							int		curFrame = (int)p1;
 							if( Layer1 == NULL && Layer2 == NULL )	// nothing to do.
@@ -772,12 +788,6 @@ void tTJSNI_VideoOverlay::WndProc( NativeEvent& ev )
 							int frame = GetFrame();
 							if( (frame+1) < curFrame || (frame-1) > curFrame )
 								curFrame = frame;
-
-							if( (!IsPrepare) && (SegLoopEndFrame > 0) && (frame >= SegLoopEndFrame) ) {
-								SetFrame( SegLoopStartFrame > 0 ? SegLoopStartFrame : 0 );
-								FirePeriodEvent(perSegLoop); // fire period event by segment loop rewind
-								return; // Updateを行わない
-							}
 
 							// get video image size
 							long	width, height;
@@ -842,15 +852,16 @@ void tTJSNI_VideoOverlay::WndProc( NativeEvent& ev )
 								IsPrepare = false;
 							}
 						}
-						else if( Mode == vomMixer && Status == tTVPVideoOverlayStatus::Play )
+						else if( (Mode == vomMixer
+#ifdef __SWITCH__
+							 || Mode == vomOverlay
+#endif
+							) &&
+							(Status == tTVPVideoOverlayStatus::Play ||
+							 Status == tTVPVideoOverlayStatus::Pause) )
 						{
 							int frame = GetFrame();
-							if( (!IsPrepare) && (SegLoopEndFrame > 0) && (frame >= SegLoopEndFrame) ) {
-								SetFrame( SegLoopStartFrame > 0 ? SegLoopStartFrame : 0 );
-								FirePeriodEvent(perSegLoop); // fire period event by segment loop rewind
-								return;
-							}
-							VideoOverlay->PresentVideoImage();
+							if( Mode == vomMixer ) VideoOverlay->PresentVideoImage();
 							FireFrameUpdateEvent( frame );
 							// Send period event ?
 							if( EventFrame >= 0 && !IsEventPast && frame >= EventFrame )
@@ -918,6 +929,11 @@ void tTJSNI_VideoOverlay::SetTimePosition( tjs_uint64 p )
 	if(VideoOverlay)
 	{
 		VideoOverlay->SetPosition( p );
+#ifdef __SWITCH__
+		// A seek can publish the same absolute frame number as the last
+		// presentation. Treat its new pixels as a fresh frame.
+		LastPresentedFrame = -1;
+#endif
 	}
 #endif
 }
@@ -940,6 +956,9 @@ void tTJSNI_VideoOverlay::SetFrame( tjs_int f )
 	if(VideoOverlay)
 	{
 		VideoOverlay->SetFrame( f );
+#ifdef __SWITCH__
+		LastPresentedFrame = -1;
+#endif
 
 		if( EventFrame >= f && IsEventPast )
 			IsEventPast = false;
@@ -1711,6 +1730,10 @@ bool tTJSNI_VideoOverlay::IsPresentable() const
 		Status != tTVPVideoOverlayStatus::Pause)
 		return false;
 	if(!Bitmap[0] || !Bitmap[1])
+		return false;
+	BYTE *readyBuffer = NULL;
+	VideoOverlay->GetFrontBuffer(&readyBuffer);
+	if(!readyBuffer)
 		return false;
 	return frame != LastPresentedFrame;
 }

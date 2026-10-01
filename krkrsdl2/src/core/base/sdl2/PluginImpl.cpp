@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <functional>
 #include "ScriptMgnIntf.h"
+#include "MenuItemIntf.h"
 #include "PluginImpl.h"
 #include "StorageImpl.h"
 #include "GraphicsLoaderImpl.h"
@@ -602,6 +603,7 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 // the next game's Plugins.link register them again into the fresh global set.
 void TVPUnloadBuiltinPlugins()
 {
+	TVPUnregisterMenuPlugin();
 	ncbAutoRegister::AllUnregist();
 	TVPRegisteredPlugins.clear();
 	ns_builtin_plugins.clear();
@@ -612,6 +614,14 @@ void TVPLoadPlugin(const ttstr & name)
 {
 #ifdef __SWITCH__
 	const ttstr short_name = TVPExtractStorageName(name).AsLowerCase();
+    // menu.dll remains opt-in. Advertising it as an existing storage would
+    // make KAGEX switch from its own script tree to the native one at boot.
+    if(short_name == TJS_W("menu.dll")) {
+        TVPRegisterMenuPlugin();
+        if(ns_builtin_plugins.insert(short_name).second)
+            TVPAddLog(TJS_W("(info) loaded built-in plugin: menu.dll"));
+        return;
+    }
 #ifdef KRKRSDL2_ENABLE_ALPHAMOVIE
 	if (short_name == TJS_W("alphamovie.dll"))
 	{

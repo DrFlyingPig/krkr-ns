@@ -49,7 +49,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 
 ## ✅ 已实现功能
 
-> 兼容性差异与移植计划见 [KIRIKIROID2_COMPARISON.md](docs/KIRIKIROID2_COMPARISON.md) 和 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)。
+> 兼容性差异、架构对照与移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)。
 
 **游戏库与界面**
 
@@ -63,6 +63,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 
 - 支持常见 KRKR / KAG 游戏，以及游戏目录中的多个资源包。
 - 支持游戏设置、选项和确认弹窗，快速存档、读档可以正常处理确认操作；具体可用功能仍取决于游戏兼容性。
+- 为使用 MenuItem 的游戏提供弹出菜单，支持子菜单、勾选与单选项、禁用/隐藏状态、每个窗口独立菜单和快捷键，可用手柄、键盘和触摸操作。
 - 各游戏存档分开保存，连续快速存档时可正常轮换备份。
 - 支持补丁和翻译资源优先加载，按目录查找资源，避免不同目录的同名图片被误用。
 - 改善中文、日文脚本和字体兼容性；提供解密脚本的游戏，可尝试通过该脚本读取加密资源包。
@@ -73,15 +74,19 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 - 支持 E-mote 动态立绘，改善有限动画结束后返回标题的流畅度。
 - 支持 AlphaMovie 透明动画的播放、循环和跳帧。
 - 内置原生 LayerExRaster 插件，支持游戏脚本调用的波纹图像效果，改善相关剧情转场的兼容性。
-- 音乐与语音支持 WAV、OGG、Opus 等格式；视频支持部分 WMV、MP4、MPEG 格式，可从游戏目录或资源包播放，并支持音量调整。
+- 音乐与语音支持 WAV、OGG、Opus 和部分 AAC/M4A、MP3 音频，兼容扩展名与实际内容不一致的语音资源；视频支持部分 WMV、MP4、MPEG 格式，可从游戏目录或资源包播放，并支持音量调整。
+- 视频支持按时间或帧跳转、指定片段循环，适用于独立视频画面与图层视频；跳转后保留播放或暂停状态。
+- 视频暂不支持变速和多音轨切换；视频可解码的音轨格式不代表独立音频也支持相同格式。
 - 内置文字绘制、脚本解析、存档和字体等常用插件；仍有部分插件与格式尚未支持。
 
 **流畅度与稳定性**
 
 - 缓存已显示的文字、图片和游戏资源，减少重复读取与绘制，改善游戏库切换和菜单响应。
+- 减少大面积 E-mote 动画的重复计算，并行处理部分转场；线程资源不足时回退到同步绘制。
 - 检查图片读取和解码错误，无法预览的图片会显示提示，也可改用自定义图片。
 - 修复部分影片播放中的音频断流，完善片尾音频处理和播放资源释放。
 - 退出游戏时清理窗口、音频、定时器和事件，修复脚本清理异常引起的重复退出，改善返回游戏库的稳定性。
+- 修复部分游戏快速读档时的对象清理崩溃，完善视频关闭和重复打开时的资源释放。
 - 诊断日志自动保留最近 3 次。
 
 ## 🗂 架构
@@ -92,7 +97,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 | --- | --- |
 | 启动器 | `data/startup.tjs` 提供游戏列表、启动选择和预览图界面；`LauncherArtwork` 模块负责扫描图片、生成缩略图和保存选择。 |
 | 引擎核心 | `external/krkrz/` 提供 TJS2 脚本执行、图层与位图、资源归档等公共逻辑；资源路径查找位于 `base/StorageIntf.cpp`。 |
-| Switch 平台适配 | `src/core/` 对接窗口、输入、绘制、文件系统和音频；使用 SDL2 与 libnx 适配 Switch，FAudio 负责音频输出，FFmpeg 负责视频及视频音轨解码。 |
+| Switch 平台适配 | `src/core/` 对接窗口、输入、绘制、文件系统和音频；使用 SDL2 与 libnx 适配 Switch，FAudio 负责音频输出，FFmpeg 负责视频、视频音轨及独立音频的后备解码。 |
 | 内置插件 | `src/plugins/` 提供 E-mote、AlphaMovie、LayerExRaster、文字绘制和脚本解析等功能，编译进 NRO，由引擎注册或按需启用；AlphaMovie 独立解码透明动画并输出到图层。 |
 | 脚本兼容层 | `compat-patches/system/` 提供平台兼容脚本，随启动器和字体一起打包进 RomFS；SD 卡上的兼容补丁可覆盖内置版本。 |
 
@@ -135,7 +140,7 @@ KRKR-ns/
 └── build_nro.sh                    # 构建、NRO 打包与模拟器部署入口
 ```
 
-> 文档索引：[docs/README.md](docs/README.md)；移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)，源码补丁见 [PATCHES.md](docs/PATCHES.md)。[COMPAT_BACKLOG.md](docs/COMPAT_BACKLOG.md) 是较早的 krkrsdl3 对照记录；上游差异见 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)，由 `tools/upstream_delta.sh` 生成。
+> 文档索引：[docs/README.md](docs/README.md)；移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)，模块说明见 [MODULES.md](docs/MODULES.md)，源码补丁见 [PATCHES.md](docs/PATCHES.md)，性能与故障记录见 [RUNTIME_NOTES.md](docs/RUNTIME_NOTES.md)。上游差异见 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)，由 `tools/upstream_delta.sh` 生成。
 
 ## 📄 许可
 

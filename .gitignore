@@ -7,6 +7,11 @@ build_nro.log
 # 代理会话工具目录(上游克隆 / 调试截图 / 日志,不入库)
 .zcode/
 
+# 本地协作约定与会话清理工具，不随仓库发布
+/AGENTS.md
+/tools/cleanup_generated_files.ps1
+/docs/LOCAL_DEVELOPMENT.md
+
 # Python 缓存
 __pycache__/
 *.pyc

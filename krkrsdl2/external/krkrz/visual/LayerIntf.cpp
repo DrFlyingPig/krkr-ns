@@ -18,6 +18,10 @@
 
 #include "tjsArray.h"
 #include "KrkrNSLog.h"
+#ifdef __SWITCH__
+#include <SDL.h>
+#include "KrkrNSProf.h"
+#endif
 #include "LayerIntf.h"
 #include "WindowIntf.h"
 #include "MsgIntf.h"
@@ -6565,7 +6569,13 @@ void tTJSNI_BaseLayer::InternalComplete(tTVPComplexRect & updateregion,
 //---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 {
+#ifdef __SWITCH__
+	const Uint64 profileStart = SDL_GetPerformanceCounter();
+#endif
 	BeforeCompletion();
+#ifdef __SWITCH__
+	const Uint64 profilePrepared = SDL_GetPerformanceCounter();
+#endif
 
 	if(Manager) Manager->NotifyUpdateRegionFixed();
 
@@ -6584,7 +6594,16 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 	if(Manager) Manager->GetLayerTreeOwner()->EndBitmapCompletion(Manager);
 
 	InCompletion = false;
+#ifdef __SWITCH__
+	const Uint64 profileRasterized = SDL_GetPerformanceCounter();
+#endif
 	AfterCompletion();
+#ifdef __SWITCH__
+	const double profileScale = 1000.0 / SDL_GetPerformanceFrequency();
+	krkrsdl2_prof_layer_complete((profilePrepared - profileStart) * profileScale,
+		(profileRasterized - profilePrepared) * profileScale,
+		(SDL_GetPerformanceCounter() - profileRasterized) * profileScale);
+#endif
 }
 //---------------------------------------------------------------------------
 tTVPBaseBitmap * tTJSNI_BaseLayer::Complete(const tTVPRect & rect)

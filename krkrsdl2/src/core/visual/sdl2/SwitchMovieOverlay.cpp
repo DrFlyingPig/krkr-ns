@@ -4,7 +4,9 @@
 #include "SwitchMovieOverlay.h"
 #include "MovieAudioQueue.h"
 
+#include <algorithm>
 #include <cstring>
+#include <cmath>
 #include <limits>
 
 #include "MsgIntf.h"
@@ -24,6 +26,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/mem.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -439,7 +442,12 @@ void SwitchMovieOverlay::CloseCodecs()
     }
     KRKRNS_LOG("[movie] close: format closed");
     if (avio_)
+    {
+        // libavformat may replace the original custom-IO buffer; release
+        // the current one after closing the demuxer, then the IO context.
+        av_freep(&avio_->buffer);
         avio_context_free(&avio_);
+    }
     KRKRNS_LOG("[movie] close: avio freed");
     if (stream_)
     {
@@ -454,6 +462,12 @@ void SwitchMovieOverlay::CloseCodecs()
     width_ = height_ = 0;
     frameStride_ = 0;
     frameCount_.store(0);
+    pendingFrame_.store(0);
+    pendingPositionMs_.store(0);
+    nextFrameIndex_ = 0;
+    seekVideoTimestamp_ = seekAudioTimestamp_ = 0;
+    discardVideoPreroll_ = discardAudioPreroll_ = false;
+    pauseAfterSeekFrame_ = false;
     status_.store(vsStopped);
 }
 
@@ -490,7 +504,10 @@ void SwitchMovieOverlay::Play()
     frontBuf_.store(0);
     // drain any leftover events from a previous run
     evRead_.store(evWrite_.load(std::memory_order_acquire));
-    startedMs_ = SDL_GetTicks();
+    // A seek starts at an absolute movie time. Preserve the media timeline
+    // rather than renumbering its first decoded frame as frame zero.
+    startedMs_ = SDL_GetTicks() -
+                 static_cast<Uint32>(pendingPositionMs_.load());
     // audio output (best effort): created on the first play, restarted on
     // every play; a missing device keeps the previous silent behaviour.
     audioEof_ = false;
@@ -561,8 +578,8 @@ void SwitchMovieOverlay::Rewind()
 {
     Stop();
     ClearEvents();
-    // No seek support by design (WA2-ns: rewind = full reopen). Reopen the
-    // same Kirikiri storage and restart.
+    // Rewind keeps the established full-reopen path. Arbitrary seeks use the
+    // current demuxer, while this path also resets its probing state.
     long w = 0, h = 0;
     tTJSBinaryStream *stream = nullptr;
     try
@@ -576,6 +593,129 @@ void SwitchMovieOverlay::Rewind()
     }
     if (OpenStream(openPath_, stream, w, h))
         Play();
+}
+
+void SwitchMovieOverlay::SetPosition(unsigned long long tick)
+{
+    SeekToMilliseconds(tick);
+}
+
+void SwitchMovieOverlay::SetFrame(int frame)
+{
+    if (fps_ <= 0.0) return;
+    const int target = frame < 0 ? 0 : frame;
+    const double milliseconds = target * 1000.0 / fps_;
+    if (milliseconds >= static_cast<double>(std::numeric_limits<uint64_t>::max()))
+        return;
+    SeekToMilliseconds(static_cast<uint64_t>(milliseconds + 0.5), target);
+}
+
+bool SwitchMovieOverlay::SeekToMilliseconds(uint64_t tick, int requestedFrame)
+{
+    if (!format_ || !videoCodec_ || videoStream_ < 0) return false;
+
+    const tTVPVideoStatus previousStatus = status_.load();
+    AVStream *video = format_->streams[videoStream_];
+    // Stream timestamps are in separate time bases, but share one container
+    // timeline. If the container has no start time, use the first video's
+    // stream start as that common origin rather than zeroing each track.
+    const int64_t originUs = format_->start_time != AV_NOPTS_VALUE
+        ? format_->start_time
+        : (video->start_time != AV_NOPTS_VALUE
+            ? av_rescale_q(video->start_time, video->time_base, AV_TIME_BASE_Q)
+            : 0);
+    int64_t maxMilliseconds = (std::numeric_limits<int64_t>::max() -
+                               std::max<int64_t>(originUs, 0)) / 1000;
+    if (format_->duration > 0)
+        maxMilliseconds = std::min<int64_t>(maxMilliseconds,
+                                             format_->duration / 1000);
+    const int64_t targetMs = static_cast<int64_t>(
+        std::min<uint64_t>(tick, static_cast<uint64_t>(maxMilliseconds)));
+    const int64_t targetUs = originUs + targetMs * 1000;
+    const int64_t videoTimestamp = av_rescale_q(targetUs, AV_TIME_BASE_Q,
+                                                video->time_base);
+    const int64_t audioTimestamp = audioStream_ >= 0
+        ? av_rescale_q(targetUs, AV_TIME_BASE_Q,
+                       format_->streams[audioStream_]->time_base)
+        : 0;
+
+    // The demuxer and both codecs are owned by the worker. First stop its
+    // audio source, then join it, then touch any FFmpeg or PCM state.
+    Stop();
+    const uint64_t previousPosition = pendingPositionMs_.load();
+    const int previousNextFrame = nextFrameIndex_;
+    CloseAudio(); // synchronizes in-flight FAudio completion callbacks
+    int error = av_seek_frame(format_, videoStream_, videoTimestamp,
+                              AVSEEK_FLAG_BACKWARD);
+    if (error < 0)
+    {
+        KRKRNS_LOG("[movie] seek failed ms=%lld code=%d",
+                   static_cast<long long>(targetMs), error);
+        // A failed demux seek should not leave stale pixels exposed or turn a
+        // playing movie into a permanently stopped one. Try to re-seek to the
+        // old time; if that also fails, continue from the demuxer's position.
+        const int64_t restoreUs = originUs +
+            static_cast<int64_t>(previousPosition) * 1000;
+        const int64_t restoreTimestamp = av_rescale_q(
+            restoreUs, AV_TIME_BASE_Q, video->time_base);
+        const int restoreError = av_seek_frame(
+            format_, videoStream_, restoreTimestamp, AVSEEK_FLAG_BACKWARD);
+        if (restoreError < 0)
+            KRKRNS_LOG("[movie] seek rollback failed code=%d", restoreError);
+        avcodec_flush_buffers(videoCodec_);
+        if (audioCodec_) avcodec_flush_buffers(audioCodec_);
+        if (swrResample_) swr_free(&swrResample_);
+        seekVideoTimestamp_ = restoreTimestamp;
+        seekAudioTimestamp_ = audioStream_ >= 0
+            ? av_rescale_q(restoreUs, AV_TIME_BASE_Q,
+                           format_->streams[audioStream_]->time_base) : 0;
+        discardVideoPreroll_ = discardAudioPreroll_ = true;
+        nextFrameIndex_ = previousNextFrame;
+        pendingPositionMs_.store(previousPosition);
+        frameCount_.store(0);
+        pendingFrame_.store(previousNextFrame);
+        ClearEvents();
+        if (previousStatus == vsPlaying || previousStatus == vsPaused)
+        {
+            pauseAfterSeekFrame_ = previousStatus == vsPaused;
+            Play();
+        }
+        else
+            status_.store(previousStatus == vsEnded ? vsEnded : vsStopped);
+        return false;
+    }
+
+    avcodec_flush_buffers(videoCodec_);
+    if (audioCodec_) avcodec_flush_buffers(audioCodec_);
+    if (swrResample_) swr_free(&swrResample_);
+    audioEof_ = false;
+    pcmRead_ = pcmWrite_ = 0;
+    seekVideoTimestamp_ = videoTimestamp;
+    seekAudioTimestamp_ = audioTimestamp;
+    discardVideoPreroll_ = discardAudioPreroll_ = true;
+    pauseAfterSeekFrame_ = previousStatus == vsPaused;
+    const double estimatedFrame = targetMs * fps_ / 1000.0;
+    nextFrameIndex_ = requestedFrame >= 0
+        ? std::min(requestedFrame, std::numeric_limits<int>::max() - 1) :
+        static_cast<int>(std::min<double>(estimatedFrame,
+                                          std::numeric_limits<int>::max() - 1));
+    if (totalFrames_ > 0)
+        nextFrameIndex_ = static_cast<int>(std::min<int64_t>(
+            nextFrameIndex_, std::min<int64_t>(totalFrames_,
+                                               std::numeric_limits<int>::max() - 1)));
+    frameCount_.store(0);
+    pendingFrame_.store(nextFrameIndex_);
+    pendingPositionMs_.store(static_cast<uint64_t>(targetMs));
+    // A queued EC_COMPLETE or EC_UPDATE belongs to the old playback epoch.
+    ClearEvents();
+    if (previousStatus == vsPlaying || previousStatus == vsPaused)
+        Play();
+    else
+        status_.store(previousStatus == vsEnded ? vsEnded : vsStopped);
+    KRKRNS_LOG("[movie] seek ms=%lld frame=%d resume=%d",
+               static_cast<long long>(targetMs), nextFrameIndex_,
+               static_cast<int>(previousStatus));
+    return true;
 }
 
 void SwitchMovieOverlay::GetStatus(tTVPVideoStatus * status)
@@ -651,19 +791,18 @@ bool SwitchMovieOverlay::QueueEvent(long evcode, LONG_PTR p1, LONG_PTR p2,
 
 void SwitchMovieOverlay::GetFrame(int * f)
 {
-    if (f) *f = frameCount_.load();
+    if (!f) return;
+    const int published = frameCount_.load(std::memory_order_acquire);
+    *f = published > 0 ? published - 1
+                       : pendingFrame_.load(std::memory_order_acquire);
 }
 
 void SwitchMovieOverlay::GetPosition(unsigned long long * tick)
 {
     if (!tick) return;
-    // frameCount_ counts published frames: the first frame has index zero.
-    // Use PublishFrame's fixed-fps timeline; pausing freezes this position.
-    // Its existing pacing can publish up to about 66 ms ahead of wall time.
-    const int published = frameCount_.load(std::memory_order_acquire);
-    *tick = fps_ > 0.0 && published > 0
-        ? static_cast<unsigned long long>((published - 1) * 1000.0 / fps_)
-        : 0;
+    // Before the first post-seek frame this is the requested absolute time;
+    // afterwards PublishFrame updates it from the displayed frame index.
+    *tick = pendingPositionMs_.load(std::memory_order_acquire);
 }
 
 void SwitchMovieOverlay::GetFPS(double * f)
@@ -689,7 +828,8 @@ void SwitchMovieOverlay::GetVideoSize(long * width, long * height)
 
 void SwitchMovieOverlay::GetFrontBuffer(BYTE ** buff)
 {
-    if (buff) *buff = buffers_[frontBuf_.load(std::memory_order_acquire)];
+    if (buff) *buff = frameCount_.load(std::memory_order_acquire) > 0
+        ? buffers_[frontBuf_.load(std::memory_order_acquire)] : nullptr;
 }
 
 void SwitchMovieOverlay::SetVideoBuffer(BYTE * buff1, BYTE * buff2, long size)
@@ -907,7 +1047,23 @@ bool SwitchMovieOverlay::WaitForPlaybackTime(double seconds)
 bool SwitchMovieOverlay::PublishFrame(AVFrame * frame)
 {
     if (!frame || quit_.load() || !sws_) return false;
-    const int idx = frameCount_.load(std::memory_order_relaxed);
+    if (discardVideoPreroll_)
+    {
+        // av_seek_frame lands on a keyframe at or before the requested time.
+        // Decode the dependent frames, but never show the keyframe as the
+        // requested picture unless it is close enough to that time.
+        const int64_t timestamp = frame->best_effort_timestamp != AV_NOPTS_VALUE
+            ? frame->best_effort_timestamp : frame->pts;
+        if (timestamp != AV_NOPTS_VALUE)
+        {
+            const int64_t tolerance = av_rescale_q(
+                static_cast<int64_t>(500000.0 / fps_), AVRational{1, 1000000},
+                format_->streams[videoStream_]->time_base);
+            if (timestamp < seekVideoTimestamp_ - tolerance) return true;
+        }
+        discardVideoPreroll_ = false;
+    }
+    const int idx = nextFrameIndex_;
     if (!WaitForPlaybackTime((double)idx / fps_)) return false;
 
     const int slot = idx & 1;
@@ -929,7 +1085,15 @@ bool SwitchMovieOverlay::PublishFrame(AVFrame * frame)
     // untouched bitmap on every other frame.
     frontBuf_.store(slot, std::memory_order_release);
     frameCount_.store(idx + 1, std::memory_order_release);
-    QueueEvent(EC_UPDATE, (LONG_PTR)(idx + 1), 0, false);
+    nextFrameIndex_ = idx + 1;
+    pendingPositionMs_.store(static_cast<uint64_t>(idx * 1000.0 / fps_),
+                             std::memory_order_release);
+    QueueEvent(EC_UPDATE, (LONG_PTR)idx, 0, false);
+    if (pauseAfterSeekFrame_)
+    {
+        pauseAfterSeekFrame_ = false;
+        status_.store(vsPaused);
+    }
     if (idx == 0 || ((idx + 1) % 120) == 0)
         KRKRNS_LOG("[movie] published frame=%d slot=%d", idx + 1, slot);
     return true;
@@ -1012,6 +1176,31 @@ void SwitchMovieOverlay::AudioQueueCb(iTVPAudioStream * stream, void * user)
 void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
 {
     if (quit_.load() || !audioOut_) return;
+    int64_t skipSamples = 0;
+    if (discardAudioPreroll_)
+    {
+        const int64_t timestamp = frame->best_effort_timestamp != AV_NOPTS_VALUE
+            ? frame->best_effort_timestamp : frame->pts;
+        if (timestamp != AV_NOPTS_VALUE && frame->sample_rate > 0)
+        {
+            const AVRational timeBase = format_->streams[audioStream_]->time_base;
+            const int64_t sampleOffset = av_rescale_q_rnd(
+                seekAudioTimestamp_ - timestamp, timeBase,
+                AVRational{1, frame->sample_rate}, AV_ROUND_UP);
+            if (sampleOffset >= frame->nb_samples) return;
+            if (sampleOffset > 0)
+                skipSamples = av_rescale_q_rnd(
+                    seekAudioTimestamp_ - timestamp, timeBase,
+                    AVRational{1, audioRate_}, AV_ROUND_UP);
+        }
+        else if (discardVideoPreroll_)
+        {
+            // Without timestamps, prefer dropping preroll audio to replaying
+            // samples from the preceding GOP after a seek.
+            return;
+        }
+        discardAudioPreroll_ = false;
+    }
     if (!swrResample_)
     {
         AVChannelLayout outLayout;
@@ -1041,8 +1230,10 @@ void SwitchMovieOverlay::ConsumeAudioFrame(AVFrame * frame)
                                 (const uint8_t **)frame->extended_data,
                                 frame->nb_samples);
     if (got <= 0) return;
-    const size_t bytes = (size_t)got * bytesPerFrame;
-    AppendAudioPcm(converted.data(), bytes);
+    const size_t skipped = static_cast<size_t>(std::min<int64_t>(
+        skipSamples, got));
+    const size_t bytes = (static_cast<size_t>(got) - skipped) * bytesPerFrame;
+    if (bytes) AppendAudioPcm(converted.data() + skipped * bytesPerFrame, bytes);
 }
 
 void SwitchMovieOverlay::AppendAudioPcm(const uint8_t *data, size_t bytes)
@@ -1115,7 +1306,8 @@ void SwitchMovieOverlay::DrainAudio()
 // sends a partial tail (marked end-of-stream) when the movie is over.
 void SwitchMovieOverlay::FeedAudio(bool flush, bool allowPartialTail)
 {
-    if (!audioOut_ || quit_.load() || status_.load() == vsPaused) return;
+    if (!audioOut_ || quit_.load() || status_.load() == vsPaused ||
+        pauseAfterSeekFrame_) return;
     const size_t available = pcmWrite_ - pcmRead_;
     const auto result = RefillMovieAudioQueue(
         *audioOut_, pcmRing_, pcmRead_, pcmWrite_, audioBlocks_,

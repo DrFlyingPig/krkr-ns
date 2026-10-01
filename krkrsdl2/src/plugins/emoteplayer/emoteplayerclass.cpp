@@ -168,6 +168,8 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                 2, 1, 0, 3, 6, 5, 4, 7,
                 10, 9, 8, 11, 14, 13, 12, 15};
             const uint8x16_t swizzle = vld1q_u8(swizzleBytes);
+            uint32x4_t lastChanged = vdupq_n_u32(0);
+            int lastChangedX = 0;
             for (; x + 4 <= copyWidth; x += 4)
             {
                 const uint8x16_t rgba = vld1q_u8(sourceRow + static_cast<size_t>(x) * 4u);
@@ -175,18 +177,25 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                 const uint8x16_t old = vld1q_u8(destinationRow + static_cast<size_t>(x) * 4u);
                 const uint32x4_t changed = vmvnq_u32(vceqq_u32(
                     vreinterpretq_u32_u8(old), vreinterpretq_u32_u8(bgra)));
-                const bool c0 = vgetq_lane_u32(changed, 0) != 0;
-                const bool c1 = vgetq_lane_u32(changed, 1) != 0;
-                const bool c2 = vgetq_lane_u32(changed, 2) != 0;
-                const bool c3 = vgetq_lane_u32(changed, 3) != 0;
-                if (c0 || c1 || c2 || c3)
+                if (vmaxvq_u32(changed) != 0)
                 {
                     if (rowLeft == copyWidth)
-                        rowLeft = x + (c0 ? 0 : c1 ? 1 : c2 ? 2 : 3);
-                    rowRight = x + (c3 ? 4 : c2 ? 3 : c1 ? 2 : 1);
+                        rowLeft = x + (vgetq_lane_u32(changed, 0) ? 0 :
+                                       vgetq_lane_u32(changed, 1) ? 1 :
+                                       vgetq_lane_u32(changed, 2) ? 2 : 3);
+                    rowRight = x + 4;
+                    lastChangedX = x;
+                    lastChanged = changed;
+                    // Equal groups need no write. Determine the precise right
+                    // edge once per row rather than extracting four lanes for
+                    // every converted group; transparent erasure still counts.
+                    vst1q_u8(destinationRow + static_cast<size_t>(x) * 4u, bgra);
                 }
-                vst1q_u8(destinationRow + static_cast<size_t>(x) * 4u, bgra);
             }
+            if (rowRight)
+                rowRight = lastChangedX + (vgetq_lane_u32(lastChanged, 3) ? 4 :
+                                          vgetq_lane_u32(lastChanged, 2) ? 3 :
+                                          vgetq_lane_u32(lastChanged, 1) ? 2 : 1);
 #endif
             auto* destinationPixels = reinterpret_cast<std::uint32_t*>(destinationRow);
             const auto* sourcePixels = reinterpret_cast<const std::uint32_t*>(sourceRow);

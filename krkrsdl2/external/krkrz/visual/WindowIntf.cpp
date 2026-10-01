@@ -14,6 +14,7 @@
 #include <algorithm>
 #include "MsgIntf.h"
 #include "WindowIntf.h"
+#include "ScriptMgnIntf.h"
 #include "KrkrNSLog.h"
 #include "LayerIntf.h"
 #include "DebugIntf.h"
@@ -152,6 +153,9 @@ tTVPUniqueTagForInputEvent tTVPOnDrawInputEvent               ::Tag;
 //---------------------------------------------------------------------------
 tTJSNI_BaseWindow::tTJSNI_BaseWindow()
 {
+	// TJS attaches this native instance before the script constructor runs.
+	// A subclass may omit Window's constructor or throw before calling it.
+	Owner = NULL;
 	WaitVSync = false;
 	ObjectVectorLocked = false;
 	DrawBuffer = NULL;
@@ -196,6 +200,26 @@ tTJSNI_BaseWindow::Construct(tjs_int numparams, tTJSVariant **param,
 		if(cls) cls->Release();
 		if(newobj) newobj->Release();
 	}
+
+#ifdef __SWITCH__
+    // Preserve the compatibility menu entry for every Window, with an
+    // independent root; explicitly linked native menus use their own factory.
+    tTJS *engine = TVPGetScriptEngine();
+    if(engine) {
+        iTJSDispatch2 *global = engine->GetGlobalNoAddRef();
+        tTJSVariant factory;
+        if(TJS_SUCCEEDED(global->PropGet(0, TJS_W("__krkrnsCreateMenuRoot"), NULL,
+            &factory, global)) && factory.Type() == tvtObject && factory.AsObjectNoAddRef()) {
+            tTJSVariant argument(tjs_obj, tjs_obj), root;
+            tTJSVariant *arguments[] = {&argument};
+            tjs_error hr = factory.AsObjectClosureNoAddRef().FuncCall(0, NULL, NULL,
+                &root, 1, arguments, global);
+            if(TJS_SUCCEEDED(hr) && root.Type() == tvtObject && root.AsObjectNoAddRef())
+                tjs_obj->PropSet(TJS_MEMBERENSURE | TJS_IGNOREPROP, TJS_W("menu"), NULL,
+                    &root, tjs_obj);
+        }
+    }
+#endif
 
 	return TJS_S_OK;
 }
@@ -246,6 +270,35 @@ tTJSNI_BaseWindow::Invalidate()
 #ifdef KRKRZ_ENABLE_CANVAS
 	// stop draw cycle
 	if( DrawCycleTimer ) DrawCycleTimer->Terminate();
+#endif
+
+#ifdef __SWITCH__
+    tTJS *menuEngine = TVPGetScriptEngine();
+    if(menuEngine && Owner) {
+        iTJSDispatch2 *global = menuEngine->GetGlobalNoAddRef();
+        tTJSVariant close;
+        if(TJS_SUCCEEDED(global->PropGet(0, TJS_W("__krkrnsMenuClose"), NULL,
+            &close, global)) && close.Type() == tvtObject && close.AsObjectNoAddRef()) {
+            tTJSVariant window(Owner, Owner);
+            tTJSVariant *arguments[] = {&window};
+            try { close.AsObjectClosureNoAddRef().FuncCall(0, NULL, NULL, NULL,
+                1, arguments, global); }
+            catch(eTJSError &e) { TVPAddLog(e.GetMessage()); }
+        }
+    }
+    // Menus can retain the Window as their action owner. Invalidate their tree
+    // before releasing the Window and remove instance caches to break the cycle.
+    const tjs_char *menuNames[] = {TJS_W("menu"), TJS_W("_krkrnsNativeMenu"),
+        TJS_W("_krkrnsExSystemMenu")};
+    for(const tjs_char *name : menuNames) {
+        tTJSVariant menu;
+        if(Owner && TJS_SUCCEEDED(Owner->PropGet(TJS_MEMBERMUSTEXIST, name, NULL,
+            &menu, Owner)) && menu.Type() == tvtObject && menu.AsObjectNoAddRef()) {
+            try { menu.AsObjectClosureNoAddRef().Invalidate(0, NULL, NULL, menu.AsObjectNoAddRef()); }
+            catch(eTJSError &e) { TVPAddLog(e.GetMessage()); }
+            Owner->DeleteMember(0, name, NULL, Owner);
+        }
+    }
 #endif
 
 	// remove from list
