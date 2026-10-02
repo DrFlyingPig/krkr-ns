@@ -2,6 +2,8 @@
 
 # KRKR-ns
 
+[中文](README.md) | English
+
 **KiriKiri visual novel engine port for Nintendo Switch**
 
 **`⚠️ Experimental project; stability is not guaranteed. ⚠️`**
@@ -13,8 +15,6 @@ Porting baselines: [krkrsdl2](https://github.com/krkrsdl2/krkrsdl2) `bf207f2` an
 ![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-red?style=flat-square)
 
 **[⬇️ Download the NRO](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
-
-[简体中文](README.md) | [English](README.en.md)
 
 </div>
 
