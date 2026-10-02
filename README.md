@@ -2,6 +2,8 @@
 
 # KRKR-ns
 
+中文 | [English](README.en.md)
+
 **吉里吉里（KiriKiri）视觉小说引擎 · Nintendo Switch 移植版**
 
 **`⚠️ 属实验性项目，难以保证稳定性 ⚠️`**
@@ -13,8 +15,6 @@
 ![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-red?style=flat-square)
 
 **[⬇️ NRO下载入口](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
-
-[简体中文](README.md) | [English](README.en.md)
 
 </div>
 
