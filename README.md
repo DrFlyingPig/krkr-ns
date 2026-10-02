@@ -14,6 +14,8 @@
 
 **[⬇️ NRO下载入口](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
 
+[简体中文](README.md) | [English](README.en.md)
+
 </div>
 
 ---

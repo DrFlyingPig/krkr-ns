@@ -14,7 +14,7 @@ Porting baselines: [krkrsdl2](https://github.com/krkrsdl2/krkrsdl2) `bf207f2` an
 
 **[⬇️ Download the NRO](https://github.com/DrFlyingPig/krkr-ns/releases/latest)**
 
-[简体中文](README.md)
+[简体中文](README.md) | [English](README.en.md)
 
 </div>
 
