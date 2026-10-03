@@ -1,0 +1,29 @@
+// Copy the builder's sdcard tree into an isolated test SD root. This startup
+// repeatedly uses the real game handoff and in-process engine restart path.
+var statePath = "sdmc:/switch/KRKR-ns/scenario-restart-round.txt";
+var state = new Array();
+var round = 0;
+if (Storages.isExistentStorage(statePath)) {
+    state.load(statePath);
+    round = int state[0];
+}
+
+var launcher = new Window();
+launcher.setInnerSize(640, 360);
+var display = new Layer(launcher, null);
+display.setSize(640, 360);
+display.type = ltOpaque;
+display.fillRect(0, 0, 640, 360, 0xff205040);
+display.visible = true;
+launcher.visible = true;
+
+if (round < 8) {
+    state.clear();
+    state.add("" + (round + 1));
+    state.save(statePath);
+    var directory = round % 2 == 0 ? "ScenarioA" : "ScenarioB";
+    Debug.message("[scenario-restart] launch round=" + round + " game=" + directory);
+    Storages.launchXP3(directory, "data.xp3", launcher);
+} else {
+    Debug.message("[scenario-restart] COMPLETE 8 alternating game sessions");
+}

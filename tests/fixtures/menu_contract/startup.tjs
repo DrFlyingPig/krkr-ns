@@ -170,6 +170,26 @@ menuWindow.menu.popup(0, 20, 20);
 invalidate menuWindow;
 menuAssert(!global.__krkrnsMenuActive, "Window invalidation closes its popup");
 invalidate secondWindow;
+
+// KAG3 deletes owner and command before chaining to MenuItem.finalize. The base
+// finalizer must finish even though the derived class already broke these refs.
+var legacyFinalizes = 0;
+class LegacyDeleteMembersMenuItem extends MenuItem {
+    function LegacyDeleteMembersMenuItem(owner, caption) { super.MenuItem(owner, caption); }
+    function finalize() {
+        legacyFinalizes++;
+        delete owner;
+        delete command;
+        super.finalize(...);
+    }
+}
+var legacyRoot = new MenuItem(null, "Legacy root");
+var legacyItem = new LegacyDeleteMembersMenuItem(action, "Legacy child");
+legacyRoot.add(legacyItem);
+invalidate legacyItem;
+menuAssert(!(isvalid legacyItem) && legacyRoot.children.count == 0 && legacyFinalizes == 1,
+           "derived finalizer may delete owner and command before chaining to its base");
+invalidate legacyRoot;
 Debug.message("[menu-contract] COMPLETE " + menuChecks + " checks; script tree and layer popup");
 
 anchorLayer.fillRect(0, 0, 640, 360, 0xff205040);

@@ -1,0 +1,35 @@
+// Click the test window once. Its primary layer invalidates itself inside the
+// mouse-down callback, dropping both ordinary references to the layer manager.
+// The timer completion must run after the suspended native input delivery.
+class ClosingPrimaryLayer extends Layer {
+    function ClosingPrimaryLayer(window) { super.Layer(window, null); }
+    function onMouseDown(x, y, button, flags) {
+        Debug.message("[input-lifetime] invalidating primary during mouse down");
+        invalidate this;
+        global.inputLifetimeCallbackReturned = true;
+        // The instance is now invalid: resolve the remaining calls explicitly
+        // through global rather than this function's instance/global proxy.
+        global.Debug.message("[input-lifetime] script callback returned");
+    }
+}
+global.inputLifetimeCallbackReturned = false;
+var inputLifetimeWindow = new Window();
+inputLifetimeWindow.setInnerSize(640, 360);
+inputLifetimeWindow.caption = "KRKR NS input lifetime - click once";
+var inputLifetimeLayer = new ClosingPrimaryLayer(inputLifetimeWindow);
+inputLifetimeLayer.setSize(640, 360);
+inputLifetimeLayer.type = ltOpaque;
+inputLifetimeLayer.fillRect(0, 0, 640, 360, 0xff305070);
+inputLifetimeLayer.visible = true;
+inputLifetimeWindow.visible = true;
+
+var inputLifetimeTimer = new Timer(global);
+inputLifetimeTimer.interval = 100;
+inputLifetimeTimer.onTimer = function() {
+    if (!global.inputLifetimeCallbackReturned) return;
+    if (isvalid inputLifetimeLayer) throw new Exception("primary layer stayed valid");
+    Debug.message("[input-lifetime] COMPLETE native input resumed after primary invalidation");
+    inputLifetimeTimer.enabled = false;
+} incontextof global;
+inputLifetimeTimer.enabled = true;
+Debug.message("[input-lifetime] READY click once to invalidate the primary layer");

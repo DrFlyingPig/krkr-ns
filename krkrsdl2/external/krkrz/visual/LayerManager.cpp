@@ -25,6 +25,19 @@
 #include "KrkrNSLog.h"
 #include "GLCompositeBridge.h"
 
+// Immediate input callbacks may close their Window, including from a nested
+// modal loop. Keep the manager alive until the suspended delivery has returned.
+class tTVPLayerInputGuard
+{
+	tTVPLayerManager *Manager;
+public:
+	explicit tTVPLayerInputGuard(tTVPLayerManager *manager) : Manager(manager)
+		{ Manager->AddRef(); }
+	~tTVPLayerInputGuard() { Manager->Release(); }
+	tTVPLayerInputGuard(const tTVPLayerInputGuard &) = delete;
+	tTVPLayerInputGuard &operator=(const tTVPLayerInputGuard &) = delete;
+};
+
 
 
 //---------------------------------------------------------------------------
@@ -357,13 +370,22 @@ void tTVPLayerManager::PrimaryDoubleClick(tjs_int x, tjs_int y)
 void tTVPLayerManager::PrimaryMouseDown(tjs_int x, tjs_int y, tTVPMouseButton mb,
 	tjs_uint32 flags)
 {
+	tTVPLayerInputGuard manager_guard(this);
 	PrimaryMouseMove(x, y, flags);
+	if(!Primary) return;
 	tTJSNI_BaseLayer * l = CaptureOwner ? CaptureOwner : GetMostFrontChildAt(x, y);
 	if(l)
 	{
+		tTJSVariant layer_guard(l->Owner, l->Owner);
 		l->FromPrimaryCoordinates(x, y);
 		ReleaseCaptureCalled = false;
 		l->FireMouseDown(x, y, mb, flags);
+		if(!Primary) return;
+		if(l->Shutdown || l->Manager != this)
+		{
+			if(CaptureOwner == l) ReleaseCapture();
+			return;
+		}
 		bool no_capture = ReleaseCaptureCalled;
 
 		if(CaptureOwner != l)
@@ -389,6 +411,7 @@ void tTVPLayerManager::PrimaryMouseDown(tjs_int x, tjs_int y, tTVPMouseButton mb
 void tTVPLayerManager::PrimaryMouseUp(tjs_int x, tjs_int y, tTVPMouseButton mb,
 	tjs_uint32 flags)
 {
+	tTVPLayerInputGuard manager_guard(this);
 	tTJSNI_BaseLayer *l;
 
 	if(CaptureOwner)
@@ -398,10 +421,17 @@ void tTVPLayerManager::PrimaryMouseUp(tjs_int x, tjs_int y, tTVPMouseButton mb,
 
 	if(l)
 	{
+		tTJSVariant layer_guard(l->Owner, l->Owner);
 		int orig_x = x, orig_y = y;
 
 		l->FromPrimaryCoordinates(x, y);
 		l->FireMouseUp(x, y, mb, flags);
+		if(!Primary) return;
+		if(l->Shutdown || l->Manager != this)
+		{
+			if(CaptureOwner == l) ReleaseCapture();
+			return;
+		}
 
 		if(!TVPIsAnyMouseButtonPressedInShiftStateFlags(flags))
 		{
@@ -413,6 +443,8 @@ void tTVPLayerManager::PrimaryMouseUp(tjs_int x, tjs_int y, tTVPMouseButton mb,
 //---------------------------------------------------------------------------
 void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 {
+	tTVPLayerInputGuard manager_guard(this);
+	if(!Primary) return;
 	bool poschanged = (LastMouseMoveX != x || LastMouseMoveY != y);
 	LastMouseMoveX = x;
 	LastMouseMoveY = y;
@@ -423,11 +455,13 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 		l = CaptureOwner;
 	else
 		l = GetMostFrontChildAt(x, y);
+	tTJSVariant layer_guard = l ? tTJSVariant(l->Owner, l->Owner) : tTJSVariant();
 
 	// enter/leave event
 	if(LastMouseMoveSent != l)
 	{
 		if(LastMouseMoveSent) LastMouseMoveSent->FireMouseLeave();
+		if(!Primary) return;
 
 		// recheck l because the layer may become invalid during
 		// FireMouseLeave call.
@@ -435,6 +469,7 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 			l = CaptureOwner;
 		else
 			l = GetMostFrontChildAt(x, y);
+		layer_guard = l ? tTJSVariant(l->Owner, l->Owner) : tTJSVariant();
 
 		if(l)
 		{
@@ -444,6 +479,11 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 				tTJSNI_BaseLayer *ll;
 
 				l->FireMouseEnter();
+				if(!Primary)
+				{
+					InNotifyingHintOrCursorChange = false;
+					return;
+				}
 
 				// recheck l because the layer may become invalid during
 				// FireMouseEnter call.
@@ -454,15 +494,24 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 
 				if(l != ll)
 				{
-					l->FireMouseLeave();
-					l = ll;
+					if(!l->Shutdown && l->Manager == this) l->FireMouseLeave();
+					if(!Primary)
+					{
+						InNotifyingHintOrCursorChange = false;
+						return;
+					}
+					// Mouse leave can invalidate the replacement too.
+					l = CaptureOwner ? CaptureOwner : GetMostFrontChildAt(x, y);
+					layer_guard = l ? tTJSVariant(l->Owner, l->Owner) : tTJSVariant();
 					if(l) l->FireMouseEnter();
 				}
 
 				// note: rechecking is done only once to avoid infinite loop
 
-				if(l) l->SetCurrentCursorToWindow();
-				if(l) l->SetCurrentHintToWindow();
+				if(Primary && l && !l->Shutdown && l->Manager == this)
+					l->SetCurrentCursorToWindow();
+				if(Primary && l && !l->Shutdown && l->Manager == this)
+					l->SetCurrentHintToWindow();
 			}
 			catch(...)
 			{
@@ -471,12 +520,18 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 			}
 			InNotifyingHintOrCursorChange = false;
 		}
+		if(!Primary) return;
 
 		if(!l)
 		{
 			SetMouseCursor(0);
 			SetHint(NULL,ttstr());
 		}
+	}
+	if(l && (l->Shutdown || l->Manager != this))
+	{
+		if(CaptureOwner == l) ReleaseCapture();
+		l = NULL;
 	}
 
 	if(LastMouseMoveSent != l)
@@ -513,14 +568,17 @@ void tTVPLayerManager::PrimaryMouseMove(tjs_int x, tjs_int y, tjs_uint32 flags)
 //---------------------------------------------------------------------------
 void tTVPLayerManager::PrimaryTouchDown( tjs_real x, tjs_real y, tjs_real cx, tjs_real cy, tjs_uint32 id )
 {
+	tTVPLayerInputGuard manager_guard(this);
 	tjs_int ix = (tjs_int)x, iy = (tjs_int)y;
 	ReleaseTouchCapture(id);
 	tTJSNI_BaseLayer * l = GetMostFrontChildAt(ix, iy);
 	if( l )
 	{
+		tTJSVariant layer_guard(l->Owner, l->Owner);
 		l->FromPrimaryCoordinates(x, y);
 		ReleaseTouchCaptureIDMark = (tjs_int64)id;
 		l->FireTouchDown(x, y, cx, cy, id);
+		if(!Primary || l->Shutdown || l->Manager != this) return;
 		if( ReleaseTouchCaptureIDMark == (tjs_int64)id ) {
 			SetTouchCapture( id, l );
 		}
@@ -529,18 +587,22 @@ void tTVPLayerManager::PrimaryTouchDown( tjs_real x, tjs_real y, tjs_real cx, tj
 //---------------------------------------------------------------------------
 void tTVPLayerManager::PrimaryTouchUp( tjs_real x, tjs_real y, tjs_real cx, tjs_real cy, tjs_uint32 id )
 {
+	tTVPLayerInputGuard manager_guard(this);
 	tjs_int ix = (tjs_int)x, iy = (tjs_int)y;
 	tTJSNI_BaseLayer * l = GetTouchCapture(id) ? GetTouchCapture(id) : GetMostFrontChildAt(ix, iy);
 	if( l )
 	{
+		tTJSVariant layer_guard(l->Owner, l->Owner);
 		l->FromPrimaryCoordinates(x, y);
 		l->FireTouchUp(x, y, cx, cy, id);
+		if(!Primary) return;
 		ReleaseTouchCapture(id);
 	}
 }
 //---------------------------------------------------------------------------
 void tTVPLayerManager::PrimaryTouchMove( tjs_real x, tjs_real y, tjs_real cx, tjs_real cy, tjs_uint32 id )
 {
+	tTVPLayerInputGuard manager_guard(this);
 	tjs_int ix = (tjs_int)x, iy = (tjs_int)y;
 	tTJSNI_BaseLayer * l = GetTouchCapture(id) ? GetTouchCapture(id) : GetMostFrontChildAt(ix, iy);
 	if( l )

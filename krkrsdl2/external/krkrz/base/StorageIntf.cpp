@@ -36,6 +36,7 @@
 #include "tjsDictionary.h"
 #ifdef __SWITCH__
 #include "ScriptMgnIntf.h"
+#include "SystemImpl.h"
 #include "LauncherArtworkStorage.h"
 
 extern std::vector<ttstr> krkrsdl2_list_game_directories();
@@ -71,6 +72,59 @@ extern ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr 
 extern void krkrsdl2_mount_xp3_resources();
 extern bool krkrsdl2_can_launch_game();
 extern bool TVPTerminateOnWindowClose;
+
+// Match Kirikiroid2's TVPExecuteStartupScript: a failed patch stops that
+// script, reports its error, and still permits the normal startup attempt.
+// Keep this boundary around the sibling patch only; startup errors propagate.
+static void krkrns_execute_game_patch(const ttstr &patch)
+{
+	ttstr patch_error;
+	try
+	{
+		TVPExecuteStorage(patch);
+	}
+	catch(const eTJSScriptError &e)
+	{
+		patch_error = e.GetMessage();
+		const tjs_char *block_name = e.GetBlockName();
+		if(block_name && *block_name)
+		{
+			tjs_char line[34];
+			patch_error += TJS_W("\n@line(");
+			patch_error += TJS_int_to_str(e.GetSourceLine(), line);
+			patch_error += TJS_W(") ");
+			patch_error += block_name;
+		}
+		patch_error += TJS_W("\n");
+		patch_error += e.GetTrace();
+	}
+	catch(const eTJS &e)
+	{
+		if(!TVPSystemUninitCalled) patch_error = e.GetMessage();
+	}
+	catch(const std::exception &e)
+	{
+		patch_error = e.what();
+	}
+	catch(const char *e)
+	{
+		patch_error = e;
+	}
+	catch(const tjs_char *e)
+	{
+		patch_error = e;
+	}
+	if(!patch_error.IsEmpty())
+	{
+		KRKRNS_LOG("[launcher] sibling patch.tjs failed; continuing game startup");
+		TVPAddImportantLog(ttstr(TJS_W("[launcher] patch.tjs failed:\n")) + patch_error);
+		// System.inform uses this platform message-box path too. On Switch it
+		// logs the details without invoking the unsupported SDL dialog.
+		TVPShowSimpleMessageBox(
+			ttstr(TJS_W("游戏补丁执行失败，将继续尝试启动。\n\n")) + patch_error,
+			TJS_W("KRKR-ns"));
+	}
+}
 #endif
 
 #define TVP_DEFAULT_ARCHIVE_CACHE_NUM 64
@@ -2712,7 +2766,7 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 	if(TVPIsExistentStorageNoSearch(game_patch))
 	{
 		KRKRNS_LOG("[launcher] executing sibling patch.tjs before game startup");
-		TVPExecuteStorage(game_patch);
+		krkrns_execute_game_patch(game_patch);
 	}
 	krkrsdl2_mount_xp3_resources();
 

@@ -97,6 +97,16 @@ add_test(NAME draw_thread_failure COMMAND "${Python3_EXECUTABLE}"
     --sdl-dir "${SDL2_DIR}"
     --output-dir "${CMAKE_CURRENT_BINARY_DIR}/draw-thread-failure")
 set_tests_properties(draw_thread_failure PROPERTIES TIMEOUT 300)
+add_test(NAME gamepad_single_input COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gamepad_single_input_test.py"
+    --cmake "${CMAKE_COMMAND}"
+    --sdl-dir "${SDL2_DIR}"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/gamepad-single-input")
+set_tests_properties(gamepad_single_input PROPERTIES TIMEOUT 300)
+add_test(NAME png_metadata COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/png_metadata_test.py"
+    --cmake "${CMAKE_COMMAND}"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/png-metadata")
 add_test(NAME window_cleanup COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/window_cleanup_test.py"
     --cmake "${CMAKE_COMMAND}"
@@ -105,6 +115,10 @@ add_test(NAME window_construction COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/window_construction_test.py"
     --cmake "${CMAKE_COMMAND}"
     --output-dir "${CMAKE_CURRENT_BINARY_DIR}/window-construction")
+add_test(NAME layer_input_lifetime COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/layer_input_lifetime_test.py"
+    --cmake "${CMAKE_COMMAND}"
+    --output-dir "${CMAKE_CURRENT_BINARY_DIR}/layer-input-lifetime")
 if(WIN32)
     add_custom_command(TARGET bitmap_bridge_test POST_BUILD COMMAND ${CMAKE_COMMAND} -E
         copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:bitmap_bridge_test>)

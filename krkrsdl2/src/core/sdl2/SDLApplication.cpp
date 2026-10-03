@@ -624,21 +624,22 @@ struct ns_gamepad_state_t
 static ns_gamepad_state_t ns_gp;
 static Uint16 ns_gp_prev_buttons = 0;
 static Uint16 ns_gp_menu_face_buttons = 0;
+static Uint16 ns_gp_native_face_buttons = 0;
+static const SDL_GameControllerButton ns_gp_button_map[NS_GP_BTN_COUNT] = {
+	SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X,
+	SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_BACK, SDL_CONTROLLER_BUTTON_START,
+	SDL_CONTROLLER_BUTTON_LEFTSTICK, SDL_CONTROLLER_BUTTON_RIGHTSTICK,
+	SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+	SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+	SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT
+};
 
 static Uint16 ns_gp_read_buttons(SDL_GameController *c)
 {
-	static const SDL_GameControllerButton map[NS_GP_BTN_COUNT] = {
-		SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_B, SDL_CONTROLLER_BUTTON_X,
-		SDL_CONTROLLER_BUTTON_Y, SDL_CONTROLLER_BUTTON_BACK, SDL_CONTROLLER_BUTTON_START,
-		SDL_CONTROLLER_BUTTON_LEFTSTICK, SDL_CONTROLLER_BUTTON_RIGHTSTICK,
-		SDL_CONTROLLER_BUTTON_LEFTSHOULDER, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
-		SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
-		SDL_CONTROLLER_BUTTON_DPAD_LEFT, SDL_CONTROLLER_BUTTON_DPAD_RIGHT
-	};
 	Uint16 bits = 0;
 	for (int i = 0; i < NS_GP_BTN_COUNT; i += 1)
 	{
-		if (SDL_GameControllerGetButton(c, map[i]))
+		if (SDL_GameControllerGetButton(c, ns_gp_button_map[i]))
 		{
 			bits |= (Uint16)(1 << i);
 		}
@@ -1253,8 +1254,9 @@ public:
 	   content layer exists at all, and with what size -- which a per-frame pixel
 	   diff cannot tell apart from "present but empty". */
 	void krkrsdl2_dump_layer_tree();
-	/* KRKR-ns patch: gamepad -> mouse/keyboard synthesis, polled each frame */
+	/* KRKR-ns patch: gamepad -> mouse/keyboard synthesis from polling and edges */
 	void switch_process_gamepad_input();
+	void switch_process_gamepad_button(int button, bool pressed);
 	/* KRKR-ns patch: mark the whole compose surface as damaged so the next
 	   frame re-uploads every pixel. Any (re)created SDL_TEXTUREACCESS_STREAMING
 	   texture starts as undefined/black content, and the engine only reports
@@ -4665,13 +4667,17 @@ bool TVPWindowWindow::window_receive_event_input(SDL_Event event)
 				case SDL_CONTROLLERBUTTONUP:
 				{
 #ifdef __SWITCH__
-					// switch_process_gamepad_input already turns the d-pad into
-					// arrow keys; delivering the native VK_PAD* here as well made
-					// games that accept both streams move two rows per press.
-					if (event.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
-						event.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT)
+					extern bool krkrsdl2_game_mode;
+					// Game sessions use the mouse/key mapping in
+					// switch_process_gamepad_input. Sending VK_PAD* as well lets
+					// a game's own pad map trigger a second shortcut (A can both
+					// click and hold Return/Ctrl for skipping). The launcher still
+					// needs native face buttons; its d-pad already uses arrows.
+					if (krkrsdl2_game_mode ||
+						(event.cbutton.button >= SDL_CONTROLLER_BUTTON_DPAD_UP &&
+						 event.cbutton.button <= SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
 					{
-						KRKRNS_LOG("[keytrace] native dpad swallowed btn=%d", (int)event.cbutton.button);
+						KRKRNS_LOG("[keytrace] native pad swallowed btn=%d", (int)event.cbutton.button);
 						return true;
 					}
 #endif
@@ -4783,7 +4789,6 @@ namespace { bool krkrns_menu_is_active(); }
 
 void TVPWindowWindow::switch_process_gamepad_input()
 {
-	extern bool krkrsdl2_game_mode;
 	if (isBeingDeleted || !window || !hasDrawn)
 	{
 		return;
@@ -4838,101 +4843,141 @@ void TVPWindowWindow::switch_process_gamepad_input()
 		}
 		ns_gp_move_cursor(window, ns_gp.mouse_x, ns_gp.mouse_y);
 	}
-	// button edges -> synthetic mouse / key events
-	Uint16 changed = (Uint16)(buttons ^ ns_gp_prev_buttons);
-	ns_gp_prev_buttons = buttons;
-	const bool menuActive = krkrns_menu_is_active();
-	if (menuActive) this->menuInputOwnedThisPoll = true;
+	// Poll held states, and let queued controller edges use the same mapper.
+	// A complete down/up between frames must not disappear with the raw PAD
+	// shortcut stream disabled. Shared edge state prevents duplicate actions.
+	const Uint16 changed = (Uint16)(buttons ^ ns_gp_prev_buttons);
+	if (krkrns_menu_is_active()) this->menuInputOwnedThisPoll = true;
 	for (int b = 0; b < NS_GP_BTN_COUNT; b += 1)
 	{
-		Uint16 bit = (Uint16)(1 << b);
-		if (!(changed & bit))
+		const Uint16 bit = (Uint16)(1 << b);
+		if (changed & bit) switch_process_gamepad_button(b, !!(buttons & bit));
+	}
+}
+
+void TVPWindowWindow::switch_process_gamepad_button(int b, bool pressed)
+{
+	extern bool krkrsdl2_game_mode;
+	if (isBeingDeleted || !window || !hasDrawn || b < 0 || b >= NS_GP_BTN_COUNT) return;
+	const Uint16 bit = (Uint16)(1 << b);
+	if (pressed == !!(ns_gp_prev_buttons & bit)) return;
+	if (pressed) ns_gp_prev_buttons |= bit;
+	else ns_gp_prev_buttons &= (Uint16)~bit;
+	const bool menuActive = krkrns_menu_is_active();
+	if (menuActive) this->menuInputOwnedThisPoll = true;
+	const bool faceButton = b >= NS_GP_BTN_A && b <= NS_GP_BTN_Y;
+	if (faceButton && ((pressed && menuActive) || (!pressed && (ns_gp_menu_face_buttons & bit))))
+	{
+		// A selects the highlighted row, B goes back. Keep each menu
+		// press mapped to the same key until release, even after closing;
+		// it must not become a game mouse-up at the old cursor position.
+		if (pressed) ns_gp_menu_face_buttons |= bit;
+		else ns_gp_menu_face_buttons &= (Uint16)~bit;
+		const SDL_Scancode key = b == NS_GP_BTN_A ? SDL_SCANCODE_ESCAPE :
+			b == NS_GP_BTN_X ? SDL_SCANCODE_SPACE : SDL_SCANCODE_RETURN;
+		ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, key, true);
+		return;
+	}
+	// The launcher handles native PAD1..PAD4 as Nintendo A/B/X/Y.
+	// Game-only click/Space/Enter synthesis would deliver a second action
+	// to that UI (for example X opening options and then confirming them).
+	// Keep the existing pointer/keyboard controls inside game sessions.
+	if (faceButton && (!krkrsdl2_game_mode || (ns_gp_native_face_buttons & bit)))
+	{
+		// A launcher press can start the game before A is released. Keep
+		// that release native instead of creating an unmatched game click.
+		if (pressed) ns_gp_native_face_buttons |= bit;
+		else ns_gp_native_face_buttons &= (Uint16)~bit;
+		return;
+	}
+	switch (b)
+	{
+		// IMPORTANT (NS vs Xbox face buttons): SDL_CONTROLLER_BUTTON_*
+		// follows XBOX POSITION semantics (A = bottom, B = right,
+		// X = left, Y = top). The physical Switch layout is mirrored:
+		// NS A = bottom-RIGHT, NS B = bottom, NS X = top-RIGHT, NS Y =
+		// top-LEFT. The synthesized actions are therefore swapped
+		// relative to the SDL labels to give NS-natural behavior:
+		//   NS A (right) = left click, NS B (bottom) = right click,
+		//   NS Y (left) = Space, NS X (top-right) = Enter.
+		case NS_GP_BTN_A: // SDL A (Xbox bottom) = NS B = right click = menu / back
+			ns_gp.right_down = pressed;
+			ns_gp_push_mouse_button(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_RIGHT);
+			break;
+		case NS_GP_BTN_B: // SDL B (Xbox right) = NS A = left click = confirm/advance
+			ns_gp.left_down = pressed;
+			ns_gp_push_mouse_button(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_LEFT);
+			break;
+		case NS_GP_BTN_X: // SDL X (Xbox left) = NS Y (top-left) = Space
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_SPACE);
+			break;
+		case NS_GP_BTN_Y: // SDL Y (Xbox top) = NS X (top-right) = Enter
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_RETURN);
+			break;
+		case NS_GP_BTN_BACK: // Minus = F5 (quick save)
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_F5);
+			break;
+		case NS_GP_BTN_START: // Plus = Escape (system menu / cancel)
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_ESCAPE);
+			break;
+		case NS_GP_BTN_LSTICK: // L3 = Ctrl (hold to skip)
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_LCTRL);
+			break;
+		case NS_GP_BTN_RSTICK: // R3 = F7 (quick load)
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_F7);
+			break;
+		case NS_GP_BTN_LSHOULDER: // L = wheel up (back log)
+			if (pressed) ns_gp_push_mouse_wheel(window, 1);
+			break;
+		case NS_GP_BTN_RSHOULDER: // R = wheel down (advance)
+			if (pressed) ns_gp_push_mouse_wheel(window, -1);
+			break;
+		// d-pad = the arrow keys KAG navigates its menus and dialogs with:
+		// MainWindow.onKeyUp hands VK_LEFT/RIGHT/UP/DOWN to the active
+		// object (a check dialog toggles Yes/No on left/right, the save
+		// screen moves the slot selection), and the object switches itself
+		// into key mode on the first one.  That path needs no cursor at all.
+		case NS_GP_BTN_DPAD_UP:
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_UP);
+			break;
+		case NS_GP_BTN_DPAD_DOWN:
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_DOWN);
+			break;
+		case NS_GP_BTN_DPAD_LEFT:
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_LEFT);
+			break;
+		case NS_GP_BTN_DPAD_RIGHT:
+			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_RIGHT);
+			break;
+		default:
+			break;
+	}
+}
+
+static void ns_gp_process_controller_event(const SDL_Event &event)
+{
+	if (!_currentWindowWindow ||
+		(event.type != SDL_CONTROLLERBUTTONDOWN && event.type != SDL_CONTROLLERBUTTONUP)) return;
+	int b = 0;
+	while (b < NS_GP_BTN_COUNT && ns_gp_button_map[b] != event.cbutton.button) ++b;
+	if (b == NS_GP_BTN_COUNT) return;
+	bool pressed = event.cbutton.state == SDL_PRESSED;
+	if (!pressed)
+	{
+		// The polled route combines all controllers. Releasing one pad must
+		// not release a mouse/key action still held on another controller.
+		for (int i = 0; i < sdl_controller_num; ++i)
 		{
-			continue;
-		}
-		bool pressed = !!(buttons & bit);
-		const bool faceButton = b >= NS_GP_BTN_A && b <= NS_GP_BTN_Y;
-		if (faceButton && ((pressed && menuActive) || (!pressed && (ns_gp_menu_face_buttons & bit))))
-		{
-			// A selects the highlighted row, B goes back. Keep each menu
-			// press mapped to the same key until release, even after closing;
-			// it must not become a game mouse-up at the old cursor position.
-			if (pressed) ns_gp_menu_face_buttons |= bit;
-			else ns_gp_menu_face_buttons &= (Uint16)~bit;
-			const SDL_Scancode key = b == NS_GP_BTN_A ? SDL_SCANCODE_ESCAPE :
-				b == NS_GP_BTN_X ? SDL_SCANCODE_SPACE : SDL_SCANCODE_RETURN;
-			ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, key, true);
-			continue;
-		}
-		// The launcher handles native PAD1..PAD4 as Nintendo A/B/X/Y.
-		// Game-only click/Space/Enter synthesis would deliver a second action
-		// to that UI (for example X opening options and then confirming them).
-		// Keep the existing pointer/keyboard controls inside game sessions.
-		if (!krkrsdl2_game_mode && faceButton)
-			continue;
-		switch (b)
-		{
-			// IMPORTANT (NS vs Xbox face buttons): SDL_CONTROLLER_BUTTON_*
-			// follows XBOX POSITION semantics (A = bottom, B = right,
-			// X = left, Y = top). The physical Switch layout is mirrored:
-			// NS A = bottom-RIGHT, NS B = bottom, NS X = top-RIGHT, NS Y =
-			// top-LEFT. The synthesized actions are therefore swapped
-			// relative to the SDL labels to give NS-natural behavior:
-			//   NS A (right) = left click, NS B (bottom) = right click,
-			//   NS Y (left) = Space, NS X (top-right) = Enter.
-			case NS_GP_BTN_A: // SDL A (Xbox bottom) = NS B = right click = menu / back
-				ns_gp.right_down = pressed;
-				ns_gp_push_mouse_button(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_RIGHT);
+			SDL_GameController *c = sdl_controllers[i];
+			if (c && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c)) != event.cbutton.which &&
+				SDL_GameControllerGetButton(c, ns_gp_button_map[b]))
+			{
+				pressed = true;
 				break;
-			case NS_GP_BTN_B: // SDL B (Xbox right) = NS A = left click = confirm/advance
-				ns_gp.left_down = pressed;
-				ns_gp_push_mouse_button(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_BUTTON_LEFT);
-				break;
-			case NS_GP_BTN_X: // SDL X (Xbox left) = NS Y (top-left) = Space
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_SPACE);
-				break;
-			case NS_GP_BTN_Y: // SDL Y (Xbox top) = NS X (top-right) = Enter
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_RETURN);
-				break;
-			case NS_GP_BTN_BACK: // Minus = F5 (quick save)
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_F5);
-				break;
-			case NS_GP_BTN_START: // Plus = Escape (system menu / cancel)
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_ESCAPE);
-				break;
-			case NS_GP_BTN_LSTICK: // L3 = Ctrl (hold to skip)
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_LCTRL);
-				break;
-			case NS_GP_BTN_RSTICK: // R3 = F7 (quick load)
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_F7);
-				break;
-			case NS_GP_BTN_LSHOULDER: // L = wheel up (back log)
-				if (pressed) ns_gp_push_mouse_wheel(window, 1);
-				break;
-			case NS_GP_BTN_RSHOULDER: // R = wheel down (advance)
-				if (pressed) ns_gp_push_mouse_wheel(window, -1);
-				break;
-			// d-pad = the arrow keys KAG navigates its menus and dialogs with:
-			// MainWindow.onKeyUp hands VK_LEFT/RIGHT/UP/DOWN to the active
-			// object (a check dialog toggles Yes/No on left/right, the save
-			// screen moves the slot selection), and the object switches itself
-			// into key mode on the first one.  That path needs no cursor at all.
-			case NS_GP_BTN_DPAD_UP:
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_UP);
-				break;
-			case NS_GP_BTN_DPAD_DOWN:
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_DOWN);
-				break;
-			case NS_GP_BTN_DPAD_LEFT:
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_LEFT);
-				break;
-			case NS_GP_BTN_DPAD_RIGHT:
-				ns_gp_push_key(window, pressed ? SDL_PRESSED : SDL_RELEASED, SDL_SCANCODE_RIGHT);
-				break;
-			default:
-				break;
+			}
 		}
 	}
+	_currentWindowWindow->switch_process_gamepad_button(b, pressed);
 }
 #endif
 
@@ -5206,6 +5251,7 @@ void sdl_process_events()
 	{
 		g_krkrns_prof.ev_src[(event.type >> 8) & 15]++;
 #ifdef __SWITCH__
+		ns_gp_process_controller_event(event);
 		// Temporary input trace for the double-move investigation: raw events
 		// as SDL delivered them, before any dispatch.
 		if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP)
@@ -6505,6 +6551,17 @@ static void krkrsdl2_reinitialize_engine()
 		extern void TVPClearGraphicCache();
 		TVPClearGraphicCache();
 	}
+#ifdef KRKRSDL2_ENABLE_KAGPARSER
+	{
+		// KAG caches scenarios by the requested name, such as first.ks, before
+		// resolving the current game's storage paths. A new script engine does
+		// not own this process-global cache, so the next game would execute the
+		// previous game's scenario when both request the same name.
+		extern void TVPClearScnearioCache();
+		TVPClearScnearioCache();
+		KRKRNS_LOG("[reinit] KAG scenario cache cleared");
+	}
+#endif
 	{
 #ifdef TVP_FAUDIO_IMPLEMENT
 		// WaveIntf creates QueueSoundBuffer on this build.  The legacy
@@ -6721,6 +6778,12 @@ bool TVPGetKeyMouseAsyncState(tjs_uint keycode, bool getcurrent)
 
 bool TVPGetJoyPadAsyncState(tjs_uint keycode, bool getcurrent)
 {
+#ifdef __SWITCH__
+	extern bool krkrsdl2_game_mode;
+	// Hide the raw pad state for the same reason as the native pad events:
+	// polling scripts must not run a second mapping alongside our synthesis.
+	if (krkrsdl2_game_mode) return false;
+#endif
 	bool is_pressed = false;
 	if (sdl_controllers)
 	{

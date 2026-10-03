@@ -320,7 +320,11 @@ class KrkrnsScriptMenuItem {
             if (typeof(child.__krkrnsScriptMenu) != "undefined") invalidate child;
         }
         children.clear(); _childrenView.clear();
-        _windowOwner = null; owner = null; command = null;
+        _windowOwner = null;
+        // KAG3's derived MenuItem finalizer deletes owner and command before super.
+        // Release the reference only when that member still belongs to this item.
+        if (typeof(this.owner) != "undefined") this.owner = null;
+        if (typeof(this.command) != "undefined") this.command = null;
         return null;
     }
 }

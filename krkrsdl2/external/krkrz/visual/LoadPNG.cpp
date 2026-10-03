@@ -117,6 +117,9 @@ static int PNG_read_chunk_callback(png_structp png_ptr,png_unknown_chunkp chunk)
 	{
 		PNG_read_chunk_callback_user_struct * user_struct =
 			reinterpret_cast<PNG_read_chunk_callback_user_struct *>(png_get_user_chunk_ptr(png_ptr));
+		// Pixel-only callers, including launcher thumbnails, omit metadata.
+		// vpAg is still a recognized chunk; consume it without calling a null sink.
+		if(!user_struct || !user_struct->metainfopushcallback) return 1;
 		// vpAg found
 		/*
 			uint32 width

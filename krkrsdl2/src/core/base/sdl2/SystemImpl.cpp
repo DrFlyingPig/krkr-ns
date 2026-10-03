@@ -63,7 +63,7 @@ extern ttstr TVPGetLicenseString();
 //---------------------------------------------------------------------------
 // TVPShowSimpleMessageBox
 //---------------------------------------------------------------------------
-static void TVPShowSimpleMessageBox(const ttstr & text, const ttstr & caption)
+void TVPShowSimpleMessageBox(const ttstr & text, const ttstr & caption)
 {
 #if 0
 	HWND hWnd = TVPGetModalWindowOwnerHandle();
