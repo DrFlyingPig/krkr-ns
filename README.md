@@ -133,9 +133,7 @@ KRKR-ns/
 │   ├── CMakeLists.txt              # Switch 构建配置
 │   └── meson.build                 # 上游构建配置
 ├── compat-patches/system/          # 打包进 RomFS 的 TJS 兼容脚本
-├── design/launcher-preview/        # 启动器设计稿与预览文件
-├── tools/                          # 构建、打包和调试工具
-├── tests/                          # 引擎、存档、动画等功能检查
+├── tools/                          # FFmpeg 依赖构建脚本与补丁
 ├── out/                            # 本地 FFmpeg 依赖和发布 NRO，不纳入版本控制
 └── build_nro.sh                    # 构建、NRO 打包与模拟器部署入口
 ```

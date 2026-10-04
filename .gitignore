@@ -31,3 +31,8 @@ SOURCE_PORT_STATUS.md
 
 # 内部文档目录（本地保留，不入库）
 docs/
+
+# 本地开发、测试与调试资产（本地保留，不入库）
+tests/
+design/
+tools/

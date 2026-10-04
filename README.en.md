@@ -134,9 +134,7 @@ KRKR-ns/
 │   ├── CMakeLists.txt              # Switch build configuration
 │   └── meson.build                 # Upstream build configuration
 ├── compat-patches/system/          # TJS compatibility scripts packed into RomFS
-├── design/launcher-preview/        # Launcher designs and previews
-├── tools/                          # Build, packaging, and debugging tools
-├── tests/                          # Engine, save, animation, and other checks
+├── tools/                          # FFmpeg dependency build script and patch
 ├── out/                            # Local FFmpeg dependencies and release NRO; ignored by Git
 └── build_nro.sh                    # Build, package, and emulator deployment entry point
 ```
