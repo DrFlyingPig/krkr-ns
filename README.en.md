@@ -47,7 +47,7 @@ The built-in light-themed library supports controller and touch input. Each game
 
 Diagnostic logs are stored in `sdmc:/switch/KRKR-ns/log/`, with the three most recent logs kept automatically.
 
-To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/Ninja, and FFmpeg, then configure the tool paths in the build scripts. The FFmpeg build script is [build_ffmpeg_switch.sh](build_ffmpeg_switch.sh). Run `build_nro.sh` to create `build-switch/krkrsdl2.nro`; add `--no-emu-copy` to skip copying it to the emulator.
+To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/Ninja, and FFmpeg, then configure the tool paths in the build scripts. The FFmpeg build script is [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh). Run `build_nro.sh` to create `build-switch/krkrsdl2.nro`; add `--no-emu-copy` to skip copying it to the emulator.
 
 ## ✅ Implemented features
 
@@ -134,8 +134,7 @@ KRKR-ns/
 │   ├── CMakeLists.txt              # Switch build configuration
 │   └── meson.build                 # Upstream build configuration
 ├── compat-patches/system/          # TJS compatibility scripts packed into RomFS
-├── build_ffmpeg_switch.sh          # FFmpeg dependency build script
-├── ffmpeg-horizon.patch            # FFmpeg build patch
+├── tools/                          # FFmpeg dependency build script and patch
 ├── out/                            # Local FFmpeg dependencies and release NRO; ignored by Git
 └── build_nro.sh                    # Build, package, and emulator deployment entry point
 ```
@@ -145,6 +144,6 @@ KRKR-ns/
 
 The project's own code is released under the [MIT license used by krkrsdl2](LICENSE). Upstream and third-party components, including krkrz, FAudio, SDL2, FFmpeg, simde, zlib, FreeType, libjpeg-turbo, libpng, libogg/libvorbis, and libopus, retain their original licenses and notices in their component directories.
 
-Licensing for the E-mote, AlphaMovie, and LayerExRaster ports is documented in [E-mote license](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt), [AlphaMovie license](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3), and [LayerExRaster license](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3). Archive support and its dependencies retain the notices provided with their source directories. FFmpeg source versions and build options are documented in [build_ffmpeg_switch.sh](build_ffmpeg_switch.sh).
+Licensing for the E-mote, AlphaMovie, and LayerExRaster ports is documented in [E-mote license](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt), [AlphaMovie license](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3), and [LayerExRaster license](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3). Archive support and its dependencies retain the notices provided with their source directories. FFmpeg source versions and build options are documented in [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh).
 
 **This project does not include or distribute any commercial game assets.**

@@ -47,7 +47,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 
 > 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份。
 >
-> 自行构建需准备 devkitPro / devkitA64、Switch 依赖库、CMake/Ninja 和 FFmpeg，并按本地环境配置脚本中的工具路径。FFmpeg 构建脚本见 [build_ffmpeg_switch.sh](build_ffmpeg_switch.sh)；运行 `build_nro.sh` 生成 `build-switch/krkrsdl2.nro`，加 `--no-emu-copy` 可跳过模拟器复制。
+> 自行构建需准备 devkitPro / devkitA64、Switch 依赖库、CMake/Ninja 和 FFmpeg，并按本地环境配置脚本中的工具路径。FFmpeg 构建脚本见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)；运行 `build_nro.sh` 生成 `build-switch/krkrsdl2.nro`，加 `--no-emu-copy` 可跳过模拟器复制。
 
 ## ✅ 已实现功能
 
@@ -133,8 +133,7 @@ KRKR-ns/
 │   ├── CMakeLists.txt              # Switch 构建配置
 │   └── meson.build                 # 上游构建配置
 ├── compat-patches/system/          # 打包进 RomFS 的 TJS 兼容脚本
-├── build_ffmpeg_switch.sh          # FFmpeg 依赖构建脚本
-├── ffmpeg-horizon.patch            # FFmpeg 构建补丁
+├── tools/                          # FFmpeg 依赖构建脚本与补丁
 ├── out/                            # 本地 FFmpeg 依赖和发布 NRO，不纳入版本控制
 └── build_nro.sh                    # 构建、NRO 打包与模拟器部署入口
 ```
@@ -144,6 +143,6 @@ KRKR-ns/
 
 本项目自身代码沿用 [krkrsdl2 的 MIT 许可](LICENSE)。引用的上游与第三方组件（krkrz、FAudio、SDL2、FFmpeg、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留原始许可证与归属，见组件目录内的 LICENSE/COPYING 文件。
 
-E-mote、AlphaMovie 与 LayerExRaster 的移植来源许可分别见 [E-mote 许可](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt)、[AlphaMovie 许可](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3) 和 [LayerExRaster 许可](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](build_ffmpeg_switch.sh)。
+E-mote、AlphaMovie 与 LayerExRaster 的移植来源许可分别见 [E-mote 许可](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt)、[AlphaMovie 许可](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3) 和 [LayerExRaster 许可](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)。
 
 **本项目不包含、也不分发任何商业游戏资源。**

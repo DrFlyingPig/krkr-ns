@@ -15,13 +15,13 @@
 #   "probed stream 0 failed / unknown codec" even though mpegps itself works.
 set -euo pipefail
 
-root="$(cd "$(dirname "$0")" && pwd)"
+root="$(cd "$(dirname "$0")/.." && pwd)"
 src_parent="$root/out/ffmpeg_src"
 src="$src_parent/ffmpeg-7.1"
 prefix="$root/out/ffmpeg_switch"
 archive_default="$root/../WA2-ns/out/ffmpeg-7.1.tar.xz"
 archive="${FFMPEG_ARCHIVE:-$archive_default}"
-patch_file="$root/ffmpeg-horizon.patch"
+patch_file="$root/tools/ffmpeg-horizon.patch"
 # The original subset was configured with the MSVC wrapper (ffmpeg_host_cl_wrapper.sh),
 # but this machine has no cl.exe.  FFmpeg's hardcoded tables are on by default,
 # so nothing is compiled for the *host* and then run -- the C11 configure check
