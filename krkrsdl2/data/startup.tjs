@@ -184,11 +184,22 @@ function childLayer(x, y, width, height) {
 }
 
 // Bundled logo and artwork are loaded once, without probing game folders.
-var logoLayer = childLayer(24, 21, 56, 56);
-try { logoLayer.loadImages("launcher/logo-artwork.png"); logoLayer.visible = true; }
-catch (e) { Debug.message("[launcher] bundled logo unavailable: " + e.message); }
-// Cached native shapes, made once at boot, never loaded from game folders.
+// Wrapped in a function: the surfaces are released right before a game starts
+// (the console needs the headroom -- a real console failed to start the
+// game's first sound decode thread with only ~15MB free) and rebuilt here if
+// the launch fails and the picker stays up.  When a game does start, the
+// launcher is rebuilt from scratch on return, so nothing here needs to
+// survive it.
+var logoLayer = null;
 var heroLayers = new Array();
+function buildLauncherArt() {
+if (logoLayer == null) {
+    logoLayer = childLayer(24, 21, 56, 56);
+    try { logoLayer.loadImages("launcher/logo-artwork.png"); logoLayer.visible = true; }
+    catch (e) { Debug.message("[launcher] bundled logo unavailable: " + e.message); }
+}
+// Cached native shapes, made once at boot, never loaded from game folders.
+heroLayers = new Array();
 for (var toneIndex = 0; toneIndex < TONES.count; toneIndex++) {
     var art = childLayer(388, 132, 860, 358);
     paintTo(art);
@@ -220,6 +231,24 @@ for (var toneIndex = 0; toneIndex < TONES.count; toneIndex++) {
     text(25, 34, "已选择", 12, tone.ink, false);
     flushText();
     heroLayers.add(art);
+}
+}
+buildLauncherArt();
+// Release every launcher surface that has a lazy rebuild path.  Called right
+// before the game's own boot, which is where the memory is needed.
+function releaseLauncherArt() {
+    if (logoLayer != null) { invalidate logoLayer; logoLayer = null; }
+    for (var i = 0; i < heroLayers.count; i++) invalidate heroLayers[i];
+    heroLayers = new Array();
+    if (games != null) {
+        for (var k = 0; k < games.count; k++) {
+            var entry = games[k];
+            if (entry.previewLayer != null) { invalidate entry.previewLayer; entry.previewLayer = null; }
+            if (entry.avatarLayer != null) { invalidate entry.avatarLayer; entry.avatarLayer = null; }
+            entry.previewStamp = "";
+            entry.avatarStamp = "";
+        }
+    }
 }
 var selectionLayer = childLayer(32, 144, 320, 66);
 var letterLayer = childLayer(784, 231, 190, 164);
@@ -1065,13 +1094,17 @@ function performLaunch() {
         }
         selectedFile = game.entry;
         Debug.message("[launcher] launch: " + game.folder + "/" + game.files[selectedFile]);
+        // The game needs the memory these surfaces hold (see releaseLauncherArt).
+        releaseLauncherArt();
         if (!Storages.launchXP3(game.folder, game.files[selectedFile], launcherWindow)) {
             launching = false; memoryOk = false;
+            buildLauncherArt();
             statusText = "请按住 R 从游戏进入 HBMenu，再打开启动器。";
             drawnTop = -1; redraw();
         }
     } catch (e) {
         launching = false;
+        buildLauncherArt();
         statusText = "启动失败：" + e.message;
         Debug.message("[launcher] failed: " + e.message);
         redraw();

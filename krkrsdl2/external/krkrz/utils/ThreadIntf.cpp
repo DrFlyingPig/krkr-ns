@@ -14,6 +14,7 @@
 #include "ThreadIntf.h"
 #include "MsgIntf.h"
 #include "KrkrNSLog.h"
+#include "EventIntf.h"
 
 #ifdef __SWITCH__
 #include <switch.h>
@@ -107,7 +108,18 @@ void tTVPThread::StartTread()
 	if( Thread == nullptr ) {
 		Thread = SDL_CreateThread(tTVPThread::StartProc, "tTVPThread", this);
 		if (Thread == nullptr) {
-			TVPThrowInternalError;
+			// A real console failed to start the first sound decode thread with
+			// "not enough resources" while the bitmap pool still held tens of
+			// megabytes of freed blocks -- the thread stack needs heap memory
+			// the pool is sitting on.  Deliver a compact event (the same
+			// recovery a failed bitmap allocation uses) and retry once.
+			KRKRNS_LOG("[thread] SDL_CreateThread failed: %s; compacting and retrying", SDL_GetError());
+			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
+			Thread = SDL_CreateThread(tTVPThread::StartProc, "tTVPThread", this);
+			if (Thread == nullptr) {
+				KRKRNS_LOG("[thread] SDL_CreateThread retry failed: %s", SDL_GetError());
+				TVPThrowInternalError;
+			}
 		}
 		SDL_LockMutex(Mtx);
 		while (!ThreadStarting) {

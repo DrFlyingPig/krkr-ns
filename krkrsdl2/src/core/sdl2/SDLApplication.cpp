@@ -6085,6 +6085,13 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 
 void krkrsdl2_mount_xp3_resources()
 {
+	// Drop the decoded-image cache the launcher filled with its artwork and
+	// previews.  The game's boot needs the memory more than the picker does
+	// (a real console failed to start the game's first sound decode thread
+	// with only ~15MB free, while the launcher held ~90MB of surfaces); the
+	// picker rebuilds lazily when it is shown again.
+	TVPClearGraphicCache();
+
 	// The launcher's entry archive is the game itself; tell the storage layer
 	// so its files win over the sibling resource packages (see
 	// krkrns_set_primary_archive in StorageIntf.cpp).
