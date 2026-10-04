@@ -1974,7 +1974,9 @@ tTVPWaveSoundBufferDecodeThread::tTVPWaveSoundBufferDecodeThread(
 	Owner = owner;
 	SetPriority(TVPDecodeThreadHighPriority);
 	Running = false;
-	StartTread();
+	// The OS thread is started on first use (WaveSoundBuffer.Open), NOT here:
+	// KAG titles construct pools of WaveSoundBuffers during boot and the real
+	// console's thread limit cannot take one thread per unused buffer.
 }
 //---------------------------------------------------------------------------
 tTVPWaveSoundBufferDecodeThread::~tTVPWaveSoundBufferDecodeThread()
@@ -3126,6 +3128,7 @@ void tTJSNI_WaveSoundBuffer::StopPlay()
 //---------------------------------------------------------------------------
 void tTJSNI_WaveSoundBuffer::Play()
 {
+	if(Thread) Thread->StartTread(); // idempotent; buffers are normally opened first
 	// play from first or current position
 	if(!Decoder) return;
 	if(BufferPlaying) return;
@@ -3202,6 +3205,10 @@ void tTJSNI_WaveSoundBuffer::Open(const ttstr & storagename)
 {
 	// open a storage and prepare to play
 	TVPEnsurePrimaryBufferPlay(); // let primary buffer to start running
+
+	// First real use of this buffer: start its decode thread now (see the
+	// thread constructor for why this is deferred).  StartTread is idempotent.
+	if(Thread) Thread->StartTread();
 
 	Clear();
 
