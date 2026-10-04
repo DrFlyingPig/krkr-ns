@@ -9,6 +9,7 @@
 // CPU idetification / features detection routine
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 
 #if 0
 #include <Windows.h>
@@ -371,6 +372,7 @@ public:
 
 		SetThreadAffinityMask((HANDLE)GetHandle(), tam);
 
+		KRKRNS_LOG("[thread] start: cpu-detect");
 		StartTread();
 	}
 

@@ -9,6 +9,7 @@
 // Wave Player implementation
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 
 #if 0
 #include <mmsystem.h>
@@ -1590,6 +1591,7 @@ tTVPWaveSoundBufferThread::tTVPWaveSoundBufferThread()
 {
 	EventQueue.Allocate();
 	SetPriority(ttpHighest);
+	KRKRNS_LOG("[thread] start: wave-working");
 	StartTread();
 }
 //---------------------------------------------------------------------------

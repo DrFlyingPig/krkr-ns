@@ -531,6 +531,7 @@ bool tTVPApplication::StartApplication( int argc, tjs_char* argv[] ) {
 
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 		// start image load thread
+		KRKRNS_LOG("[thread] start: image-load");
 		image_load_thread_->StartTread();
 #endif
 
