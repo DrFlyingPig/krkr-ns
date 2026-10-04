@@ -9,6 +9,7 @@
 // Script Event Handling and Dispatching
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 
 #include "KrkrNSProf.h" // KRKR-ns: [prof] tjs limit-tick counter
 #include "EventIntf.h"
@@ -174,6 +175,7 @@ tTVPContinuousHandlerCallLimitThread::tTVPContinuousHandlerCallLimitThread()
 	Interval = (1<<TVP_SUBMILLI_FRAC_BITS)*1000/60; // default 60Hz
 	Enabled = false;
 	EventQueue.Allocate();
+	KRKRNS_LOG("[thread] start: continuous-handler");
 	StartTread();
 }
 //---------------------------------------------------------------------------

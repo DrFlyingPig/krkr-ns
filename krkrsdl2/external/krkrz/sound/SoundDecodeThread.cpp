@@ -20,7 +20,10 @@ static const tTVPThreadPriority TVPDecodeThreadHighPriority = ttpHigher;
 //---------------------------------------------------------------------------
 tTVPSoundDecodeThread::tTVPSoundDecodeThread( tTJSNI_QueueSoundBuffer * owner )
  : Owner(owner), DecodedSamples(0) {
-	StartTread();
+	// The OS thread is started on first playback (tTJSNI_QueueSoundBuffer::
+	// StartPlay), NOT here: KAG titles construct pools of sound buffers during
+	// boot, and the real console's thread limit cannot take one thread per
+	// unused buffer (a console boot died on exactly this thread).
 }
 //---------------------------------------------------------------------------
 tTVPSoundDecodeThread::~tTVPSoundDecodeThread() {

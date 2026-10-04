@@ -407,6 +407,9 @@ void tTJSNI_QueueSoundBuffer::FlushAllLabelEvents() {
 //---------------------------------------------------------------------------
 void tTJSNI_QueueSoundBuffer::StartPlay()
 {
+	// First real playback: start the decode thread now (see the thread
+	// constructor for why this is deferred).  StartTread is idempotent.
+	if( Thread ) Thread->StartTread();
 	if(!Decoder) return;
 
 	// let primary buffer to start running
