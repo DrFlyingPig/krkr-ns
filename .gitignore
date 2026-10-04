@@ -28,3 +28,6 @@ MENU_PERFORMANCE.md
 OPTIMIZATION_PLAN.md
 PORTING_PLAN.md
 SOURCE_PORT_STATUS.md
+
+# 内部文档目录（本地保留，不入库）
+docs/
