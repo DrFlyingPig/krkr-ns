@@ -106,6 +106,8 @@ void tTVPThread::StartTread()
 {
 #ifdef KRKRZ_USE_SDL_THREADS
 	if( Thread == nullptr ) {
+		void *caller = __builtin_return_address(0);
+		KRKRNS_LOG("[thread] StartTread caller=%p", caller);
 		Thread = SDL_CreateThread(tTVPThread::StartProc, "tTVPThread", this);
 		if (Thread == nullptr) {
 			// A real console failed to start the first sound decode thread with
