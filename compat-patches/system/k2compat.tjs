@@ -383,29 +383,135 @@ Window.registerExEvent = function(name) { return true; };
 if (typeof(Window.disableResize) == "undefined") Window.disableResize = false;
 if (typeof(Window.enableNCMouseEvent) == "undefined") Window.enableNCMouseEvent = false;
 
-// NOTE: the rest of the WindowEx surface is deliberately NOT defined here,
-// and must stay that way.
+// windowEx.dll emulation -- parity with the community Kirikiroid2 builds.
 //
-// windowEx.dll supplies minimize / maximize / showRestore / resetWindowIcon /
-// setWindowIcon, the geometry queries (getNormalRect / getWindowRect /
-// getClientRect / setClientRect / getPlacement / setPlacement /
-// getMonitorInfo / getSystemMetrics) and MenuItemEx's bitmap constants
-// (MenuItem.biMinimize and friends).  None of them exist in Kirikiroid2 -- the
-// environment these releases are built for -- and KAGEX uses their ABSENCE as
-// the capability probe, falling back cleanly: SetWindowControlMenu() opens
-// with "if (typeof win.minimize != 'Object') return;", the pseudo-fullscreen
-// branch is only reachable when System.getDisplayMonitors /
-// System.getMonitorInfo exist (they do not, here or in Kirikiroid2), and the
-// fullscreen transition's getNormalRect read is itself guarded by
-// "typeof this.getNormalRect == 'Object'".
+// The Kirikiroid2 1.3.9 packages that game distributions actually ship for
+// (and the ones players really run) statically include a windowEx.dll port:
+// the binary registers System.getMonitorInfo / getSystemMetrics /
+// getDisplayMonitors / getCursorPos plus the Window minimize / maximize /
+// maximized / minimized / showRestore / resetWindowIcon / setWindowIcon
+// members.  The stock zeas2/Kirikiroid2 tree does not have that port (its
+// SetPPValue("kirikiriz") line is commented out and no windowEx code exists),
+// which is what the previous version of this note assumed -- but it is not
+// the runtime players use.
 //
-// Adding them "to make a title boot" is wrong twice over: each fabricated
-// value sends the title further down WindowEx-only paths that then need the
-// next missing member, and a synthetic getNormalRect reports geometry the
-// title trusts.  Two rounds of that produced a cascade of
-// "Member \"maximized\" / \"biMinimize\" does not exist" errors.  If a title
-// needs something from this list, the fix is its fallback above, exactly as on
-// Kirikiroid2.
+// ECPlugin-family titles break without it: 国王恋爱krkr's ECPlugin_Window.ks
+// calls System.getMonitorInfo(true, this) unconditionally from the KAG boot
+// path (and reads win.maximized in its onResize replacement), so without the
+// member the conductor aborts mid-boot and the stage stays black forever.
+//
+// Semantics mirrored from windowEx as the titles use it:
+//   System.getMonitorInfo(true,  obj)        -> info dict, never void
+//   System.getMonitorInfo(false, obj)        -> void when the window rect is
+//                                               completely off-monitor
+//   System.getMonitorInfo(false, x, y, w, h) -> same for a raw rectangle
+//   info = %[ name, primary, monitor: %[x,y,w,h], work: %[x,y,w,h] ]
+// The console has one fixed 1920x1080 output and no taskbar, so the work area
+// equals the full monitor.
+//
+// Published only for titles that call the API with no fallback: the
+// ECPlugin-family distributions (recognised by their scenario/ECP scripts)
+// call System.getMonitorInfo unconditionally during KAG boot.  KAGEX titles
+// (9-nine, LimeLight and friends) instead PROBE the members to select their
+// WindowEx-only branches, and those branches assume the rest of the Win32
+// window surface (getNormalRect / getWindowRect / getPlacement / MenuItemEx)
+// that this port does not implement -- with the probes answered, 9-nine's
+// config screen crashed the emulator outright (2026-10-04, reproducible
+// 0xc0000409).  Leaving the members absent for those titles restores their
+// documented fallback, which is what they use on the stock player.
+//
+// Semantics mirrored from windowEx as the titles use it:
+//   System.getMonitorInfo(true,  obj)        -> info dict, never void
+//   System.getMonitorInfo(false, obj)        -> void when the window rect is
+//                                               completely off-monitor
+//   System.getMonitorInfo(false, x, y, w, h) -> same for a raw rectangle
+//   info = %[ name, primary, monitor: %[x,y,w,h], work: %[x,y,w,h] ]
+// The console has one fixed 1920x1080 output and no taskbar, so the work area
+// equals the full monitor.
+//
+// Deliberate omissions even when published:
+//   Window.minimize stays undefined.  KAGEX titles probe
+//   "typeof win.minimize != 'Object'" to keep their own menu model;
+//   adding it opens SetWindowControlMenu(), which walks into MenuItemEx's
+//   bi* constants that this port does not implement, and that is exactly the
+//   cascade that broke LimeLight in earlier attempts.  MenuItemEx and the
+//   getNormalRect / getWindowRect / getClientRect / getPlacement /
+//   setPlacement / setClientRect geometry queries are left out for the same
+//   reason: nothing on the titles verified here reads them unguarded.
+
+var __krkrns_windowex_needed = false;
+try {
+    __krkrns_windowex_needed =
+        Storages.isExistentStorage("scenario/ECP/ECPlugin_Window.ks");
+} catch(e) {
+    __krkrns_windowex_needed = false;
+}
+
+if (__krkrns_windowex_needed) {
+
+if (typeof(System.getMonitorInfo) == "undefined")
+    System.getMonitorInfo = function(getAll, obj, x, y, w, h) {
+        var info = %[
+            name : "default monitor",
+            primary : true,
+            monitor : %[ x:0, y:0, w:1920, h:1080 ],
+            work : %[ x:0, y:0, w:1920, h:1080 ]
+        ];
+        if (getAll !== void && getAll) return info;
+        // (false, ...) form: void when the rectangle is fully off-monitor.
+        var left = void, top = void, width = void, height = void;
+        if (x !== void) {
+            left = x; top = y; width = w; height = h;
+        } else if (obj !== void && obj !== null) {
+            try {
+                left = obj.left; top = obj.top;
+                width = obj.width; height = obj.height;
+            } catch(e) {
+                left = void;
+            }
+        }
+        if (left === void || top === void || width === void || height === void)
+            return info;
+        if (left >= 1920 || top >= 1080 || left + width <= 0 || top + height <= 0)
+            return void;
+        return info;
+    };
+
+if (typeof(System.getDisplayMonitors) == "undefined")
+    System.getDisplayMonitors = function() {
+        var mon = %[ name : "default monitor", primary : true,
+            monitor : %[ x:0, y:0, w:1920, h:1080 ],
+            work : %[ x:0, y:0, w:1920, h:1080 ] ];
+        var list = %[ count : 1, primary : 0 ];
+        list[0] = mon;
+        return list;
+    };
+
+if (typeof(System.getSystemMetrics) == "undefined")
+    System.getSystemMetrics = function(index) {
+        // SM_CXSCREEN = 0, SM_CYSCREEN = 1; the remaining Win32 metrics have
+        // no console answer and report 0.
+        if (index == 0) return 1920;
+        if (index == 1) return 1080;
+        return 0;
+    };
+
+if (typeof(System.getCursorPos) == "undefined")
+    System.getCursorPos = function() { return void; };
+if (typeof(System.setCursorPos) == "undefined")
+    System.setCursorPos = function(x, y) { return null; };
+
+// State reflection and chrome operations.  A console window is never
+// maximized, so the flags read false while writes are retained for scripts
+// that round-trip the values; the window operations are inert.
+if (typeof(Window.maximized) == "undefined") Window.maximized = false;
+if (typeof(Window.minimized) == "undefined") Window.minimized = false;
+if (typeof(Window.maximize) == "undefined") Window.maximize = function() { return true; };
+if (typeof(Window.showRestore) == "undefined") Window.showRestore = function() { return true; };
+if (typeof(Window.resetWindowIcon) == "undefined") Window.resetWindowIcon = function() { return true; };
+if (typeof(Window.setWindowIcon) == "undefined") Window.setWindowIcon = function(icon) { return true; };
+
+}
 
 Window.setOverlayBitmap = function() { return null; };
 Window.ncHitTest = function(x, y) { return false; };

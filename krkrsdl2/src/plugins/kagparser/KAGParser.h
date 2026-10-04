@@ -186,6 +186,41 @@ private:
 
 	iTJSDispatch2 * Macros; // Macro Dictionary Object
 
+	// ExtKAGParser compatibility: parameter macros registered through
+	// [pmacro name=xxx attr=value ...].  A bare word matching a registered
+	// name inside any tag's attribute list expands into the recorded
+	// attributes (see the pmacro handling in KAGParser.cpp).
+	iTJSDispatch2 * ParamMacros; // Parameter Macro Dictionary Object
+
+	// ExtKAGParser compatibility: [while]/[endwhile]/[break]/[continue].
+	struct tWhileStackData
+	{
+		ttstr Storage; // caller storage
+		ttstr Label; // caller nearest label
+		tjs_int Offset; // line offset from the label
+		ttstr OrgLineStr; // original line string
+		ttstr LineBuffer; // line string (if alive)
+		tjs_int Pos;
+		bool LineBufferUsing; // whether LineBuffer is used or not
+		tjs_int ExcludeLevel;
+		tjs_int IfLevel;
+		ttstr WhileLevelExp;
+		ttstr WhileLevelEach;
+
+		tWhileStackData(const ttstr &storage, const ttstr &label,
+			tjs_int offset, const ttstr &orglinestr, const ttstr &linebuffer,
+			tjs_int pos, bool linebufferusing,
+			tjs_int excludelevel, tjs_int iflevel,
+			const ttstr &whilelevelexp, const ttstr &whileleveleach) :
+			Storage(storage), Label(label), Offset(offset), OrgLineStr(orglinestr),
+			LineBuffer(linebuffer), Pos(pos), LineBufferUsing(linebufferusing),
+			ExcludeLevel(excludelevel), IfLevel(iflevel),
+			WhileLevelExp(whilelevelexp), WhileLevelEach(whileleveleach) {;}
+	};
+	std::vector<tWhileStackData> WhileStack;
+	ttstr WhileLevelExp; // condition of the innermost [while]
+	ttstr WhileLevelEach; // "each=" of the innermost [while]
+
 	std::vector<iTJSDispatch2 *> MacroArgs; // Macro arguments
 	tjs_uint MacroArgStackDepth;
 	tjs_uint MacroArgStackBase;
@@ -205,19 +240,22 @@ private:
 		std::vector<bool> IfLevelExecutedStack;
         tjs_int ExcludeLevel;
         tjs_int IfLevel;
+		tjs_uint WhileStackDepth; // while stack depth at the [call]
 
 		tCallStackData(const ttstr &storage, const ttstr &label,
 			tjs_int offset, const ttstr &orglinestr, const ttstr &linebuffer,
 			tjs_int pos, bool linebufferusing, tjs_uint macroargstackbase,
 			tjs_uint macroargstackdepth,
 			const std::vector<tjs_int> &excludelevelstack, tjs_int excludelevel,
-			const std::vector<bool> &iflevelexecutedstack, tjs_int iflevel) :
+			const std::vector<bool> &iflevelexecutedstack, tjs_int iflevel,
+			tjs_uint whilestackdepth) :
 			Storage(storage), Label(label), Offset(offset), OrgLineStr(orglinestr),
 			LineBuffer(linebuffer), Pos(pos), LineBufferUsing(linebufferusing),
 			MacroArgStackBase(macroargstackbase),
 			MacroArgStackDepth(macroargstackdepth),
 			ExcludeLevelStack(excludelevelstack), ExcludeLevel(excludelevel),
-			IfLevelExecutedStack(iflevelexecutedstack), IfLevel(iflevel) {;}
+			IfLevelExecutedStack(iflevelexecutedstack), IfLevel(iflevel),
+			WhileStackDepth(whilestackdepth) {;}
 	};
 	std::vector<tCallStackData> CallStack;
 
@@ -292,6 +330,11 @@ private:
 
 	void PushCallStack();
 	void PopCallStack(const ttstr &storage, const ttstr &label);
+	void PushWhileStack();
+	void PopWhileStack(const bool &loop_again);
+	void WhileStackControlForEndwhile(const bool &loop_again);
+	void ClearWhileStack();
+	void ClearWhileStackToTheLatestCallStack();
 	void StoreIntStackToDic(iTJSDispatch2 *dic, std::vector<tjs_int> &stack, const tjs_char *membername);
 	void StoreBoolStackToDic(iTJSDispatch2 *dic, std::vector<bool> &stack, const tjs_char *membername);
 	void RestoreIntStackFromStr(std::vector<tjs_int> &stack, const ttstr &str);

@@ -37,6 +37,7 @@ const tjs_char* TVPLabelOrScriptInMacro = TJS_W("Label in macro 'iscript' is ill
 const tjs_char* TVPKAGInlineScriptNotEnd = TJS_W("Matched [endscript] or @endscript not found.");
 const tjs_char* TVPKAGSyntaxError = TJS_W("Syntax error.'[' match to ']', \" match to \", 'macro' march to 'endmacro'. Notice space and newline.");
 const tjs_char* TVPKAGCallStackUnderflow = TJS_W("'return' is not matched to any 'call' ( 'return' is unexpected )");
+const tjs_char* TVPKAGWhileStackUnderflow = TJS_W("endwhile/continue/break タグが while タグと対応していません");
 const tjs_char* TVPKAGReturnLostSync = TJS_W("Lost return position due to the scenario file changed.");
 const tjs_char* TVPKAGSpecifyKAGParser = TJS_W("Please specify KAGParser object.");
 const tjs_char* TVPUnknownMacroName = TJS_W("Unknown macro \"%1\"");
@@ -348,6 +349,7 @@ tTJSNI_KAGParser::tTJSNI_KAGParser()
 	DicAssign = NULL;
 	DicObj = NULL;
 	Macros = NULL;
+	ParamMacros = NULL;
 	RecordingMacro = false;
 	DebugLevel = tkdlSimple;
 	Interrupted = false;
@@ -358,6 +360,7 @@ tTJSNI_KAGParser::tTJSNI_KAGParser()
 	iTJSDispatch2 * dictclass;
 	DicObj = TJSCreateDictionaryObject(&dictclass);
 	Macros = TJSCreateDictionaryObject();
+	ParamMacros = TJSCreateDictionaryObject();
 	try
 	{
 		// retrieve clear method from dictclass
@@ -378,6 +381,7 @@ tTJSNI_KAGParser::tTJSNI_KAGParser()
 		dictclass->Release();
 		DicObj->Release();
 		Macros->Release();
+		if(ParamMacros) ParamMacros->Release();
 		if(DicClear) DicClear->Release();
 		if(DicAssign) DicAssign->Release();
 		throw;
@@ -407,6 +411,7 @@ void TJS_INTF_METHOD tTJSNI_KAGParser::Invalidate()
 	if(DicClear) DicClear->Release();
 	if(DicObj) DicObj->Release();
 	if(Macros) Macros->Release();
+	if(ParamMacros) ParamMacros->Release();
 
 	ClearMacroArgs();
 	ClearBuffer();
@@ -423,6 +428,13 @@ void tTJSNI_KAGParser::operator = (const tTJSNI_KAGParser & ref)
 		tTJSVariant src(ref.Macros, ref.Macros);
 		tTJSVariant *psrc = &src;
 		DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, Macros);
+	}
+
+	// copy ParamMacros (ExtKAGParser compatibility)
+	{
+		tTJSVariant src(ref.ParamMacros, ref.ParamMacros);
+		tTJSVariant *psrc = &src;
+		DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, ParamMacros);
 	}
 
 	// copy MacroArgs
@@ -444,6 +456,11 @@ void tTJSNI_KAGParser::operator = (const tTJSNI_KAGParser & ref)
 
 	// copy CallStack
 	CallStack = ref.CallStack;
+
+	// copy WhileStack (ExtKAGParser compatibility)
+	WhileStack = ref.WhileStack;
+	WhileLevelExp = ref.WhileLevelExp;
+	WhileLevelEach = ref.WhileLevelEach;
 
 	// copy StorageName, StorageShortName
 	StorageName = ref.StorageName;
@@ -510,6 +527,22 @@ iTJSDispatch2 *tTJSNI_KAGParser::Store()
 				&tmp, dic);
 
 			tTJSVariant src(Macros, Macros);
+			tTJSVariant *psrc = &src;
+			DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, dsp);
+		}
+
+		// create and assign parameter macro dictionary
+		// (ExtKAGParser compatibility)
+		{
+			iTJSDispatch2 * dsp;
+
+			dsp = TJSCreateDictionaryObject();
+			tTJSVariant tmp(dsp, dsp);
+			dsp->Release();
+			dic->PropSet(TJS_MEMBERENSURE, TJS_W("paramMacros"), NULL,
+				&tmp, dic);
+
+			tTJSVariant src(ParamMacros, ParamMacros);
 			tTJSVariant *psrc = &src;
 			DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, dsp);
 		}
@@ -596,6 +629,56 @@ iTJSDispatch2 *tTJSNI_KAGParser::Store()
                 
 				StoreIntStackToDic(dic, i->ExcludeLevelStack, TJS_W("ExcludeLevelStack"));
 				StoreBoolStackToDic(dic, i->IfLevelExecutedStack, TJS_W("IfLevelExecutedStack"));
+
+				val = (tjs_int)i->WhileStackDepth;
+				dic->PropSet(TJS_MEMBERENSURE, TJS_W("whileStackDepth"), NULL,
+					&val, dic);
+			}
+		}
+
+		// create while stack array and copy while stack status
+		// (ExtKAGParser compatibility)
+		{
+			iTJSDispatch2 *dsp;
+			dsp = TJSCreateArrayObject();
+			tTJSVariant tmp(dsp, dsp);
+			dsp->Release();
+			dic->PropSet(TJS_MEMBERENSURE, TJS_W("whileStack"), NULL,
+				&tmp, dic);
+
+			std::vector<tWhileStackData>::iterator i;
+			for(i = WhileStack.begin(); i != WhileStack.end(); i++)
+			{
+				iTJSDispatch2 *wdic;
+				wdic = TJSCreateDictionaryObject();
+				tTJSVariant wtmp(wdic, wdic);
+				wdic->Release();
+				dsp->PropSetByNum(TJS_MEMBERENSURE, i - WhileStack.begin(),
+					&wtmp, dsp);
+
+				tTJSVariant val;
+				val = i->Storage;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("storage"), NULL, &val, wdic);
+				val = i->Label;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("label"), NULL, &val, wdic);
+				val = i->Offset;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("offset"), NULL, &val, wdic);
+				val = i->OrgLineStr;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("orgLineStr"), NULL, &val, wdic);
+				val = i->LineBuffer;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("lineBuffer"), NULL, &val, wdic);
+				val = i->Pos;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("pos"), NULL, &val, wdic);
+				val = (tjs_int)i->LineBufferUsing;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("lineBufferUsing"), NULL, &val, wdic);
+				val = i->ExcludeLevel;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("ExcludeLevel"), NULL, &val, wdic);
+				val = i->IfLevel;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("IfLevel"), NULL, &val, wdic);
+				val = i->WhileLevelExp;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("whileLevelExp"), NULL, &val, wdic);
+				val = i->WhileLevelEach;
+				wdic->PropSet(TJS_MEMBERENSURE, TJS_W("whileLevelEach"), NULL, &val, wdic);
 			}
 		}
 		
@@ -768,6 +851,17 @@ void tTJSNI_KAGParser::Restore(iTJSDispatch2 *dic)
 		}
 	}
 
+	// restore parameter macros (ExtKAGParser compatibility)
+	{
+		val.Clear();
+		dic->PropGet(0, TJS_W("paramMacros"), NULL, &val, dic);
+		if(val.Type() != tvtVoid)
+		{
+			tTJSVariant *psrc = &val;
+			DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, ParamMacros);
+		}
+	}
+
 	{
 		// restore macro args
 		MacroArgStackDepth = 0;
@@ -874,10 +968,75 @@ void tTJSNI_KAGParser::Restore(iTJSDispatch2 *dic)
 				stack_str = val;
 				RestoreBoolStackFromStr(IfLevelExecutedStack, stack_str);
 
+				tjs_uint WhileStackDepth = 0;
+				dic.PropGet(0, TJS_W("whileStackDepth"), NULL, &val, NULL);
+				if(val.Type() != tvtVoid) WhileStackDepth = (tjs_int)val;
+
 				CallStack.push_back(tCallStackData(
 					Storage, Label, Offset, OrgLineStr, LineBuffer, Pos,
 					LineBufferUsing, MacroArgStackBase, MacroArgStackDepth,
-					ExcludeLevelStack, ExcludeLevel, IfLevelExecutedStack, IfLevel));
+					ExcludeLevelStack, ExcludeLevel, IfLevelExecutedStack, IfLevel,
+					WhileStackDepth));
+			}
+		}
+
+		// restore while stack (ExtKAGParser compatibility)
+		WhileStack.clear();
+		WhileLevelExp = TJS_W("");
+		WhileLevelEach = TJS_W("");
+		val.Clear();
+		dic->PropGet(0, TJS_W("whileStack"), NULL, &val, dic);
+		if(val.Type() != tvtVoid)
+		{
+			tTJSVariantClosure wclo = val.AsObjectClosureNoAddRef();
+			tTJSVariant v;
+			tjs_int wcount = 0;
+			wclo.PropGet(0, TJS_W("count"), NULL, &v, NULL);
+			wcount = v;
+
+			for(tjs_int i = 0; i < wcount; i++)
+			{
+				ttstr Storage;
+				ttstr Label;
+				tjs_int Offset;
+				ttstr OrgLineStr;
+				ttstr LineBuffer;
+				tjs_int Pos;
+				bool LineBufferUsing;
+				tjs_int ExcludeLevel;
+				tjs_int IfLevel;
+				ttstr WhileLevelExpSave;
+				ttstr WhileLevelEachSave;
+
+				wclo.PropGetByNum(0, i, &v, NULL);
+				tTJSVariantClosure wdic = v.AsObjectClosureNoAddRef();
+				wdic.PropGet(0, TJS_W("storage"), NULL, &val, NULL);
+				Storage = val;
+				wdic.PropGet(0, TJS_W("label"), NULL, &val, NULL);
+				Label = val;
+				wdic.PropGet(0, TJS_W("offset"), NULL, &val, NULL);
+				Offset = val;
+				wdic.PropGet(0, TJS_W("orgLineStr"), NULL, &val, NULL);
+				OrgLineStr = val;
+				wdic.PropGet(0, TJS_W("lineBuffer"), NULL, &val, NULL);
+				LineBuffer = val;
+				wdic.PropGet(0, TJS_W("pos"), NULL, &val, NULL);
+				Pos = val;
+				wdic.PropGet(0, TJS_W("lineBufferUsing"), NULL, &val, NULL);
+				LineBufferUsing = 0!=(tjs_int)val;
+				wdic.PropGet(0, TJS_W("ExcludeLevel"), NULL, &val, NULL);
+				ExcludeLevel = val;
+				wdic.PropGet(0, TJS_W("IfLevel"), NULL, &val, NULL);
+				IfLevel = val;
+				wdic.PropGet(0, TJS_W("whileLevelExp"), NULL, &val, NULL);
+				WhileLevelExpSave = val;
+				wdic.PropGet(0, TJS_W("whileLevelEach"), NULL, &val, NULL);
+				WhileLevelEachSave = val;
+
+				WhileStack.push_back(tWhileStackData(
+					Storage, Label, Offset, OrgLineStr, LineBuffer, Pos,
+					LineBufferUsing, ExcludeLevel, IfLevel,
+					WhileLevelExpSave, WhileLevelEachSave));
 			}
 		}
 
@@ -1012,6 +1171,7 @@ void tTJSNI_KAGParser::Clear()
 	ClearBuffer();
 	ClearMacroArgs();
 	ClearCallStack();
+	ClearWhileStack();
 }
 //---------------------------------------------------------------------------
 void tTJSNI_KAGParser::ClearBuffer()
@@ -1043,6 +1203,11 @@ void tTJSNI_KAGParser::BreakConditionAndMacro()
 	IfLevel = 0;
 	PopMacroArgsTo(MacroArgStackBase);
 		// clear macro argument down to current base stack position
+	// ExtKAGParser compatibility: a new scenario run must not inherit the
+	// caller's [while] state; trim the while stack to the call stack top.
+	ClearWhileStackToTheLatestCallStack();
+	WhileLevelExp = TJS_W("");
+	WhileLevelEach = TJS_W("");
 }
 //---------------------------------------------------------------------------
 static bool inline TVPIsWS(tjs_char ch)
@@ -1273,6 +1438,124 @@ void tTJSNI_KAGParser::PopMacroArgsTo(tjs_uint base)
 	MacroArgStackDepth = base;
 }
 //---------------------------------------------------------------------------
+// ExtKAGParser compatibility: [while]/[endwhile]/[break]/[continue] support
+//---------------------------------------------------------------------------
+void tTJSNI_KAGParser::PushWhileStack()
+{
+	tjs_int labelline;
+	ttstr labelname;
+	FindNearestLabel(CurLine, labelline, labelname);
+	if(labelline < 0) labelline = 0;
+
+	const tjs_char *curline_content;
+	if(Lines && CurLine < LineCount)
+		curline_content = Lines[CurLine].Start;
+	else
+		curline_content = TJS_W("");
+
+	WhileStack.push_back(tWhileStackData(StorageName, labelname,
+		CurLine - labelline,
+		curline_content,
+		LineBuffer, CurPos, LineBufferUsing,
+		ExcludeLevel, IfLevel,
+		WhileLevelExp, WhileLevelEach));
+}
+//---------------------------------------------------------------------------
+void tTJSNI_KAGParser::PopWhileStack(const bool &loop_again)
+{
+	if(WhileStack.empty() ||
+		(!CallStack.empty() && CallStack.back().WhileStackDepth >= WhileStack.size()))
+		TVPThrowExceptionMessage(TVPKAGWhileStackUnderflow);
+
+	const tWhileStackData &data = WhileStack.back();
+
+	if(loop_again && Scenario != NULL)
+	// Note: Scenario can be NULL when called from ClearBuffer().
+	{
+		// return to the position just after the [while]
+		if(data.Label.IsEmpty())
+		{
+			CurLine = 0;
+		}
+		else
+		{
+			tTVPScenarioCacheItem::tLabelCacheData *newline;
+			if(!(newline = Scenario->GetLabelCache().Find(data.Label)))
+				TVPThrowExceptionMessage(TVPKAGLabelNotFound, StorageName, data.Label);
+			CurLine = newline->Line;
+		}
+		CurLine += data.Offset;
+
+		if(CurLine > LineCount)
+			TVPThrowExceptionMessage(TVPKAGWhileStackUnderflow);
+				/* CurLine == LineCount is OK (at end of file) */
+
+		if(CurLine < LineCount)
+			if(data.OrgLineStr != Lines[CurLine].Start) // check original line information
+				TVPThrowExceptionMessage(TVPKAGReturnLostSync);
+		if(data.LineBufferUsing)
+		{
+			LineBuffer = data.LineBuffer;
+			CurLineStr = LineBuffer.c_str();
+			LineBufferUsing = true;
+		}
+		else
+		{
+			if(CurLine < LineCount)
+			{
+				CurLineStr = Lines[CurLine].Start;
+				LineBufferUsing = false;
+			}
+		}
+		CurPos = data.Pos;
+	}
+
+	IfLevel = data.IfLevel;
+	ExcludeLevel = data.ExcludeLevel;
+
+	WhileLevelExp = data.WhileLevelExp;
+	WhileLevelEach = data.WhileLevelEach;
+
+	WhileStack.pop_back();
+}
+//---------------------------------------------------------------------------
+void tTJSNI_KAGParser::WhileStackControlForEndwhile(const bool &loop_again)
+{
+	if(loop_again)
+	{	// continue the loop: back to just after [while], keeping the
+		// current WhileLevelExp/WhileLevelEach
+		ttstr exp = WhileLevelExp, each = WhileLevelEach;
+		PopWhileStack(true);
+		PushWhileStack();
+		WhileLevelExp = exp, WhileLevelEach = each;
+		IfLevel++;
+	}
+	else
+	{	// exit the loop
+		PopWhileStack(false);
+	}
+}
+//---------------------------------------------------------------------------
+void tTJSNI_KAGParser::ClearWhileStack()
+{
+	WhileStack.clear();
+	WhileLevelExp = TJS_W("");
+	WhileLevelEach = TJS_W("");
+}
+//---------------------------------------------------------------------------
+void tTJSNI_KAGParser::ClearWhileStackToTheLatestCallStack()
+{
+	if(CallStack.empty())
+	{
+		ClearWhileStack();
+		return;
+	}
+
+	tjs_uint depth = CallStack.back().WhileStackDepth;
+	for(tjs_uint i = WhileStack.size(); i > depth; i--)
+		PopWhileStack(false);
+}
+//---------------------------------------------------------------------------
 void tTJSNI_KAGParser::FindNearestLabel(tjs_int start, tjs_int &labelline,
 	ttstr &labelname)
 {
@@ -1317,10 +1600,16 @@ void tTJSNI_KAGParser::PushCallStack()
 	else
 		curline_content = TJS_W("");
 
+	// ExtKAGParser compatibility: the while stack barrier must be pushed
+	// *before* saving the call stack, so the [while] state of the caller is
+	// preserved across the called scenario.
+	PushWhileStack();
+
 	CallStack.push_back(tCallStackData(StorageName, labelname, CurLine - labelline,
 		curline_content,
 		LineBuffer, CurPos, LineBufferUsing, MacroArgStackBase, MacroArgStackDepth,
-		ExcludeLevelStack, ExcludeLevel, IfLevelExecutedStack, IfLevel));
+		ExcludeLevelStack, ExcludeLevel, IfLevelExecutedStack, IfLevel,
+		WhileStack.size()));
 	MacroArgStackBase = MacroArgStackDepth;
 }
 //---------------------------------------------------------------------------
@@ -1334,6 +1623,10 @@ void tTJSNI_KAGParser::PopCallStack(const ttstr &storage, const ttstr &label)
 	tCallStackData & data = CallStack.back();
 	MacroArgStackBase = data.MacroArgStackDepth; // later reset to MacroArgStackBase
 	PopMacroArgsTo(data.MacroArgStackDepth);
+
+	// ExtKAGParser compatibility: take back the while stack pushed after the
+	// [call] (loops of the called scenario) before restoring the position.
+	ClearWhileStackToTheLatestCallStack();
 
 	// goto label or previous position
 	if(!storage.IsEmpty() || !label.IsEmpty())
@@ -1388,6 +1681,20 @@ void tTJSNI_KAGParser::PopCallStack(const ttstr &storage, const ttstr &label)
 
 	// pop casll stack
 	CallStack.pop_back();
+
+	// ExtKAGParser compatibility: pop the while stack barrier pushed at the
+	// [call]; this restores the caller's WhileLevelExp/WhileLevelEach.
+	// Must run after CallStack.pop_back() because LoadScenario() above may
+	// invoke BreakConditionAndMacro(), which trims the while stack against
+	// the current call stack top.
+	PopWhileStack(false);
+
+	if(!storage.IsEmpty() || !label.IsEmpty())
+	{
+		// returning to a specified position: clear while state here
+		// (the scenario jumped to may not pair with the caller's [while])
+		BreakConditionAndMacro();
+	}
 
 
 	// call function back
@@ -1609,7 +1916,9 @@ parse_start:
 		enum tSpecialTags
 		{ tag_other, tag_if, tag_else, tag_elsif, tag_ignore, tag_endif, tag_endignore,
 			tag_emb, tag_macro, tag_endmacro, tag_macropop, tag_erasemacro,
-			tag_jump, tag_call, tag_return} tagkind;
+			tag_jump, tag_call, tag_return,
+			tag_while, tag_endwhile, tag_break, tag_continue,
+			tag_pmacro} tagkind;
 		static bool tag_checker_init = false;
 		static tTJSHashTable<ttstr, tjs_int> special_tags_hash;
 		if(!tag_checker_init)
@@ -1643,6 +1952,16 @@ parse_start:
 				ttstr(TJS_W("call")), (tjs_int)tag_call);
 			special_tags_hash.Add(
 				ttstr(TJS_W("return")), (tjs_int)tag_return);
+			special_tags_hash.Add(
+				ttstr(TJS_W("while")), (tjs_int)tag_while);
+			special_tags_hash.Add(
+				ttstr(TJS_W("endwhile")), (tjs_int)tag_endwhile);
+			special_tags_hash.Add(
+				ttstr(TJS_W("break")), (tjs_int)tag_break);
+			special_tags_hash.Add(
+				ttstr(TJS_W("continue")), (tjs_int)tag_continue);
+			special_tags_hash.Add(
+				ttstr(TJS_W("pmacro")), (tjs_int)tag_pmacro);
 		}
 
 
@@ -1850,6 +2169,71 @@ parse_start:
 
 					TVP_KAG_STEP_NEXT;
 
+					break; // break
+				}
+
+				// ExtKAGParser compatibility: [while] -- processed even while
+				// its scope is excluded so the matching [endwhile] stays paired.
+				if(tagkind == tag_while)
+				{
+					// advance past this tag first: the saved position must be
+					// the place [endwhile] loops back to
+					TVP_KAG_STEP_NEXT;
+					PushWhileStack();
+					IfLevel++;
+
+					if(condition && ExcludeLevel == -1)
+					{
+						tTJSVariant val;
+
+						// run "init=" first
+						ttstr init;
+						DicObj->PropGet(0, TJS_W("init"), 0, &val, DicObj);
+						init = val;
+						if(init != TJS_W(""))
+							TVPExecuteExpression(init, Owner, &val);
+
+						// read "exp=" and "each=" for [endwhile]/[break]
+						DicObj->PropGet(0, __exp_name.c_str(), __exp_name.GetHint(),
+							&val, DicObj);
+						WhileLevelExp = val;
+						if(WhileLevelExp == TJS_W(""))
+							TVPThrowExceptionMessage(TVPKAGSyntaxError);
+						DicObj->PropGet(0, TJS_W("each"), 0, &val, DicObj);
+						WhileLevelEach = val;
+
+						// check "exp=" whether the scope must run
+						TVPExecuteExpression(WhileLevelExp, Owner, &val);
+						bool cond = val.operator bool();
+						if(!cond)
+							ExcludeLevel = IfLevel;
+					}
+
+					goto parse_start; // parse from just after [while]
+				}
+
+				// [endwhile]
+				if(tagkind == tag_endwhile)
+				{
+					if(WhileStack.empty() || IfLevel-1 != WhileStack.back().IfLevel)
+						TVPThrowExceptionMessage(TVPKAGWhileStackUnderflow);
+
+					bool cond = false;
+					if(condition && ExcludeLevel == -1)
+					{
+						// evaluate "each=" first, then "exp="
+						tTJSVariant val;
+						TVPExecuteExpression(WhileLevelEach, Owner, &val);
+						TVPExecuteExpression(WhileLevelExp, Owner, &val);
+						cond = val.operator bool();
+					}
+
+					WhileStackControlForEndwhile(cond);
+
+					if(cond)
+						goto parse_start; // loop again
+
+					TVP_KAG_STEP_NEXT;
 					break; // break
 				}
 
@@ -2067,6 +2451,36 @@ parse_start:
 							goto parse_start;
 						}
 					}
+					else if(tagkind == tag_continue)
+					{
+						// ExtKAGParser compatibility: jump to the next [while]
+						// iteration
+						if(WhileStack.empty() || IfLevel-1 != WhileStack.back().IfLevel)
+							TVPThrowExceptionMessage(TVPKAGWhileStackUnderflow);
+
+						WhileStackControlForEndwhile(true);
+
+						tTJSVariant val;
+						TVPExecuteExpression(WhileLevelEach, Owner, &val);
+						TVPExecuteExpression(WhileLevelExp, Owner, &val);
+						bool wcond = val.operator bool();
+						if(!wcond)
+							ExcludeLevel = IfLevel; // next loop will be skipped
+
+						goto parse_start;
+					}
+					else if(tagkind == tag_break)
+					{
+						// ExtKAGParser compatibility: exit the [while] loop;
+						// the remaining body is skipped by ExcludeLevel
+						if(WhileStack.empty() || IfLevel-1 != WhileStack.back().IfLevel)
+							TVPThrowExceptionMessage(TVPKAGWhileStackUnderflow);
+
+						WhileStackControlForEndwhile(true);
+						ExcludeLevel = IfLevel; // skip the rest of the loop body
+
+						goto parse_start;
+					}
 					else
 					{
 						if(tagkind == tag_macro)
@@ -2095,6 +2509,33 @@ parse_start:
 								Macros->DeleteMember(0, macroname.c_str(), 0, Macros)))
 								TVPThrowExceptionMessage(TVPUnknownMacroName, macroname);
 						}
+						else if(tagkind == tag_pmacro)
+						{
+							// ExtKAGParser compatibility: [pmacro name=xxx a1=v1 ...]
+							// records the attribute bundle under "xxx"; a bare "xxx"
+							// word inside a later tag's attribute list then expands
+							// into those attributes (see the value-omitted branch of
+							// the attribute parser).
+							tTJSVariant val;
+							DicObj->PropGet(0, TJS_W("name"), 0, &val, DicObj);
+							if(val.Type() == tvtVoid)
+								TVPThrowExceptionMessage(TVPKAGSyntaxError);
+							ttstr pmname = val;
+							pmname.ToLowerCase();
+
+							iTJSDispatch2 *dsp = TJSCreateDictionaryObject();
+							tTJSVariant pmval(dsp, dsp);
+							dsp->Release();
+							{
+								tTJSVariant src(DicObj, DicObj);
+								tTJSVariant *psrc = &src;
+								DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, dsp);
+								dsp->DeleteMember(0, TJS_W("name"), 0, dsp);
+								dsp->DeleteMember(0, TJS_W("tagname"), 0, dsp);
+							}
+							ParamMacros->PropSet(TJS_MEMBERENSURE, pmname.c_str(),
+								NULL, &pmval, ParamMacros);
+						}
 					}
 				}
 
@@ -2114,10 +2555,15 @@ parse_start:
 					iTJSDispatch2 *dsp = GetMacroTopNoAddRef();
 					if(dsp)
 					{
-						// assign macro arguments to current arguments
+						// ExtKAGParser compatibility: MERGE the macro arguments
+						// into the current attribute dictionary. Dictionary.assign
+						// clears its destination by default, which would drop the
+						// attributes written before the '*' (e.g.
+						// [image layer=base ... *] would lose layer=base).
 						tTJSVariant src(dsp, dsp);
-						tTJSVariant *psrc = &src;
-						DicAssign->FuncCall(0, NULL, NULL, NULL, 1, &psrc, DicObj);
+						tTJSVariant noclear(false);
+						tTJSVariant *pparams[2] = { &src, &noclear };
+						DicAssign->FuncCall(0, NULL, NULL, NULL, 2, pparams, DicObj);
 					}
 					tTJSVariant tag_val(tagname);
 					DicObj->PropSetByVS(TJS_MEMBERENSURE,
@@ -2149,7 +2595,28 @@ parse_start:
 
 			if(CurLineStr[CurPos] != TJS_W('='))
 			{
-				// arrtibute value omitted
+				// attribute value omitted
+				// ExtKAGParser compatibility: a bare word that matches a
+				// registered parameter macro ([pmacro name=word ...]) expands
+				// into its recorded attributes instead of becoming word=true.
+				tTJSVariant pmval;
+				if(ParamMacros && TJS_SUCCEEDED(
+					ParamMacros->PropGet(0, attribname.c_str(), NULL, &pmval,
+						ParamMacros)) &&
+					pmval.Type() != tvtVoid)
+				{
+					iTJSDispatch2 *pm = pmval.AsObjectNoAddRef();
+					if(pm)
+					{
+						// merge into DicObj without clearing it: assign would
+						// wipe attributes parsed so far, including name=
+						tTJSVariant src(pm, pm);
+						tTJSVariant noclear(false);
+						tTJSVariant *pparams[2] = { &src, &noclear };
+						DicAssign->FuncCall(0, NULL, NULL, NULL, 2, pparams, DicObj);
+					}
+					continue; // read the next attribute
+				}
 				value = TJS_W("true"); // always true
 			}
 			else
