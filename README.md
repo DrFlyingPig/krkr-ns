@@ -45,13 +45,12 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 >
 > **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["Game01"] = "中文显示名称";`，只改变游戏库中的名称。
 
-> 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份；运行时开关与源码补丁记录见 [PATCHES.md](docs/PATCHES.md)。
+> 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份。
 >
 > 自行构建需准备 devkitPro / devkitA64、Switch 依赖库、CMake/Ninja 和 FFmpeg，并按本地环境配置脚本中的工具路径。FFmpeg 构建脚本见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)；运行 `build_nro.sh` 生成 `build-switch/krkrsdl2.nro`，加 `--no-emu-copy` 可跳过模拟器复制。
 
 ## ✅ 已实现功能
 
-> 兼容性差异、架构对照与移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)。
 
 **游戏库与界面**
 
@@ -135,14 +134,12 @@ KRKR-ns/
 │   └── meson.build                 # 上游构建配置
 ├── compat-patches/system/          # 打包进 RomFS 的 TJS 兼容脚本
 ├── design/launcher-preview/        # 启动器设计稿与预览文件
-├── docs/                           # 兼容性、补丁和开发文档
 ├── tools/                          # 构建、打包和调试工具
 ├── tests/                          # 引擎、存档、动画等功能检查
 ├── out/                            # 本地 FFmpeg 依赖和发布 NRO，不纳入版本控制
 └── build_nro.sh                    # 构建、NRO 打包与模拟器部署入口
 ```
 
-> 文档索引：[docs/README.md](docs/README.md)；移植计划见 [KIRIKIROID2_PORTING_PLAN.md](docs/KIRIKIROID2_PORTING_PLAN.md)，模块说明见 [MODULES.md](docs/MODULES.md)，源码补丁见 [PATCHES.md](docs/PATCHES.md)，性能与故障记录见 [RUNTIME_NOTES.md](docs/RUNTIME_NOTES.md)。上游差异见 [UPSTREAM_DELTA.md](docs/UPSTREAM_DELTA.md)，由 `tools/upstream_delta.sh` 生成。
 
 ## 📄 许可
 
