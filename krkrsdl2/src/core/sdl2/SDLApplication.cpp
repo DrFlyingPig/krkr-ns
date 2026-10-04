@@ -6078,6 +6078,7 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 	TVPSetCurrentDirectory(krkrsdl2_game_dir);
 	chdir(native_game_dir.c_str());
 
+	KRKRNS_LOG("[launch] console-thread-fix-2 (lazy decode threads)");
 	KRKRNS_LOG("[launcher] launching directory/file: %s/%s", directory8.c_str(), selected8.c_str());
 	KRKRNS_LOG("[launcher] save path: %s/", native_save.c_str());
 	return krkrsdl2_archive_path(selected) + TJS_W("startup.tjs");
