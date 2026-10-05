@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <vector>
 
 namespace krkrns {
 
@@ -333,6 +334,107 @@ inline void GenerateWhiteNoise(Channel* buffer, int width, int height, std::ptrd
         {
             const Channel n = static_cast<Channel>(rnd() / (RAND_MAX / 255));
             p[kBlue] = p[kGreen] = p[kRed] = n;
+        }
+    }
+}
+
+// Separable Gaussian blur over all four channels.
+//
+// KAG reaches this through the image attribute "gblur" and passes one numeric
+// argument (system/KAGEnvImage.tjs: `list.add(["gaussianBlur", +.gblur])`).
+// No local source shows the original plugin's kernel, so this port documents its
+// own mapping instead of guessing at one: the argument is a radius in pixels,
+// sigma is radius / 2, the kernel spans +/- radius (about two sigma each way)
+// and the border replicates the edge pixel.
+//
+// Blurring alpha along with the colour follows the engine's own blur, which is
+// what KAG's sibling attribute blurx/blury uses: doBoxBlur defaults to
+// DoBoxBlurForAlpha, a plain per channel filter that includes alpha.
+//
+// Cost is O(width * height * radius * 4) with integer weights.  KAG marks
+// gaussianBlur as needing a full redraw, so a title that sets it pays this on
+// every redraw of that layer; radius is capped to bound the worst case.
+constexpr int kGaussianMaxRadius = 64;
+
+inline void GaussianBlur(Channel* buffer, int width, int height, std::ptrdiff_t pitch, int amount)
+{
+    if (!buffer || width <= 0 || height <= 0 || amount <= 0 || pitch == 0) return;
+
+    // The row stride may be negative (bottom-up buffers, which this engine uses),
+    // so size the scratch image from its magnitude while indexing with the sign.
+    const std::ptrdiff_t rowPitch = pitch;
+    const std::size_t stride = static_cast<std::size_t>(rowPitch < 0 ? -rowPitch : rowPitch);
+    const std::size_t scratchSize = stride * static_cast<std::size_t>(height);
+
+    const int radius = std::min(amount, kGaussianMaxRadius);
+    const double sigma = std::max(radius / 2.0, 0.5);
+
+    // Integer weights scaled to 1 << 16.  The centre weight absorbs the rounding
+    // remainder so the weights sum to exactly 65536: that keeps the fixed point
+    // arithmetic exact for a uniform field instead of drifting a level per pass.
+    std::vector<std::int32_t> kernel(static_cast<std::size_t>(radius) * 2 + 1);
+    std::vector<double> weights(static_cast<std::size_t>(radius) * 2 + 1);
+    double weightSum = 0.0;
+    for (int k = -radius; k <= radius; ++k)
+    {
+        const double weight = std::exp(-(static_cast<double>(k) * k) / (2.0 * sigma * sigma));
+        weights[static_cast<std::size_t>(k + radius)] = weight;
+        weightSum += weight;
+    }
+    std::int32_t scaled = 0;
+    for (std::size_t i = 0; i < weights.size(); ++i)
+    {
+        kernel[i] = static_cast<std::int32_t>(weights[i] / weightSum * 65536.0 + 0.5);
+        scaled += kernel[i];
+    }
+    kernel[static_cast<std::size_t>(radius)] += 65536 - scaled;
+
+    // Horizontal pass into the scratch image, vertical pass back into the layer.
+    // The scratch uses a positive stride of its own so the layer's sign never
+    // reaches its indexing.
+    const std::ptrdiff_t scratchPitch = static_cast<std::ptrdiff_t>(stride);
+    std::vector<Channel> scratch(scratchSize, 0);
+
+    for (int y = 0; y < height; ++y)
+    {
+        const Channel* src = buffer + static_cast<std::ptrdiff_t>(y) * rowPitch;
+        Channel* dst = scratch.data() + static_cast<std::ptrdiff_t>(y) * scratchPitch;
+        for (int x = 0; x < width; ++x)
+        {
+            for (int channel = 0; channel < kPixelStride; ++channel)
+            {
+                std::int32_t sum = 0;
+                for (int k = -radius; k <= radius; ++k)
+                {
+                    int sx = x + k;
+                    if (sx < 0) sx = 0;
+                    else if (sx >= width) sx = width - 1;
+                    sum += kernel[static_cast<std::size_t>(k + radius)] *
+                           src[sx * kPixelStride + channel];
+                }
+                dst[x * kPixelStride + channel] = ClampChannel((sum + 32768) >> 16);
+            }
+        }
+    }
+
+    for (int y = 0; y < height; ++y)
+    {
+        Channel* dst = buffer + static_cast<std::ptrdiff_t>(y) * rowPitch;
+        for (int x = 0; x < width; ++x)
+        {
+            for (int channel = 0; channel < kPixelStride; ++channel)
+            {
+                std::int32_t sum = 0;
+                for (int k = -radius; k <= radius; ++k)
+                {
+                    int sy = y + k;
+                    if (sy < 0) sy = 0;
+                    else if (sy >= height) sy = height - 1;
+                    sum += kernel[static_cast<std::size_t>(k + radius)] *
+                           scratch[static_cast<std::ptrdiff_t>(sy) * scratchPitch + x * kPixelStride + channel];
+                }
+                dst[x * kPixelStride + channel] = ClampChannel((sum + 32768) >> 16);
+            }
         }
     }
 }

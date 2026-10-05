@@ -1,5 +1,5 @@
-// layerExImage.dll: brightness/contrast, hue/saturation and noise operations on
-// a Layer's main image.
+// layerExImage.dll: brightness/contrast, hue/saturation, noise and blur
+// operations on a Layer's main image.
 //
 // Adapted from krkrsdl3/plugins/LayerExImage.cpp; see LICENSE.krkrsdl3 for the
 // upstream license and the CxImage attribution the operations derive from.  The
@@ -180,6 +180,20 @@ tjs_error GenerateWhiteNoise(tTJSVariant* result, tjs_int numparams, tTJSVariant
     return TJS_S_OK;
 }
 
+// KAG reaches this through the "gblur" image attribute with one numeric
+// argument; see LayerExImageAlgo.h for the radius mapping this port documents.
+tjs_error GaussianBlur(tTJSVariant* result, tjs_int numparams, tTJSVariant** param,
+                       iTJSDispatch2* layer)
+{
+    if (numparams < 1) return TJS_E_BADPARAMCOUNT;
+    LayerImage image;
+    OpenLayerImage(layer, image);
+    krkrns::GaussianBlur(image.pixels, image.width, image.height, image.pitch,
+                         static_cast<int>(param[0]->AsInteger()));
+    Redraw(layer, image);
+    return TJS_S_OK;
+}
+
 }  // namespace
 
 NCB_ATTACH_FUNCTION(light, Layer, Light);
@@ -187,3 +201,4 @@ NCB_ATTACH_FUNCTION(colorize, Layer, Colorize);
 NCB_ATTACH_FUNCTION(modulate, Layer, Modulate);
 NCB_ATTACH_FUNCTION(noise, Layer, Noise);
 NCB_ATTACH_FUNCTION(generateWhiteNoise, Layer, GenerateWhiteNoise);
+NCB_ATTACH_FUNCTION(gaussianBlur, Layer, GaussianBlur);
