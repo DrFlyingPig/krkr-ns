@@ -21,7 +21,12 @@
 #include "StorageIntf.h"
 #include "BinaryStream.h"
 #include <errno.h>
+#include <cstdlib>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "CharacterSet.h"
+#include "md5.h"
 #include "tjsUtils.h"
 #include "MsgIntf.h"
 #include "EventIntf.h"
@@ -2137,9 +2142,11 @@ void TVPClearStorageCaches()
 // success; copyFile copies through the engine's streams, which also creates a
 // missing destination folder; moveFile renames local files without replacing
 // an existing destination and clears the storage caches on success.
-// The rest of the plugin (setTime, exportFile,
-// truncateFile, dirtree, md5, temporary files, file selector) stays
-// out of this port.
+// The second half of the plugin follows further down (truncateFile, dirtree,
+// exportFile, getMD5HashString, isExistentDirectory, searchPath,
+// createDirectory).  setTime, the temporary-name helper, the file selector and
+// the attribute members have no call site in any title on this machine and stay
+// out; what remains of the plugin is Windows-only or unused here.
 //
 // A Date for a POSIX timestamp, or an empty variant when there is none.  The
 // Date class is looked up per call rather than cached: an in-process engine
@@ -2460,6 +2467,339 @@ static tTJSVariant TVPStoragesDirList(const ttstr & dir, bool with_info)
 
 	return result;
 }
+// ---------------------------------------------------------------------------
+// fstat, second half: the members the first pass left out.
+//
+// The call sites that made these worth porting (2026-10-05 scan of the titles
+// on this machine with tools/xp3_scan_symbols.py): system/MainWindow.tjs
+// truncates a save thumbnail with Storages.truncateFile when the new thumbnail
+// is smaller than the old one (the name appears in 11 titles; the call is
+// guarded by typeof == "Object"); sysscn/append_init.tjs, sysscn/debugutil.tjs
+// and main/Storages.tjs walk scenario folders with
+// Storages.isExistentDirectory (5 titles, always with the trailing '/');
+// titles' tool scripts copy a file out of an archive with Storages.exportFile
+// and compare icon files with Storages.getMD5HashString (2 titles, guarded);
+// system/initialize.tjs lists folders with Storages.dirtree when the engine is
+// started with -usedirtree yes; sysscn/debugutil.tjs uses typeof
+// Storages.createDirectory as its "is fstat installed?" probe; and
+// Storages.searchPath only ever probes Windows executables ("mspaint.exe")
+// inside try/catch, so on this target it always answers "not found" like any
+// other non-Windows host does.
+//
+// The platform rules of the first half still hold: no stat() (a folder is
+// recognised by opening it), and reads and writes go through the engine's
+// streams.  truncateFile is the exception - the reference shortens the locally
+// accessible file directly, and no stream API shortens a file.
+
+// Local UTF-8 path for a name that has one; false for archive members and
+// anything else without a local form.
+static bool TVPStoragesLocalPath8(const ttstr & name, std::string & path8)
+{
+	ttstr placed = TVPStoragesPlacedName(name);
+	if(placed.IsEmpty()) return false;
+	try
+	{
+		TVPGetLocalName(placed);
+	}
+	catch(...)
+	{
+		return false;
+	}
+	ttstr native = TVPStoragesNativePath(placed);
+	return TVPUtf16ToUtf8(path8, native.AsStdString());
+}
+
+static bool TVPStoragesIsLocalFolder8(const std::string & path8)
+{
+	DIR * dir = opendir(path8.c_str());
+	if(!dir) return false;
+	closedir(dir);
+	return true;
+}
+
+// truncateFile(file, size): bool, false for anything without a local form -
+// the reference answers the same way through TVPGetLocallyAccessibleName.
+static bool TVPStoragesTruncateFile(const ttstr & file, tjs_int64 size)
+{
+	std::string path8;
+	if(!TVPStoragesLocalPath8(file, path8))
+	{
+		KRKRNS_LOG("[fstat] truncateFile: no local form for %s",
+			krkrns_utf8_of_path(file).c_str());
+		return false;
+	}
+	if(size < 0) size = 0;
+	if(truncate(path8.c_str(), (off_t)size) != 0)
+	{
+		const int err = errno;
+		KRKRNS_LOG("[fstat] truncateFile(%s, %d) failed, errno=%d",
+			path8.c_str(), (int)size, err);
+		TVPAddLog(ttstr(TJS_W("truncateFile : ")) + file + TJS_W("Failed"));
+		return false;
+	}
+	KRKRNS_LOG("[fstat] truncateFile(%s) -> %d bytes", path8.c_str(), (int)size);
+	TVPClearStorageCaches();
+	return true;
+}
+
+// exportFile(filename, storename): copy a storage (an archive member included)
+// to a destination; the reference throws when either side cannot be opened.
+static void TVPStoragesExportFile(const ttstr & filename, const ttstr & storename)
+{
+	tTJSBinaryStream * in = nullptr;
+	try
+	{
+		in = TVPCreateBinaryStreamForRead(TVPStoragesPlacedName(filename), TJS_W(""));
+	}
+	catch(...)
+	{
+		in = nullptr;
+	}
+	if(!in)
+		TVPThrowExceptionMessage((ttstr(TJS_W("cannot open readfile: ")) + filename).c_str());
+
+	tTJSBinaryStream * out = nullptr;
+	try
+	{
+		out = TVPCreateBinaryStreamForWrite(TVPNormalizeStorageName(storename), TJS_W(""));
+	}
+	catch(...)
+	{
+		delete in;
+		throw;
+	}
+	if(!out)
+	{
+		delete in;
+		TVPThrowExceptionMessage((ttstr(TJS_W("cannot open storefile: ")) + storename).c_str());
+	}
+
+	tjs_uint8 buffer[1024 * 16];
+	tjs_int32 read;
+	while((read = in->Read(buffer, sizeof buffer)) > 0)
+		out->Write(buffer, read);
+	delete out;
+	delete in;
+	KRKRNS_LOG("[fstat] exportFile('%s' -> '%s')", krkrns_utf8_of_path(filename).c_str(),
+		krkrns_utf8_of_path(storename).c_str());
+	TVPClearStorageCaches();
+}
+
+// getMD5HashString(name): lowercase hex digest of the placed file's contents.
+static ttstr TVPStoragesMD5HashString(const ttstr & name)
+{
+	tTJSBinaryStream * in = nullptr;
+	try
+	{
+		in = TVPCreateBinaryStreamForRead(TVPStoragesPlacedName(name), TJS_W(""));
+	}
+	catch(...)
+	{
+		in = nullptr;
+	}
+	if(!in)
+		TVPThrowExceptionMessage((ttstr(TJS_W("cannot open : ")) + name).c_str());
+
+	md5_state_t st;
+	md5_init(&st);
+	tjs_uint8 buffer[1024];
+	tjs_int32 read;
+	while((read = in->Read(buffer, sizeof buffer)) > 0)
+		md5_append(&st, buffer, (int)read);
+	delete in;
+
+	md5_byte_t digest[16];
+	md5_finish(&st, digest);
+	static const tjs_char hex[17] = TJS_W("0123456789abcdef");
+	tjs_char ret[33];
+	for(tjs_int i = 0; i < 16; i++)
+	{
+		ret[i * 2] = hex[(digest[i] >> 4) & 0xF];
+		ret[i * 2 + 1] = hex[digest[i] & 0xF];
+	}
+	ret[32] = 0;
+	return ttstr(ret);
+}
+
+// dirtree(path[, dironly]): recursive listing below path, folders carrying a
+// trailing '/' exactly as the reference's; an absent folder lists as empty.
+static void TVPStoragesDirTreeInto(const ttstr & path, const ttstr & subdir,
+	iTJSDispatch2 * array, tjs_int & count, bool dironly)
+{
+	std::string path8;
+	if(!TVPStoragesLocalPath8(path, path8)) return;
+	DIR * dir = opendir(path8.c_str());
+	if(!dir) return;
+	for(;;)
+	{
+		struct dirent * entry = readdir(dir);
+		if(!entry) break;
+		const char * name8 = entry->d_name;
+		if(!name8[0]) continue;
+		if(name8[0] == '.' && (name8[1] == 0 || (name8[1] == '.' && name8[2] == 0))) continue;
+
+		const std::string child8 = path8 + name8;
+		// The romfs reports DT_UNKNOWN for its entries and stat() hangs on the
+		// current emulator's fsdev, so an unknown type is resolved by trying to
+		// open the entry as a folder.
+		const bool is_dir = entry->d_type == DT_DIR ||
+			(entry->d_type == DT_UNKNOWN && TVPStoragesIsLocalFolder8(child8));
+
+		tjs_string wide;
+		if(!TVPUtf8ToUtf16(wide, std::string(name8)))
+			continue;
+		const ttstr name(wide);
+
+		tTJSVariant value;
+		if(is_dir)
+		{
+			const ttstr fullName = subdir + name + TJS_W("/");
+			value = tTJSVariant(fullName);
+			array->PropSetByNum(0, count, &value, array);
+			count++;
+			TVPStoragesDirTreeInto(path + name + TJS_W("/"), fullName, array, count, dironly);
+		}
+		else if(!dironly)
+		{
+			const ttstr fullName = subdir + name;
+			value = tTJSVariant(fullName);
+			array->PropSetByNum(0, count, &value, array);
+			count++;
+		}
+	}
+	closedir(dir);
+}
+
+static tTJSVariant TVPStoragesDirTree(const ttstr & root, bool dironly)
+{
+	// The reference appends '/' before normalising, so a caller may pass either
+	// form; normalisation collapses the duplicate.
+	const ttstr path = TVPNormalizeStorageName(root + TJS_W("/"));
+
+	iTJSDispatch2 * array = TJSCreateArrayObject();
+	tTJSVariant result(array, array);
+	if(array) array->Release();
+
+	tjs_int count = 0;
+	TVPStoragesDirTreeInto(path, ttstr(), array, count, dironly);
+	KRKRNS_LOG("[fstat] dirtree('%s') -> %d entries", krkrns_utf8_of_path(path).c_str(),
+		(int)count);
+	return result;
+}
+
+// isExistentDirectory(dir): bool.  The reference insists on the trailing '/'
+// and throws without it, and its callers do pass KAG folder names that carry
+// one; the check itself opens the folder instead of stat()ing it.
+static bool TVPStoragesIsExistentDirectory(const ttstr & dir)
+{
+	if(dir.GetLastChar() != TJS_W('/'))
+		TVPThrowExceptionMessage(
+			TJS_W("'/' must be specified at the end of given directory name."));
+	std::string path8;
+	if(!TVPStoragesLocalPath8(dir, path8)) return false;
+	return TVPStoragesIsLocalFolder8(path8);
+}
+
+// createDirectory(dir): bool, creating the whole chain like the reference.  It
+// cannot go through the engine's TVPCreateFolders: that helper checks existence
+// with stat(), and stat() on this emulator's fsdev takes the emulator down (the
+// fixture run of 2026-10-05 stopped right there - nothing after the member
+// presence checks, and no folder on the card).  The chain is built with
+// opendir() checks and mkdir() instead, like the rest of this port.
+static bool TVPStoragesCreateDirectory(const ttstr & dir)
+{
+	if(dir.GetLastChar() != TJS_W('/'))
+		TVPThrowExceptionMessage(
+			TJS_W("'/' must be specified at the end of given directory name."));
+	const ttstr d = TVPNormalizeStorageName(dir);
+
+	std::string path8;
+	if(!TVPStoragesLocalPath8(d, path8))
+	{
+		KRKRNS_LOG("[fstat] createDirectory: no local form for %s",
+			krkrns_utf8_of_path(d).c_str());
+		return false;
+	}
+
+	// Skip the device prefix ("sdmc:/", "/"): it already exists, and mkdir()
+	// must not be handed it.
+	size_t start = path8.find(":/");
+	if(start != std::string::npos)
+		start += 2;
+	else
+		start = (path8[0] == '/') ? 1 : 0;
+
+	for(size_t i = start; i <= path8.size(); i++)
+	{
+		if(i != path8.size() && path8[i] != '/') continue;
+		const std::string part = path8.substr(0, i);
+		if(part.empty()) continue;
+		if(TVPStoragesIsLocalFolder8(part)) continue;
+		if(mkdir(part.c_str(), 0777) != 0 && errno != EEXIST)
+		{
+			const int err = errno;
+			TVPAddLog(ttstr(TJS_W("createDirectory : ")) + d + TJS_W(" failed."));
+			KRKRNS_LOG("[fstat] createDirectory('%s') failed at %s, errno=%d",
+				path8.c_str(), part.c_str(), err);
+			return false;
+		}
+	}
+	KRKRNS_LOG("[fstat] createDirectory('%s') -> 1", path8.c_str());
+	return true;
+}
+
+// searchPath(filename[, searchpath]): the reference delegates to the platform's
+// TVPSearchPath, which walks $PATH (or a ';'-separated list the caller gives)
+// for an existing local file and answers with its normalised name, or with a
+// cleared result when there is none.
+static ttstr TVPStoragesSearchPath(const ttstr & name, const ttstr & searchpath)
+{
+	std::string list;
+	if(searchpath.IsEmpty())
+	{
+		const char * env = getenv("PATH");
+		if(env) list = env;
+	}
+	else
+	{
+		TVPUtf16ToUtf8(list, searchpath.AsStdString());
+	}
+	if(list.empty()) return ttstr();
+
+	tjs_string wideName(name.c_str());
+	std::string name8;
+	TVPUtf16ToUtf8(name8, wideName);
+
+	size_t begin = 0;
+	for(;;)
+	{
+		size_t end = list.find(';', begin);
+		if(end == std::string::npos) end = list.size();
+		std::string entry = list.substr(begin, end - begin);
+		if(!entry.empty())
+		{
+			if(entry.back() != '/' && entry.back() != '\\') entry += '/';
+			const std::string candidate = entry + name8;
+			FILE * f = fopen(candidate.c_str(), "rb");
+			if(f)
+			{
+				fclose(f);
+				tjs_string wide;
+				if(TVPUtf8ToUtf16(wide, candidate))
+				{
+					KRKRNS_LOG("[fstat] searchPath('%s') -> %s", name8.c_str(),
+						candidate.c_str());
+					return TVPNormalizeStorageName(ttstr(wide));
+				}
+			}
+		}
+		if(end == list.size()) break;
+		begin = end + 1;
+	}
+	KRKRNS_LOG("[fstat] searchPath('%s') -> not found", name8.c_str());
+	return ttstr();
+}
+
 tjs_uint32 tTJSNC_Storages::ClassID = -1;
 tTJSNC_Storages::tTJSNC_Storages() : inherited(TJS_W("Storages"))
 {
@@ -3023,6 +3363,64 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirlistEx) {
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/dirlistEx )
+//----------------------------------------------------------------------
+// The plugin's second half (see the notes above the class's members).
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/truncateFile) {
+	if( numparams < 2 ) return TJS_E_BADPARAMCOUNT;
+	const bool truncated = TVPStoragesTruncateFile( *param[0], (tjs_int64)*param[1] );
+	if( result ) *result = truncated;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/truncateFile )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/exportFile) {
+	if( numparams < 2 ) return TJS_E_BADPARAMCOUNT;
+	TVPStoragesExportFile( *param[0], *param[1] );
+	if( result ) result->Clear();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/exportFile )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/getMD5HashString) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	if( result ) *result = TVPStoragesMD5HashString( *param[0] );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/getMD5HashString )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/dirtree) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	// operator bool() explicitly: a C-style (bool) cast on a variant picks the
+	// Object conversion operator first and fails with
+	// "Cannot convert the variable type ((int)1 to Object)".
+	const bool dironly = numparams > 1 ? param[1]->operator bool() : false;
+	if( result ) *result = TVPStoragesDirTree( *param[0], dironly );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/dirtree )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/isExistentDirectory) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	if( result ) *result = TVPStoragesIsExistentDirectory( *param[0] );
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/isExistentDirectory )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/createDirectory) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	const bool created = TVPStoragesCreateDirectory( *param[0] );
+	if( result ) *result = created;
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/createDirectory )
+//----------------------------------------------------------------------
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/searchPath) {
+	if( numparams < 1 ) return TJS_E_BADPARAMCOUNT;
+	const ttstr found = TVPStoragesSearchPath( *param[0], numparams > 1 ? ttstr(*param[1]) : ttstr() );
+	if( result ) { if(found.IsEmpty()) result->Clear(); else *result = found; }
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/searchPath )
 //----------------------------------------------------------------------
 // kirikiroid2.dll publishes these two on Storages, and Chinese localisations
 // call Storages.setTextEncoding("gbk") from patch.tjs before anything else
