@@ -67,6 +67,7 @@ extern "C" void krkrsdl2_link_layereximage_plugin();
 extern "C" void krkrsdl2_link_scriptsex_plugin();
 extern "C" void krkrsdl2_link_shrinkcopy_plugin();
 extern "C" void krkrsdl2_link_layerexsave_plugin();
+extern "C" void krkrsdl2_link_layerexdraw_plugin();
 // Static-archive anchors for the Kirikiroid2-compatible built-ins.
 extern "C" void krkrsdl2_link_dirlist_plugin();
 extern "C" void krkrsdl2_link_getabout_plugin();
@@ -591,6 +592,7 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("scriptsex.dll") ||
 		short_name == TJS_W("shrinkcopy.dll") ||
 		short_name == TJS_W("layerexsave.dll") ||
+		short_name == TJS_W("layerexdraw.dll") ||
 		short_name == TJS_W("varfile.dll") ||
 		short_name == TJS_W("getabout.dll") ||
 		short_name == TJS_W("addfont.dll") ||
@@ -690,6 +692,7 @@ void TVPLoadPlugin(const ttstr & name)
 		krkrsdl2_link_getsample_plugin();
 		krkrsdl2_link_wutcwf_plugin();
 		krkrsdl2_link_scriptsex_plugin();
+		krkrsdl2_link_layerexdraw_plugin();
 		if (short_name == TJS_W("dirlist.dll") ||
 			short_name == TJS_W("getabout.dll") ||
 			short_name == TJS_W("addfont.dll") ||
@@ -699,7 +702,8 @@ void TVPLoadPlugin(const ttstr & name)
 			short_name == TJS_W("savestruct.dll") ||
 			short_name == TJS_W("getsample.dll") ||
 			short_name == TJS_W("wutcwf.dll") ||
-			short_name == TJS_W("scriptsex.dll"))
+			short_name == TJS_W("scriptsex.dll") ||
+			short_name == TJS_W("layerexdraw.dll"))
 		{
 			ncbAutoRegister::LoadModule(short_name);
 			if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())

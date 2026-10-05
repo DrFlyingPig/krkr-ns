@@ -582,6 +582,8 @@ src/plugins/layereximage/LayerExImage.cpp
 src/plugins/scriptsex/ScriptsEx.cpp
 src/plugins/shrinkcopy/ShrinkCopy.cpp
 src/plugins/layerexsave/LayerExSave.cpp
+src/plugins/layerexdraw/LayerExBase.cpp
+src/plugins/layerexdraw/LayerExDraw.cpp
 	external/plutovg/source/plutovg-blend.c
 	external/plutovg/source/plutovg-canvas.c
 	external/plutovg/source/plutovg-font.c
