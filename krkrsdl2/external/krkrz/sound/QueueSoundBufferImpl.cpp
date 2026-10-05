@@ -420,9 +420,13 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 
 	// play from first
 	tjs_int64 predecodedSamples = 0;
+	// Retire the stopped voice before reusing its sample buffers. Backend
+	// teardown can wait for callbacks, so neither owner nor decoder locks
+	// may be held here. Preserve the format to reuse matching allocations.
+	Player.Destroy(false);
+	Thread->ClearQueue();
 	{	// thread protected block
 		tTJSCriticalSectionHolder holder(BufferCS);
-		Thread->ClearQueue();
 		Player.ClearSampleQueue();
 
 		CreateSoundBuffer();
@@ -472,8 +476,6 @@ void tTJSNI_QueueSoundBuffer::Play() {
 	if(BufferPlaying) return;
 
 	StopPlay();
-
-	tTJSCriticalSectionHolder holder(BufferCS);
 
 	StartPlay();
 	SetStatus(ssPlay);

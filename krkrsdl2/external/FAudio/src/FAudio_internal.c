@@ -1249,6 +1249,10 @@ static void FAudio_INTERNAL_FlushPendingBuffers(FAudioSourceVoice *voice)
 
 		if (voice->src.callback != NULL && voice->src.callback->OnBufferEnd != NULL)
 		{
+			/* KRKR-ns: callbacks may take the engine sound lock while its
+			 * owner flushes this voice. Do not retain bufferLock across them. */
+			FAudio_PlatformUnlockMutex(voice->src.bufferLock);
+			LOG_MUTEX_UNLOCK(voice->audio, voice->src.bufferLock)
 			FAudio_PlatformUnlockMutex(voice->audio->sourceLock);
 			LOG_MUTEX_UNLOCK(voice->audio, voice->audio->sourceLock)
 
@@ -1259,6 +1263,8 @@ static void FAudio_INTERNAL_FlushPendingBuffers(FAudioSourceVoice *voice)
 
 			FAudio_PlatformLockMutex(voice->audio->sourceLock);
 			LOG_MUTEX_LOCK(voice->audio, voice->audio->sourceLock)
+			FAudio_PlatformLockMutex(voice->src.bufferLock);
+			LOG_MUTEX_LOCK(voice->audio, voice->src.bufferLock)
 		}
 		voice->audio->pFree(entry);
 	}

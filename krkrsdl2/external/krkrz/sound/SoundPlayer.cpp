@@ -23,6 +23,7 @@
 //---------------------------------------------------------------------------
 tTVPSoundPlayer::tTVPSoundPlayer( tTJSNI_QueueSoundBuffer* owner )
  : Owner( owner ), Stream(nullptr), Paused(false), Playing(false), PlayStopPos(-1) {
+	memset( &StreamFormat, 0, sizeof( StreamFormat ) );
 }
 //---------------------------------------------------------------------------
 tTVPSoundPlayer::~tTVPSoundPlayer() {
@@ -195,11 +196,18 @@ void tTVPSoundPlayer::ClearSampleQueue() {
 	Samples.clear();
 }
 //---------------------------------------------------------------------------
-void tTVPSoundPlayer::Destroy() {
-	if( Stream ) delete Stream, Stream = nullptr;
-	Playing = false;
-
-	memset( &StreamFormat, 0, sizeof( StreamFormat ) );
+void tTVPSoundPlayer::Destroy(bool resetFormat) {
+	iTVPAudioStream* retired;
+	{
+		tTJSCriticalSectionHolder holder(Owner->GetBufferCS());
+		retired = Stream;
+		Stream = nullptr;
+		Playing = false;
+		if( resetFormat ) memset( &StreamFormat, 0, sizeof( StreamFormat ) );
+	}
+	// DestroyVoice waits for its last callback, which also needs BufferCS.
+	// Keep the owner and sample buffers alive, but let that callback finish.
+	delete retired;
 }
 //---------------------------------------------------------------------------
 void tTVPSoundPlayer::SetVolume(tjs_int v) {

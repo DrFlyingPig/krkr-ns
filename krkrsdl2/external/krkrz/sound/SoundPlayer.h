@@ -45,7 +45,7 @@ public:
 	void Reset();
 	void Clear();
 	void ClearSampleQueue();
-	void Destroy();
+	void Destroy(bool resetFormat = true);
 	bool IsSameFormat( tTVPWaveFormat& format ) const {
 		return( StreamFormat.SamplesPerSec	== format.SamplesPerSec &&
 				StreamFormat.Channels		== format.Channels &&
