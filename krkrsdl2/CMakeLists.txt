@@ -589,6 +589,8 @@ src/plugins/extrans/wave.cpp
 src/plugins/extrans/mosaic.cpp
 src/plugins/extrans/turn.cpp
 src/plugins/extrans/turntrans_table.cpp
+src/plugins/extrans/rotatebase.cpp
+src/plugins/extrans/rotatetrans.cpp
 	external/plutovg/source/plutovg-blend.c
 	external/plutovg/source/plutovg-canvas.c
 	external/plutovg/source/plutovg-font.c

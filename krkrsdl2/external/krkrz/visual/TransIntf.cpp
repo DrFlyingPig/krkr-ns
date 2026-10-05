@@ -14,6 +14,7 @@
 #include "LayerIntf.h"
 #include "GraphicsLoaderIntf.h"
 #include "tjsHashSearch.h"
+#include <set>
 #include "MsgIntf.h"
 #include "SysInitIntf.h"
 #include "tvpgl.h"
@@ -443,13 +444,14 @@ iTVPTransHandlerProvider * TVPFindTransHandlerProvider(const ttstr &name)
 		// rotatezoom); without a handler the calling script dies with
 		// "Cannot find transition handler ...".  Fall back to the built-in
 		// cross fade: the effect differs, the game keeps flowing.
-		static bool reported = false;
-		if(!reported)
-		{
-			reported = true;
+		// Report every distinct missing name once.  One shared flag used to
+		// silence all but the first, which hid which methods a title really
+		// asks for - the list is what tells an unported provider from an
+		// unused one (see docs/K2_PLUGIN_CONTRACTS.md).
+		static std::set<ttstr> reported;
+		if(reported.insert(name).second)
 			KRKRNS_LOG("[trans] missing transition handler '%s', using crossfade",
 				name.AsStdString().c_str());
-		}
 		holder = TVPTransHandlerProviders.Find(TJS_W("crossfade"));
 	}
 	if(!holder)
