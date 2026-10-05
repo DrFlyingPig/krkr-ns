@@ -68,6 +68,7 @@ extern "C" void krkrsdl2_link_scriptsex_plugin();
 extern "C" void krkrsdl2_link_shrinkcopy_plugin();
 extern "C" void krkrsdl2_link_layerexsave_plugin();
 extern "C" void krkrsdl2_link_layerexdraw_plugin();
+extern "C" void krkrsdl2_link_extrans_plugin();
 // Static-archive anchors for the Kirikiroid2-compatible built-ins.
 extern "C" void krkrsdl2_link_dirlist_plugin();
 extern "C" void krkrsdl2_link_getabout_plugin();
@@ -593,6 +594,11 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("shrinkcopy.dll") ||
 		short_name == TJS_W("layerexsave.dll") ||
 		short_name == TJS_W("layerexdraw.dll") ||
+		// extrans.dll registers transition providers rather than a script class,
+		// so nothing answers the class probe; its KAG-visible names (wave,
+		// mosaic, turn, rotate*) are resolved by TransIntf.cpp at transition
+		// time.
+		short_name == TJS_W("extrans.dll") ||
 		short_name == TJS_W("varfile.dll") ||
 		short_name == TJS_W("getabout.dll") ||
 		short_name == TJS_W("addfont.dll") ||
@@ -693,6 +699,7 @@ void TVPLoadPlugin(const ttstr & name)
 		krkrsdl2_link_wutcwf_plugin();
 		krkrsdl2_link_scriptsex_plugin();
 		krkrsdl2_link_layerexdraw_plugin();
+		krkrsdl2_link_extrans_plugin();
 		if (short_name == TJS_W("dirlist.dll") ||
 			short_name == TJS_W("getabout.dll") ||
 			short_name == TJS_W("addfont.dll") ||
@@ -703,7 +710,8 @@ void TVPLoadPlugin(const ttstr & name)
 			short_name == TJS_W("getsample.dll") ||
 			short_name == TJS_W("wutcwf.dll") ||
 			short_name == TJS_W("scriptsex.dll") ||
-			short_name == TJS_W("layerexdraw.dll"))
+			short_name == TJS_W("layerexdraw.dll") ||
+			short_name == TJS_W("extrans.dll"))
 		{
 			ncbAutoRegister::LoadModule(short_name);
 			if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())

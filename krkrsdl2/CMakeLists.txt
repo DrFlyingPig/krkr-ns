@@ -584,6 +584,9 @@ src/plugins/shrinkcopy/ShrinkCopy.cpp
 src/plugins/layerexsave/LayerExSave.cpp
 src/plugins/layerexdraw/LayerExBase.cpp
 src/plugins/layerexdraw/LayerExDraw.cpp
+src/plugins/extrans/extrans.cpp
+src/plugins/extrans/wave.cpp
+src/plugins/extrans/mosaic.cpp
 	external/plutovg/source/plutovg-blend.c
 	external/plutovg/source/plutovg-canvas.c
 	external/plutovg/source/plutovg-font.c
@@ -627,6 +630,7 @@ src/plugins/kagparser
 src/plugins/csvparser
 src/plugins/textrender
 src/plugins/layerexbtoa
+src/plugins/extrans
 src/plugins/dirlist
 src/plugins/getabout
 src/plugins/getsample
