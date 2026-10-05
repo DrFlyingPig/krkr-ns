@@ -437,6 +437,7 @@ list(APPEND KRKRSDL2COMMON_INCLUDES
 	src/core/visual/sdl2/opengl
 	external/krkrz/external/angle/include
 	external/krkrz/external/glm
+	external/plutovg/include
 )
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
 list(APPEND KRKRSDL2_LDFLAGS
@@ -577,6 +578,23 @@ src/plugins/csvparser/CSVParser.cpp
 src/plugins/textrender/TextRenderBase.cpp
 src/plugins/layerexbtoa/LayerExBTOA.cpp
 src/plugins/layerexraster/LayerExRaster.cpp
+src/plugins/layereximage/LayerExImage.cpp
+src/plugins/scriptsex/ScriptsEx.cpp
+src/plugins/shrinkcopy/ShrinkCopy.cpp
+src/plugins/layerexsave/LayerExSave.cpp
+src/plugins/layerexdraw/LayerExBase.cpp
+src/plugins/layerexdraw/LayerExDraw.cpp
+	external/plutovg/source/plutovg-blend.c
+	external/plutovg/source/plutovg-canvas.c
+	external/plutovg/source/plutovg-font.c
+	external/plutovg/source/plutovg-ft-math.c
+	external/plutovg/source/plutovg-ft-raster.c
+	external/plutovg/source/plutovg-ft-stroker.c
+	external/plutovg/source/plutovg-matrix.c
+	external/plutovg/source/plutovg-paint.c
+	external/plutovg/source/plutovg-path.c
+	external/plutovg/source/plutovg-rasterize.c
+	external/plutovg/source/plutovg-surface.c
 src/plugins/dirlist/DirList.cpp
 src/plugins/getabout/GetAbout.cpp
 src/plugins/getsample/GetSample.cpp
@@ -603,6 +621,7 @@ src/core/sound/sdl2/FFWaveDecoder.cpp
 )
 list(APPEND KRKRSDL2COMMON_INCLUDES
 src/plugins
+external/plutovg/include
 src/plugins/psbfile
 src/plugins/kagparser
 src/plugins/csvparser

@@ -946,10 +946,15 @@ if (typeof(Krkr2CompatUtils.Window) == "undefined")
 
 // KAGParserEx normally extends Scripts with object helpers.  Reuse the
 // engine's native Dictionary enumeration methods; TJS2 does not implement
-// JavaScript's `for (key in object)` syntax.
-Scripts.getObjectKeys = function(object) { return Dictionary.keys(object); };
-Scripts.getObjectValues = function(object) { return Dictionary.values(object); };
-Scripts.hasObjectKey = function(object, key) { return Dictionary.contains(object, key); };
+// JavaScript's `for (key in object)` syntax.  scriptsEx.dll registers the same
+// three names natively, so only fill the gaps: a title that links the real
+// plugin must keep the plugin's implementation.
+if (typeof(Scripts.getObjectKeys) == "undefined")
+    Scripts.getObjectKeys = function(object) { return Dictionary.keys(object); };
+if (typeof(Scripts.getObjectValues) == "undefined")
+    Scripts.getObjectValues = function(object) { return Dictionary.values(object); };
+if (typeof(Scripts.hasObjectKey) == "undefined")
+    Scripts.hasObjectKey = function(object, key) { return Dictionary.contains(object, key); };
 
 // addFont.dll exposes System.addFont on Windows.  krkrsdl2 already has the
 // equivalent archive-aware FreeType implementation as Font.addFont.

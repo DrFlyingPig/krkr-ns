@@ -63,6 +63,11 @@ extern "C" void krkrsdl2_link_emoteplayer_plugin();
 // Static-archive anchor for the layerExBTOA built-in (see layerexbtoa).
 extern "C" void krkrsdl2_link_layerexbtoa_plugin();
 extern "C" void krkrsdl2_link_layerexraster_plugin();
+extern "C" void krkrsdl2_link_layereximage_plugin();
+extern "C" void krkrsdl2_link_scriptsex_plugin();
+extern "C" void krkrsdl2_link_shrinkcopy_plugin();
+extern "C" void krkrsdl2_link_layerexsave_plugin();
+extern "C" void krkrsdl2_link_layerexdraw_plugin();
 // Static-archive anchors for the Kirikiroid2-compatible built-ins.
 extern "C" void krkrsdl2_link_dirlist_plugin();
 extern "C" void krkrsdl2_link_getabout_plugin();
@@ -555,10 +560,16 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 		name == TJS_W("getabout.dll") ||  // System.getAboutString
 		name == TJS_W("addfont.dll") ||   // System.addFont
 		name == TJS_W("fftgraph.dll") ||  // drawFFTGraph (stub)
-		name == TJS_W("dirlist.dll") ||  // getDirList
+		name == TJS_W("dirlist.dll") ||   // getDirList
 		name == TJS_W("getsample.dll") || // WaveSoundBuffer.sampleValue (lip-sync)
 		name == TJS_W("wutcwf.dll") ||    // .tcwf wave decoder
-		name == TJS_W("savestruct.dll")) // Dictionary/Array struct serialisation
+		name == TJS_W("savestruct.dll") || // Dictionary/Array struct serialisation
+		// fstat.dll registers its members on Storages rather than a class of its
+		// own (see TVPStoragesFstatDict in StorageIntf.cpp).  The file-existence
+		// probe has always answered yes for it, so without this entry a title got
+		// "the plugin exists" from Storages and "unavailable" from Plugins.link --
+		// two different answers about the same plugin.
+		name == TJS_W("fstat.dll"))
 		return true;
 	return false;
 }
@@ -577,6 +588,11 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("emotedriver.dll") ||
 		short_name == TJS_W("layerexbtoa.dll") ||
 		short_name == TJS_W("layerexraster.dll") ||
+		short_name == TJS_W("layereximage.dll") ||
+		short_name == TJS_W("scriptsex.dll") ||
+		short_name == TJS_W("shrinkcopy.dll") ||
+		short_name == TJS_W("layerexsave.dll") ||
+		short_name == TJS_W("layerexdraw.dll") ||
 		short_name == TJS_W("varfile.dll") ||
 		short_name == TJS_W("getabout.dll") ||
 		short_name == TJS_W("addfont.dll") ||
@@ -675,6 +691,8 @@ void TVPLoadPlugin(const ttstr & name)
 		krkrsdl2_link_savestruct_plugin();
 		krkrsdl2_link_getsample_plugin();
 		krkrsdl2_link_wutcwf_plugin();
+		krkrsdl2_link_scriptsex_plugin();
+		krkrsdl2_link_layerexdraw_plugin();
 		if (short_name == TJS_W("dirlist.dll") ||
 			short_name == TJS_W("getabout.dll") ||
 			short_name == TJS_W("addfont.dll") ||
@@ -683,7 +701,9 @@ void TVPLoadPlugin(const ttstr & name)
 			short_name == TJS_W("varfile.dll") ||
 			short_name == TJS_W("savestruct.dll") ||
 			short_name == TJS_W("getsample.dll") ||
-			short_name == TJS_W("wutcwf.dll"))
+			short_name == TJS_W("wutcwf.dll") ||
+			short_name == TJS_W("scriptsex.dll") ||
+			short_name == TJS_W("layerexdraw.dll"))
 		{
 			ncbAutoRegister::LoadModule(short_name);
 			if (TVPRegisteredPlugins.find(short_name) != TVPRegisteredPlugins.end())
@@ -698,11 +718,19 @@ void TVPLoadPlugin(const ttstr & name)
 	// rather than registering a new class, so their presence
 	// cannot be detected through TVPHasSwitchBuiltin.  Route it through the
 	// ncbind auto-register table like the E-mote module.
-	if (short_name == TJS_W("layerexbtoa.dll") || short_name == TJS_W("layerexraster.dll"))
+	if (short_name == TJS_W("layerexbtoa.dll") || short_name == TJS_W("layerexraster.dll") ||
+		short_name == TJS_W("layereximage.dll") || short_name == TJS_W("shrinkcopy.dll") ||
+		short_name == TJS_W("layerexsave.dll"))
 	{
 		// Force the translation unit out of the static archive first.
 		if (short_name == TJS_W("layerexraster.dll"))
 			krkrsdl2_link_layerexraster_plugin();
+		else if (short_name == TJS_W("layereximage.dll"))
+			krkrsdl2_link_layereximage_plugin();
+		else if (short_name == TJS_W("shrinkcopy.dll"))
+			krkrsdl2_link_shrinkcopy_plugin();
+		else if (short_name == TJS_W("layerexsave.dll"))
+			krkrsdl2_link_layerexsave_plugin();
 		else
 			krkrsdl2_link_layerexbtoa_plugin();
 		ncbAutoRegister::LoadModule(short_name);
