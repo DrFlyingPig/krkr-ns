@@ -557,10 +557,16 @@ static bool TVPHasSwitchBuiltin(const ttstr& name)
 		name == TJS_W("getabout.dll") ||  // System.getAboutString
 		name == TJS_W("addfont.dll") ||   // System.addFont
 		name == TJS_W("fftgraph.dll") ||  // drawFFTGraph (stub)
-		name == TJS_W("dirlist.dll") ||  // getDirList
+		name == TJS_W("dirlist.dll") ||   // getDirList
 		name == TJS_W("getsample.dll") || // WaveSoundBuffer.sampleValue (lip-sync)
 		name == TJS_W("wutcwf.dll") ||    // .tcwf wave decoder
-		name == TJS_W("savestruct.dll")) // Dictionary/Array struct serialisation
+		name == TJS_W("savestruct.dll") || // Dictionary/Array struct serialisation
+		// fstat.dll registers its members on Storages rather than a class of its
+		// own (see TVPStoragesFstatDict in StorageIntf.cpp).  The file-existence
+		// probe has always answered yes for it, so without this entry a title got
+		// "the plugin exists" from Storages and "unavailable" from Plugins.link --
+		// two different answers about the same plugin.
+		name == TJS_W("fstat.dll"))
 		return true;
 	return false;
 }
