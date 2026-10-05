@@ -542,13 +542,13 @@ public:
 
 		TVPBeginThreadTask(threadNum);
 		std::vector<ThreadParameter> params(threadNum);
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && defined(KRKRNS_RENDER_CAPTURE_DIAGNOSTICS)
 		{
 			// KRKR-ns diagnostic (same trace file as LayerBitmapIntf.cpp)
 			static int rlines = 0;
 			if (rlines < 200) {
 				rlines++;
-				FILE* rf = fopen(KRKRNS_BASE_A "/blt-trace.log", "a");
+				FILE* rf = fopen(KRKRNS_BASE_A "/log/blt-trace.log", "a");
 				if (rf) {
 					fprintf(rf, "ResampleMT threadNum=%d clip(off=%d h=%d w=%d destw=%d) dest=(%d,%d,%d,%d) src=(%d,%d,%d,%d)\n",
 						threadNum, clip.offsety_, clip.height_, clip.width_, clip.getDestWidth(),
@@ -729,6 +729,10 @@ void TVPResampleImage( const tTVPRect &cliprect, tTVPBaseBitmap *dest, const tTV
 	tTVPResampleClipping clip;
 	clip.setClipping( cliprect, destrect );
 	if( clip.getDestWidth() <= 0 || clip.getDestHeight() <= 0 ) return;
+
+	// Worker threads must not race to detach the same shared destination.
+	// Materialize writable pixels on the caller thread before dispatching them.
+	dest->Independ();
 
 	// ブレンド処理関数を登録
 	tTVPImageCopyFuncBase* func = NULL;

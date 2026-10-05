@@ -20,6 +20,7 @@
 //---------------------------------------------------------------------------
 #include "KrkrNSPaths.h"
 #include <vector>
+#include <memory>
 
 #include "tjsCommHead.h"
 #include "GLCompositeBridge.h"
@@ -47,7 +48,7 @@ static void KrkrBltTrace(const char* fmt, ...)
 	static int lines = 0;
 	if (lines >= 400) return;
 	lines++;
-	FILE* f = fopen(KRKRNS_BASE_A "/blt-trace.log", "a");
+	FILE* f = fopen(KRKRNS_BASE_A "/log/blt-trace.log", "a");
 	if (!f) return;
 	va_list ap;
 	va_start(ap, fmt);
@@ -2031,6 +2032,15 @@ bool tTVPBaseBitmap::StretchBlt(tTVPRect cliprect,
 	if(!Is32BPP()) TVPThrowExceptionMessage(TVPInvalidOperationFor8BPP);
 
 	// check for special case noticed above
+	// Resampling can read rows while other tasks have already overwritten them.
+	// Keep the original pixels alive for in-place stretch operations; the first
+	// destination write then detaches its shared bitmap through copy-on-write.
+	std::unique_ptr<tTVPBaseBitmap> sourceSnapshot;
+	if(ref == this)
+	{
+		sourceSnapshot.reset(new tTVPBaseBitmap(*ref));
+		ref = sourceSnapshot.get();
+	}
 	
 	//--- extract stretch type
 	tTVPBBStretchType type = (tTVPBBStretchType)(mode & stTypeMask);
@@ -3024,6 +3034,13 @@ int tTVPBaseBitmap::InternalAffineBlt(tTVPRect destrect, const tTVPBaseBitmap *r
 	if(yc >= destrect.bottom || yclim < 0)
 		return 0; // not drawable
 
+	// Direct affine copies need the same immutable source as stretch copies.
+	std::unique_ptr<tTVPBaseBitmap> sourceSnapshot;
+	if(ref == this)
+	{
+		sourceSnapshot.reset(new tTVPBaseBitmap(*ref));
+		ref = sourceSnapshot.get();
+	}
 	tjs_uint8 * dest = (tjs_uint8*)GetScanLineForWrite(yc);
 	tjs_int destpitch = GetPitchBytes();
 	const tjs_uint8 * src = (const tjs_uint8 *)ref->GetScanLine(0);
