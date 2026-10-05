@@ -33,9 +33,21 @@ Two deliberate deviations:
   behaviour (inside processed, outside untouched).
 - **`gaussianBlur`** is *not* implemented.  The 1.3.9 binary and the 2013
   `layerExImage.dll` shipped with 国王恋爱krkr register it, but the 2018 build
-  shipped with 双子洛丽塔 does not, and no local reference source shows its
-  parameter list.  Its contract is recorded in `docs/K2_PLUGIN_CONTRACTS.md`
-  instead of guessing a signature.
+  shipped with 双子洛丽塔 does not.  Title scripts do reference it -- KAG's
+  `system/KAGEnvImage.tjs` builds its image-filter list with
+  `if (.gblur) list.add(["gaussianBlur", +.gblur]);`, so the signature is one
+  numeric argument -- and its absence is not fatal: `system/world.tjs` resolves
+  filters through `getRedrawFunc`, which drops an entry whose member does not
+  exist, so the effect is silently skipped instead of raising.  Implementing it
+  still needs a decision on the blur kernel, since no local source shows the
+  original's parameters.
+
+How KAG reaches these members: `world.tjs` looks them up with
+`typeof Layer[name] == "Object"` followed by `func instanceof "Function"`.
+A probe in the fixture records that the ncbind-attached members satisfy both
+(`Layer.light typeof=Object instanceofFunction=1`), the same answer the
+engine's own `Layer.fillRect` gives, so the image-filter pipeline really does
+call into this plugin.
 
 Nothing in this port caches TJS objects across a session, so no extra teardown
 is needed beyond `ncbAutoRegister::AllUnregist()`.
@@ -47,4 +59,10 @@ Verification: `tests/layer_ex_image_test.cpp` (host, 182 checks over the pixel
 algorithms and stride handling) and `tests/fixtures/layer_ex_image/startup.tjs`
 (real ARM engine, 25 checks: file probe, registration, `Plugins.getList`,
 repeated/case-insensitive link, the five attachments, each operation's pixels
-and alpha, and the clip rectangle).
+and alpha, the clip rectangle, and the KAG `instanceof "Function"` probe).
+
+In-game usage: scanning the XP3 script bytecode of the titles that link this
+plugin (`tools/xp3_find_symbol.py`) confirms 魔女的夜宴, 千恋万花 v1.1 and 9-nine
+feed `light` / `modulate` / `noise` entries through KAG's image-attribute list,
+so those three members are on a live path.  Five recorded sessions with the
+plugin loaded show no member-related script exception.

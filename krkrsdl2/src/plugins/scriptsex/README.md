@@ -51,3 +51,10 @@ Verification: `tests/fixtures/scripts_ex/startup.tjs` on the real ARM engine
 (43 checks: file probe, registration, every attachment, deep comparison and
 clone semantics, foreach, property access by name and index, fuzzy search
 offsets, rehash, and the four `safeEvalStorage` body forms).
+
+In-game usage: scanning the XP3 script bytecode of the titles that link this
+plugin (`tools/xp3_find_symbol.py`) finds `safeEvalStorage` (2-4 references) and
+`getObjectContext` (2-3) in 魔女的夜宴, 千恋万花 v1.1 and 9-nine; the same scan
+shows those titles' KAG layer code resolving `Scripts` members by name.  Five
+sessions across those titles ran with the plugin linked and no member-related
+script exception.
