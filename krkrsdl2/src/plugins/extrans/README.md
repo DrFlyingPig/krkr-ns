@@ -34,6 +34,11 @@ include 集合与 `TJS_N` → `TJS_W` 外未改动参考实现（含各参数默
 - 会话结束走 `TVPUnloadBuiltinPlugins` → ncbind 后置注销回调 → 逐个
   `TVPRemoveTransHandlerProvider`，避免下一局重复注册时命中
   `TVPTransAlreadyRegistered`。
+- **与上游的唯一行为差异**：`Unregister*TransHandlerProvider` 加了空指针守卫并在
+  Release 后把静态指针置空。ncbind 的后置注销回调在**每次**会话结束都会执行，与
+  该会话是否链接过本插件无关；上游是 DLL，回调只在卸载时跑一次，所以无条件
+  `Release` 没问题，而静态链接下第二局会对已释放的指针再次 Release。带守卫后，
+  未链接过的会话结束是空操作，链接过的会话结束后指针归零，下次 Register 重新分配。
 
 ## 验证
 

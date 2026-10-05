@@ -578,7 +578,16 @@ void UnregisterTurnTransHandlerProvider()
 {
     // TVPRemoveTransHandlerProvider を使ってトランジションハンドラプロバイダを
     // 登録抹消する
-    TVPRemoveTransHandlerProvider(TurnTransHandlerProvider);
-    TurnTransHandlerProvider->Release();
+    // KRKR-ns: ncbind runs every module's post-unregist callback at each session
+    // end, whether or not this session linked the plug-in.  Upstream can free the
+    // provider unconditionally because a DLL's callbacks run once; here the
+    // static must be forgotten so the next session's callback is a no-op, and so
+    // a later Register creates a fresh provider instead of leaking this one.
+    if (TurnTransHandlerProvider)
+    {
+        TVPRemoveTransHandlerProvider(TurnTransHandlerProvider);
+        TurnTransHandlerProvider->Release();
+        TurnTransHandlerProvider = NULL;
+    }
 }
 //---------------------------------------------------------------------------
