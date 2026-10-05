@@ -591,6 +591,7 @@ src/plugins/extrans/turn.cpp
 src/plugins/extrans/turntrans_table.cpp
 src/plugins/extrans/rotatebase.cpp
 src/plugins/extrans/rotatetrans.cpp
+src/plugins/extrans/ripple.cpp
 	external/plutovg/source/plutovg-blend.c
 	external/plutovg/source/plutovg-canvas.c
 	external/plutovg/source/plutovg-font.c

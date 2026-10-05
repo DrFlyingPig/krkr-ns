@@ -18,6 +18,7 @@
 #include "mosaic.h"
 #include "turn.h"
 #include "rotatetrans.h"
+#include "ripple.h"
 
 #define NCB_MODULE_NAME TJS_W("extrans.dll")
 
@@ -27,6 +28,7 @@ void InitPlugin_extrans()
     RegisterMosaicTransHandlerProvider();
     RegisterTurnTransHandlerProvider();
     RegisterRotateTransHandlerProvider();
+    RegisterRippleTransHandlerProvider();
 }
 
 void DonePlugin_extrans()
@@ -35,6 +37,7 @@ void DonePlugin_extrans()
     UnregisterMosaicTransHandlerProvider();
     UnregisterTurnTransHandlerProvider();
     UnregisterRotateTransHandlerProvider();
+    UnregisterRippleTransHandlerProvider();
 }
 
 NCB_PRE_REGIST_CALLBACK(InitPlugin_extrans);
