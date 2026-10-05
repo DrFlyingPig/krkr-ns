@@ -39,11 +39,25 @@ here, recorded so nobody mistakes them for working code:
 
 ## Verification
 
-`tests/fixtures/layer_ex_draw/startup.tjs` on the real ARM engine: the file
-probe, the registration, the `GdiPlus` class and the ten `Layer` members
-(`drawString`, `drawPathString`, `measureString`, `drawLine`, `drawEllipse`,
-`drawRectangle`, `drawImage`, `record`, …) pass.  The pixel half of the fixture
-(private font load, `Appearance` with pen caps and joins, `drawPathString`
-writing pixels, the brush colour reaching the layer, `drawLine`) has been
-written but not yet observed in a clean run; it needs one emulator session
-before this port can be called accepted.
+`tests/fixtures/layer_ex_draw/startup.tjs` on the real ARM engine, 20 checks,
+all passing: the file probe, the registration, the `GdiPlus` class, twelve
+`Layer` members, the private font load, `measureString`, and then the pixels —
+`drawPathString` writes 202 lit pixels for two glyphs at 24 px, the brush colour
+reaches the layer (logged as a colour histogram, mostly the white pen with grey
+antialiasing plus the green fill), and `drawLine` adds more.
+
+Four things the fixture had to learn about this API, worth knowing before
+writing another one:
+
+- `RectF` exposes `x`/`y`/`width`/`height` (plus read-only `left`/`top`/…), not
+  `w`/`h`; the rects `layerExSave` returns are dictionaries and do use `w`/`h`.
+- ncbind registers the C++ arity: `Appearance.addBrush(color, ox, oy)` and
+  `addPen(color, width, ox, oy)` need every argument even though the C++ side
+  declares defaults, and `drawLine(app, x1, y1, x2, y2)` takes the appearance
+  first.
+- `Layer.record` is a property with a getter: reading it off the *class* object
+  builds the layer helper and fails with "Not Layer", so probe the plain
+  methods instead.
+- The fixture is a plain TJS script, so no `for (key in object)` and no
+  `Integer.toString(16)`; use `Dictionary.keys`/explicit key lists and
+  `"%06x".sprintf(value)`.
