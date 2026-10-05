@@ -580,6 +580,7 @@ src/plugins/layerexraster/LayerExRaster.cpp
 src/plugins/layereximage/LayerExImage.cpp
 src/plugins/scriptsex/ScriptsEx.cpp
 src/plugins/shrinkcopy/ShrinkCopy.cpp
+src/plugins/layerexsave/LayerExSave.cpp
 src/plugins/dirlist/DirList.cpp
 src/plugins/getabout/GetAbout.cpp
 src/plugins/getsample/GetSample.cpp

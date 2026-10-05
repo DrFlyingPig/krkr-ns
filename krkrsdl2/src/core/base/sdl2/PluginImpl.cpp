@@ -66,6 +66,7 @@ extern "C" void krkrsdl2_link_layerexraster_plugin();
 extern "C" void krkrsdl2_link_layereximage_plugin();
 extern "C" void krkrsdl2_link_scriptsex_plugin();
 extern "C" void krkrsdl2_link_shrinkcopy_plugin();
+extern "C" void krkrsdl2_link_layerexsave_plugin();
 // Static-archive anchors for the Kirikiroid2-compatible built-ins.
 extern "C" void krkrsdl2_link_dirlist_plugin();
 extern "C" void krkrsdl2_link_getabout_plugin();
@@ -589,6 +590,7 @@ bool krkrsdl2_is_builtin_plugin_name(const ttstr & short_name)
 		short_name == TJS_W("layereximage.dll") ||
 		short_name == TJS_W("scriptsex.dll") ||
 		short_name == TJS_W("shrinkcopy.dll") ||
+		short_name == TJS_W("layerexsave.dll") ||
 		short_name == TJS_W("varfile.dll") ||
 		short_name == TJS_W("getabout.dll") ||
 		short_name == TJS_W("addfont.dll") ||
@@ -713,7 +715,8 @@ void TVPLoadPlugin(const ttstr & name)
 	// cannot be detected through TVPHasSwitchBuiltin.  Route it through the
 	// ncbind auto-register table like the E-mote module.
 	if (short_name == TJS_W("layerexbtoa.dll") || short_name == TJS_W("layerexraster.dll") ||
-		short_name == TJS_W("layereximage.dll") || short_name == TJS_W("shrinkcopy.dll"))
+		short_name == TJS_W("layereximage.dll") || short_name == TJS_W("shrinkcopy.dll") ||
+		short_name == TJS_W("layerexsave.dll"))
 	{
 		// Force the translation unit out of the static archive first.
 		if (short_name == TJS_W("layerexraster.dll"))
@@ -722,6 +725,8 @@ void TVPLoadPlugin(const ttstr & name)
 			krkrsdl2_link_layereximage_plugin();
 		else if (short_name == TJS_W("shrinkcopy.dll"))
 			krkrsdl2_link_shrinkcopy_plugin();
+		else if (short_name == TJS_W("layerexsave.dll"))
+			krkrsdl2_link_layerexsave_plugin();
 		else
 			krkrsdl2_link_layerexbtoa_plugin();
 		ncbAutoRegister::LoadModule(short_name);
