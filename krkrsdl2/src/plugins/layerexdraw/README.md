@@ -61,3 +61,8 @@ writing another one:
 - The fixture is a plain TJS script, so no `for (key in object)` and no
   `Integer.toString(16)`; use `Dictionary.keys`/explicit key lists and
   `"%06x".sprintf(value)`.
+
+In-game: the titles' roll renderer (`sysscn/exroll.tjs`) links the plugin and
+the roll text renders with its outline; the user checked 国王恋爱krkr, LimeLight
+and 千恋万花 sessions with the plugin loaded and reported no visual problem
+(2026-10-05).

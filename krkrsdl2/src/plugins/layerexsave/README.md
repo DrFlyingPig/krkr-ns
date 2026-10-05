@@ -60,3 +60,8 @@ Verification: `tests/fixtures/layer_ex_save/startup.tjs` on the real ARM engine,
 34 checks: registration of all nine members, the crop and diff rectangles, the
 blank test including rect clipping, both alpha helpers, the colour spread, and
 both savers actually writing a file with content.
+
+In-game: 国王恋爱krkr links the plugin (its `plugin/` folder ships the desktop
+DLL and its scripts call these members unguarded) and its CG mode renders
+normally in the emulator, with no member error in the session log
+(2026-10-05, user confirmed).
