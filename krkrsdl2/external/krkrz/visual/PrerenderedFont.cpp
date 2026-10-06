@@ -5,8 +5,7 @@
 
 extern tTJSHashTable<ttstr, tTVPPrerenderedFont *> TVPPrerenderedFonts;
 
-tTVPPrerenderedFont::tTVPPrerenderedFont(const ttstr &storage) :
-	LocalStorage(storage)
+tTVPPrerenderedFont::tTVPPrerenderedFont(const ttstr &storage)
 {
 	RefCount = 1;
 	Storage = storage;

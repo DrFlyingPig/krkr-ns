@@ -34,7 +34,11 @@ private:
 	const tjs_uint8 * Image; // tft mapped memory
 	tjs_uint64 FileLength;
 	tjs_uint RefCount;
-	tTVPLocalTempStorageHolder LocalStorage;
+	// KRKR-ns: this class used to hold a tTVPLocalTempStorageHolder here.  The
+	// loader reads the whole .tft through TVPCreateBinaryStreamForRead below, so
+	// the holder only materialised a second copy of the file in sdmc:/tmp and
+	// deleted it again - an SD write per font load for nothing.  Removed; the
+	// stream reads archive members directly.
 
 	tjs_int Version; // data version
 	const tjs_char * ChIndex;
