@@ -23,6 +23,7 @@ class tTVPSoundDecodeThread : public tTVPThread
 	tTJSCriticalSection OneLoopCS;
 	std::vector<tTVPSoundSamplesBuffer*> Samples;
 	tjs_int64 DecodedSamples;
+	tjs_uint32 krkrns_lastWork; // KRKR-ns device diagnosis (see Execute)
 
 public:
 	tTVPSoundDecodeThread(tTJSNI_QueueSoundBuffer * owner);

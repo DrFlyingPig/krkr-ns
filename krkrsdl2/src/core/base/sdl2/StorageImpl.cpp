@@ -1153,7 +1153,23 @@ tjs_uint64 TJS_INTF_METHOD tTVPLocalFileStream::Seek(tjs_int64 offset, tjs_int w
 //---------------------------------------------------------------------------
 tjs_uint TJS_INTF_METHOD tTVPLocalFileStream::Read(void *buffer, tjs_uint read_size)
 {
+	// KRKR-ns device diagnosis: on the console an SD read costs hundreds of
+	// milliseconds where the emulator's host filesystem answers instantly, and
+	// the sound code takes locks around these reads.  Log the slow ones (at
+	// most one per half second) so a frozen session shows whether storage was
+	// still being served and how slow it was.
+	const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
 	size_t ret = SDL_RWread(io_handle, buffer, 1, read_size);
+	const tjs_uint32 krkrns_dt = TVPGetRoughTickCount32() - krkrns_t0;
+	if (krkrns_dt >= 300)
+	{
+		static tjs_uint32 krkrns_lastSlow = 0;
+		if (krkrns_t0 - krkrns_lastSlow >= 500)
+		{
+			krkrns_lastSlow = krkrns_t0;
+			KRKRNS_LOG("[slow] sd-read %ums %u bytes", krkrns_dt, read_size);
+		}
+	}
 	return (tjs_uint)ret;
 }
 //---------------------------------------------------------------------------

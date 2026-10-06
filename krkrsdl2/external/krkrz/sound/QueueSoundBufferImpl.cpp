@@ -8,6 +8,7 @@
 // Wave Player implementation
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 
 #include "SystemControl.h"
 #include "DebugIntf.h"
@@ -407,6 +408,18 @@ void tTJSNI_QueueSoundBuffer::FlushAllLabelEvents() {
 //---------------------------------------------------------------------------
 void tTJSNI_QueueSoundBuffer::StartPlay()
 {
+	// KRKR-ns device diagnosis: this runs on the main thread, waits for the
+	// decode thread (Thread->ClearQueue) and decodes into the first buffers
+	// while holding BufferCS.  Each of those can block on a slow SD read.
+	KRKRNS_STAGE("sound: start");
+	const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
+	struct tKrkrNSSlowGuard {
+		tjs_uint32 t0; const char * what;
+		~tKrkrNSSlowGuard() {
+			const tjs_uint32 dt = TVPGetRoughTickCount32() - t0;
+			if (dt >= 300) KRKRNS_LOG("[slow] %s %ums", what, dt);
+		}
+	} krkrns_guard = { krkrns_t0, "sound-start" };
 	// First real playback: start the decode thread now (see the thread
 	// constructor for why this is deferred).  StartTread is idempotent.
 	if( Thread ) Thread->StartTread();
@@ -439,7 +452,15 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 		Player.Reset();
 		for( tjs_int i = 0; i < BufferCount; i++ ) {
 			Buffer[i]->Reset();
-			Buffer[i]->Decode();
+			{
+				// Decoding under BufferCS: any other thread that wants this
+				// lock waits for the storage read behind it.
+				const tjs_uint32 krkrns_d0 = TVPGetRoughTickCount32();
+				Buffer[i]->Decode();
+				const tjs_uint32 krkrns_dt = TVPGetRoughTickCount32() - krkrns_d0;
+				if (krkrns_dt >= 300)
+					KRKRNS_LOG("[slow] snd-decode-main %ums (BufferCS held)", krkrns_dt);
+			}
 			Buffer[i]->SetDecodePosition( predecodedSamples );
 			predecodedSamples += Buffer[i]->GetInSamples();
 			PushPlayStream( Buffer[i] );
@@ -462,6 +483,7 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 void tTJSNI_QueueSoundBuffer::StopPlay()
 {
 	if(!Decoder) return;
+	KRKRNS_STAGE("sound: stop");
 
 	tTJSCriticalSectionHolder holder(BufferCS);
 
@@ -506,6 +528,17 @@ void tTJSNI_QueueSoundBuffer::SetPaused(bool b) {
 }
 //---------------------------------------------------------------------------
 void tTJSNI_QueueSoundBuffer::Open(const ttstr & storagename) {
+	// Reading the file here is the main thread touching the SD (decoder
+	// construction + the .sli read), so name the phase and time it.
+	KRKRNS_STAGE("sound: open");
+	const tjs_uint32 krkrns_open_t0 = TVPGetRoughTickCount32();
+	struct tKrkrNSSlowOpen {
+		tjs_uint32 t0;
+		~tKrkrNSSlowOpen() {
+			const tjs_uint32 dt = TVPGetRoughTickCount32() - t0;
+			if (dt >= 300) KRKRNS_LOG("[slow] sound-open %ums", dt);
+		}
+	} krkrns_open_guard = { krkrns_open_t0 };
 	// open a storage and prepare to play
 	//TVPEnsurePrimaryBufferPlay(); // let primary buffer to start running
 

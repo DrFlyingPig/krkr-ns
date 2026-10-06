@@ -862,6 +862,10 @@ void tTVPApplication::Run() {
 		}
 	}
 #endif
+	// KRKR-ns: name the phase for the heartbeat.  The heartbeat reports the
+	// main thread as stalled from outside; without a stage it cannot say
+	// whether the loop stopped in events, script, draw or the idle wait.
+	KRKRNS_STAGE("main: events");
 	sdl_process_events();
 	if (tarminate_)
 	{
@@ -871,9 +875,11 @@ void tTVPApplication::Run() {
 	bool done = false;
 	if (TVPSystemControl)
 	{
+		KRKRNS_STAGE("main: dispatch (script)");
 		done = TVPSystemControl->ApplicationIdle();
 	}
 	const Uint64 prof_t2 = SDL_GetPerformanceCounter();
+	KRKRNS_STAGE("main: draw");
 	tjs_int count = TVPGetWindowCount();
 	for( tjs_int i = 0; i<count; i++ ) {
 		tTJSNI_Window *win = TVPGetWindowListAt(i);
@@ -904,6 +910,7 @@ void tTVPApplication::Run() {
 		if (SDL_WasInit(SDL_INIT_EVENTS) != 0)
 		{
 #ifndef __EMSCRIPTEN__
+			KRKRNS_STAGE("main: idle wait");
 			krkrsdl2_heartbeat_main_progress(); // idle wait still counts as alive
 #ifdef __SWITCH__
 			// KRKR-ns diagnosis: count the blocking waits and whether they

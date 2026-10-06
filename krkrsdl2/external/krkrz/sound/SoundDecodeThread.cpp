@@ -9,6 +9,8 @@
 // Sound Decode Thead for QueueSoundBuffer
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
+#include "TickCount.h"
 
 #include "MsgIntf.h"
 #include "SoundDecodeThread.h"
@@ -20,6 +22,7 @@ static const tTVPThreadPriority TVPDecodeThreadHighPriority = ttpHigher;
 //---------------------------------------------------------------------------
 tTVPSoundDecodeThread::tTVPSoundDecodeThread( tTJSNI_QueueSoundBuffer * owner )
  : Owner(owner), DecodedSamples(0) {
+	krkrns_lastWork = TVPGetRoughTickCount32();
 	// The OS thread is started on first playback (tTJSNI_QueueSoundBuffer::
 	// StartPlay), NOT here: KAG titles construct pools of sound buffers during
 	// boot, and the real console's thread limit cannot take one thread per
@@ -38,6 +41,12 @@ void tTVPSoundDecodeThread::Execute(void) {
 	while( !GetTerminated() ) {
 		tjs_uint32 count = 0;
 		{
+			// KRKR-ns device diagnosis: this thread holds OneLoopCS across
+			// buf->Decode(), which reads the storage.  The main thread's
+			// StartPlay waits for that lock (Thread->ClearQueue), so a slow SD
+			// read here parks the main thread.  Time the cycle and prove
+			// liveness during a stall.
+			const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
 			tTJSCriticalSectionHolder cs_holder(OneLoopCS);
 			count = Samples.size();
 			if( count ) {
@@ -52,6 +61,23 @@ void tTVPSoundDecodeThread::Execute(void) {
 				Owner->PushPlayStream( buf );
 				Samples.erase( itr );
 				count = Samples.size();
+			}
+			const tjs_uint32 krkrns_dt = TVPGetRoughTickCount32() - krkrns_t0;
+			if( krkrns_dt >= 300 )
+				KRKRNS_LOG("[slow] snd-decode %ums queued=%u", krkrns_dt, (unsigned)count);
+			krkrns_lastWork = krkrns_t0;
+		}
+		{
+			// Liveness: one line per 10 s of an otherwise silent thread, so a
+			// frozen session distinguishes "the decode thread is stuck too"
+			// from "only the main thread is stuck".
+			static tjs_uint32 krkrns_lastAlive = 0;
+			const tjs_uint32 krkrns_now = TVPGetRoughTickCount32();
+			if( krkrns_now - krkrns_lastAlive >= 10000 )
+			{
+				krkrns_lastAlive = krkrns_now;
+				KRKRNS_LOG("[snd] decode thread alive, last work %ums ago, queued=%u",
+					(unsigned)(krkrns_now - krkrns_lastWork), (unsigned)count);
 			}
 		}
 
