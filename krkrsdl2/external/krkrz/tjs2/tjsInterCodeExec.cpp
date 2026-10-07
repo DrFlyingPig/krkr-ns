@@ -21,6 +21,7 @@
 #include "tjsArray.h"
 #include "tjsDebug.h"
 #include "tjsOctPack.h"
+#include "KrkrNSVMProf.h"
 #ifdef __SWITCH__
 #include "KrkrNSLog.h"
 #endif
@@ -805,6 +806,7 @@ void TJSVariantArrayStackCompact()
 //---------------------------------------------------------------------------
 void TJSVariantArrayStackCompactNow()
 {
+	KrkrNSVMProfNativeScope profile("vm-register-compact");
 	// Only the calling thread's stack is reachable from here; the others compact
 	// themselves lazily on their next Allocate (CompactVariantArrayMagic check).
 	if(TJSVariantArrayStack) TJSVariantArrayStack->Compact();
@@ -1119,6 +1121,17 @@ void tTJSInterCodeContext::ThrowScriptException(tTJSVariant &val,
 tjs_int tTJSInterCodeContext::ExecuteCode(tTJSVariant *ra_org, tjs_int startip,
 	tTJSVariant **args, tjs_int numargs, tTJSVariant *result)
 {
+	KrkrNSVMProfScope vmProfile;
+	if (krkrsdl2_vmprof_active())
+	{
+		// Snapshot only owned context fields while entering execution. Parent is
+		// weak outside debugger builds, and neither it nor this may be inspected
+		// by the scope when execution unwinds.
+		tTJSScriptBlock *block = GetBlock();
+		const tjs_int line = block ? block->SrcPosToLine(CodePosToSrcPos(startip)) + 1 : 0;
+		vmProfile.Begin(GetName(), static_cast<int>(GetContextType()),
+			block ? block->GetName() : static_cast<const tjs_char *>(nullptr), line, startip);
+	}
 	// execute VM codes
 	tjs_int32 *codesave;
 	try

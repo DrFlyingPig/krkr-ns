@@ -7,6 +7,7 @@
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSVMProf.h"
 
 #include <algorithm>
 #include <string>
@@ -872,6 +873,7 @@ void tTVPApplication::Run() {
 		return;
 	}
 	const Uint64 prof_t1 = SDL_GetPerformanceCounter();
+	KrkrNSVMProfDispatchScope vmDispatch;
 	bool done = false;
 	if (TVPSystemControl)
 	{
@@ -879,6 +881,7 @@ void tTVPApplication::Run() {
 		done = TVPSystemControl->ApplicationIdle();
 	}
 	const Uint64 prof_t2 = SDL_GetPerformanceCounter();
+	vmDispatch.Finish();
 	KRKRNS_STAGE("main: draw");
 	tjs_int count = TVPGetWindowCount();
 	for( tjs_int i = 0; i<count; i++ ) {
@@ -886,6 +889,7 @@ void tTVPApplication::Run() {
 		win->TickBeat();
 	}
 	const Uint64 prof_t3 = SDL_GetPerformanceCounter();
+	krkrsdl2_vmprof_report();
 #ifdef __SWITCH__
 	{
 		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());

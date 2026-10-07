@@ -1487,13 +1487,17 @@ emoteicon::~emoteicon()
 }
 void emoteicon::ensureLoad()
 {
-    if (data == nullptr)
+    if (textureReady)
+        return;
+
+    if (!pixelsDecoded)
     {
         KRKRNS_LOG("[emote] icon load begin %p %.0fx%.0f pixel=%d compress=%s",
                    this, width, height, pixel, compress.c_str());
         // 基本创建
         int datasize = width * height * 4;
-        data = new uint8_t[datasize];
+        if (data == nullptr)
+            data = new uint8_t[datasize];
         std::memset(data, 0, datasize);
         // 读取像素数据
         _filePtr->readIconTobuffer(data, width * height * 4, width * 4, this);
@@ -1514,16 +1518,34 @@ void emoteicon::ensureLoad()
         {
             TVPConsoleLog("unknow colorType");
         }
+        pixelsDecoded = true;
+    }
 
-        // 纹理交给 core/render 的 2D 渲染器（GL 后端建 GPU 纹理，软渲染后端建 CPU 缓冲）
-        krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
-        if (renderer)
+    // Both backends synchronously copy RGBA into their own pixel storage.
+    // Keep the staging bytes until that copy succeeds: an unavailable renderer
+    // or a failed GL upload can then retry with the CPU backend without decoding
+    // (or swapping R/B) again. Model data and the texture stay resident as before.
+    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    if (renderer)
+    {
+        void* texture = renderer->CreateTexture(width, height);
+        if (texture)
         {
-            selftexture = renderer->CreateTexture(width, height);
-            if (selftexture)
-                renderer->UpdateTexture(selftexture, data, width, height, width * 4);
+            try
+            {
+                renderer->UpdateTexture(texture, data, width, height, width * 4);
+            }
+            catch (...)
+            {
+                renderer->DestroyTexture(texture);
+                throw;
+            }
+            selftexture = texture;
+            textureReady = true;
+            delete[] data;
+            data = nullptr;
+            KRKRNS_LOG("[emote] icon load ready %p texture=%p", this, selftexture);
         }
-        KRKRNS_LOG("[emote] icon load ready %p texture=%p", this, selftexture);
     }
 }
 

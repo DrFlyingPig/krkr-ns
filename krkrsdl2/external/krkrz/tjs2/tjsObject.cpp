@@ -16,6 +16,7 @@
 #include "tjsHashSearch.h"
 #include "tjsGlobalStringMap.h"
 #include "tjsDebug.h"
+#include "KrkrNSVMProf.h"
 
 
 namespace TJS
@@ -893,10 +894,13 @@ bool tTJSCustomObject::DeleteByName(const tjs_char * name, tjs_uint32 *hint)
 	return false;
 }
 //---------------------------------------------------------------------------
+static const tjs_int TJSDeleteAllMembersStackLimit = 32;
 void tTJSCustomObject::DeleteAllMembers(void)
 {
+	KrkrNSVMProfScope profile;
+	profile.Begin(TJS_W("Object.DeleteAllMembers"), -1, TJS_W("<native>"), 0, 0);
 	// delete all members
-	if(Count <= 10) return _DeleteAllMembers();
+	if(Count <= TJSDeleteAllMembersStackLimit) return _DeleteAllMembers();
 
 	std::vector<iTJSDispatch2*> vector;
 	try
@@ -993,7 +997,7 @@ void tTJSCustomObject::DeleteAllMembers(void)
 //---------------------------------------------------------------------------
 void tTJSCustomObject::_DeleteAllMembers(void)
 {
-	iTJSDispatch2 * dsps[20];
+	iTJSDispatch2 * dsps[TJSDeleteAllMembersStackLimit * 2];
 	tjs_int num_dsps = 0;
 
 	try
@@ -1215,6 +1219,15 @@ void tTJSCustomObject::InternalEnumMembers(tjs_uint32 flags,
 	tTJSVariant newflags;
 	tTJSVariant value;
 	tTJSVariant * params[3] = { &name, &newflags, &value };
+
+#if defined(__GXX_RTTI) || defined(_CPPRTTI)
+	if ((flags & (TJS_IGNOREPROP | TJS_ENUM_NO_VALUE)) == TJS_IGNOREPROP)
+		if (auto *copy = dynamic_cast<tTJSMemberCopyCallback *>(callback->Object))
+		{
+			copy->CopyMembers(*this);
+			return;
+		}
+#endif
 
 	const tTJSSymbolData * lv1 = Symbols;
 	const tTJSSymbolData * lv1lim = lv1 + HashSize;

@@ -18,6 +18,7 @@
 #include "tjsDictionary.h"
 #include "tjsUtils.h"
 #include "tjsBinarySerializer.h"
+#include "KrkrNSVMProf.h"
 #include "tjsOctPack.h"
 
 #ifndef TJS_NO_REGEXP
@@ -1549,9 +1550,27 @@ void tTJSArrayObject::Finalize()
 //---------------------------------------------------------------------------
 void tTJSArrayObject::Clear(tTJSArrayNI * ni)
 {
+	KrkrNSVMProfScope profile;
+	profile.Begin(TJS_W("Array.Clear"), -1, TJS_W("<native>"), 0, 0);
 	// clear members
 
 	std::vector<iTJSDispatch2*> vector;
+	iTJSDispatch2 *stackObjects[16];
+	tjs_uint stackCount = 0;
+	const bool useStack = ni->Items.size() <= 8;
+	auto retain = [&](iTJSDispatch2 *object)
+	{
+		// Normally at most two references per initial item. Reentrant reference
+		// operations may grow Items; spill later references without reordering.
+		if(useStack && stackCount < 16) stackObjects[stackCount++] = object;
+		else vector.push_back(object);
+	};
+	auto release = [&]()
+	{
+		for(tjs_uint i = 0; i < stackCount; ++i) stackObjects[i]->Release();
+		for(std::vector<iTJSDispatch2*>::iterator i = vector.begin(); i != vector.end(); ++i)
+			(*i)->Release();
+	};
 	try
 	{
 		tjs_uint i;
@@ -1563,8 +1582,8 @@ void tTJSArrayObject::Clear(tTJSArrayNI * ni)
 				tTJSVariantClosure clo =
 					ni->Items[i].AsObjectClosureNoAddRef();
 				clo.AddRef();
-				if(clo.Object) vector.push_back(clo.Object);
-				if(clo.ObjThis) vector.push_back(clo.ObjThis);
+				if(clo.Object) retain(clo.Object);
+				if(clo.ObjThis) retain(clo.ObjThis);
 				ni->Items[i].Clear();
 			}
 		}
@@ -1572,21 +1591,13 @@ void tTJSArrayObject::Clear(tTJSArrayNI * ni)
 	}
 	catch(...)
 	{
-		std::vector<iTJSDispatch2*>::iterator i;
-		for(i = vector.begin(); i != vector.end(); i++)
-		{
-			(*i)->Release();
-		}
+		release();
 
 		throw;
 	}
 
 	// release all objects
-	std::vector<iTJSDispatch2*>::iterator i;
-	for(i = vector.begin(); i != vector.end(); i++)
-	{
-		(*i)->Release();
-	}
+	release();
 
 }
 //---------------------------------------------------------------------------

@@ -32,6 +32,7 @@
 #include "SevenZipArchive.h"
 #include "SDLBitmapCompletion.h"
 #include "SDLBitmapBridge.h"
+#include "SDLTextureUploadState.h"
 #include "ScriptMgnIntf.h"
 #include "SystemControl.h"
 #include "PluginImpl.h"
@@ -1188,6 +1189,7 @@ protected:
 	std::vector<uint32_t> uploadShadow;
 	int uploadShadowW = 0;
 	int uploadShadowH = 0;
+	TVPSDLTextureUploadState textureUploadState;
 #endif
 #ifdef KRKRZ_ENABLE_CANVAS
 	tTVPOpenGLScreen *openGlScreen;
@@ -1261,7 +1263,7 @@ public:
 	   frame re-uploads every pixel. Any (re)created SDL_TEXTUREACCESS_STREAMING
 	   texture starts as undefined/black content, and the engine only reports
 	   incremental damage, so a lost upload would otherwise never be retried. */
-	void InvalidateFullSurface();
+	void InvalidateFullSurface(bool recreateTexture = false);
 #endif
 	/* Called from tTJSNI_Window */
 	virtual bool GetFormEnabled() override;
@@ -1941,6 +1943,7 @@ void TVPWindowWindow::ReleaseNativeForSwitch(void)
 	this->uploadShadow.clear();
 	this->uploadShadowW = 0;
 	this->uploadShadowH = 0;
+	this->textureUploadState.Invalidate();
 	KRKRNS_LOG("[win] released native resources of window=%p", (void*)this);
 }
 
@@ -2792,8 +2795,16 @@ static bool KRKRNS_UploadProbe(SDL_Renderer* renderer)
 #endif
 
 #ifdef __SWITCH__
-void TVPWindowWindow::InvalidateFullSurface()
+void TVPWindowWindow::InvalidateFullSurface(bool recreateTexture)
 {
+	// SDL_RENDER_DEVICE_RESET requires all textures to be recreated, including
+	// hosted windows sharing the same renderer. TickBeat has the creation path.
+	if (recreateTexture && this->texture)
+	{
+		SDL_DestroyTexture(this->texture);
+		this->texture = nullptr;
+	}
+	this->textureUploadState.Invalidate();
 	// A (re)created texture holds undefined content, so the upload shadow is
 	// no longer a valid picture of what the GPU has — force the next upload to
 	// cover everything.
@@ -3092,6 +3103,13 @@ void TVPWindowWindow::TickBeat()
 			rect.y = this->bitmapCompletion->update_rect.top;
 			rect.w = this->bitmapCompletion->update_rect.get_width();
 			rect.h = this->bitmapCompletion->update_rect.get_height();
+#ifdef __SWITCH__
+			// StartBitmapCompletion requests presentation even when composition
+			// produced no pixel writes. Keep that presentation, but reuse a valid
+			// resident texture until a CPU writer or a forced invalidation occurs.
+			bool surfaceWritten = rect.w > 0 && rect.h > 0;
+			bool fullFrameUploadMode = true;
+#endif
 			if (this->renderer)
 			{
 #if defined(KRKRSDL2_ENABLE_ZOOM) || defined(KRKRSDL2_RENDERER_FULL_UPDATES)
@@ -3204,6 +3222,7 @@ void TVPWindowWindow::TickBeat()
 								if (fFullFrameMode)
 									this->InvalidateFullSurface();
 							}
+							fullFrameUploadMode = fFullFrameMode;
 const int sw = this->surface->w;
 								const int sh = this->surface->h;
 								// Periodic full refresh: guarantees any
@@ -3307,12 +3326,22 @@ const int sw = this->surface->w;
 								SDL_Rect uni;
 								SDL_UnionRect(&rect, &videoDirty, &uni);
 								rect = uni;
+								surfaceWritten = true;
 							}
 						}
 						(void)movieOnGpu;
 #endif
 						const Uint64 uploadStart = SDL_GetPerformanceCounter();
-						if (!gpuPresented && TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect) != 0)
+						int uploadResult = 0;
+#ifdef __SWITCH__
+						if (!gpuPresented)
+							uploadResult = this->textureUploadState.Upload(this->renderer,
+								this->texture, this->surface, rect,
+								surfaceWritten || !fullFrameUploadMode || krkrsdl2_glc_enabled());
+#else
+						uploadResult = TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect);
+#endif
+						if (uploadResult != 0)
 						{
 							KRKRNS_LOG("[win] bitmap upload failed: %s", SDL_GetError());
 							return; // Keep pending damage for the next frame.
@@ -4081,6 +4110,10 @@ void TVPWindowWindow::NoteDeclaredClientSize(tjs_int w, tjs_int h)
 	if(this->declaredClientW == w && this->declaredClientH == h) return;
 	this->declaredClientW = w;
 	this->declaredClientH = h;
+#ifdef __SWITCH__
+	// Previously hidden rows may become visible with the new declared size.
+	this->InvalidateFullSurface();
+#endif
 	KRKRNS_LOG("[win] game declared client %dx%d (paintBox will follow)", (int)w, (int)h);
 }
 
@@ -5251,6 +5284,14 @@ void sdl_process_events()
 	{
 		g_krkrns_prof.ev_src[(event.type >> 8) & 15]++;
 #ifdef __SWITCH__
+		if (event.type == SDL_RENDER_DEVICE_RESET || event.type == SDL_RENDER_TARGETS_RESET)
+		{
+			// Reset events have no window ID. Current-window dispatch alone would
+			// leave another window's resident texture incorrectly marked valid.
+			for (TVPWindowWindow* win : krkrsdl2_live_windows)
+				win->InvalidateFullSurface(event.type == SDL_RENDER_DEVICE_RESET);
+			continue;
+		}
 		ns_gp_process_controller_event(event);
 		// Temporary input trace for the double-move investigation: raw events
 		// as SDL delivered them, before any dispatch.

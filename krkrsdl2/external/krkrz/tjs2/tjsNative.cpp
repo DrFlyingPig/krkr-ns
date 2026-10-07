@@ -333,20 +333,24 @@ tTJSNativeClass::FuncCall(tjs_uint32 flag, const tjs_char * membername,
 	// register members to "objthis"
 
 	// a class to receive member callback from class
-	class tCallback : public tTJSDispatch
+	class tCallback : public tTJSMemberCopyCallback
 	{
 	public:
 		iTJSDispatch2 * Dest; // destination object
-		tjs_error TJS_INTF_METHOD FuncCall(
-			tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint,
-			tTJSVariant *result, tjs_int numparams, tTJSVariant **param,
-			iTJSDispatch2 *objthis)
+		void CopyMembers(const tTJSCustomObject &source) override
 		{
-			// *param[0] = name   *param[1] = flags   *param[2] = value
-			tjs_uint32 flags = (tjs_int)*param[1];
+			source.EnumStoredMembers([this](tTJSVariantString *name,
+				tjs_uint32 flags, const tTJSVariant &value) { Copy(name, flags, value); });
+		}
+		void Copy(tTJSVariantString *name, tjs_uint32 flags, const tTJSVariant &source,
+			tTJSVariant *originalName = nullptr)
+		{
 			if(!(flags & TJS_STATICMEMBER))
 			{
-				tTJSVariant val = *param[2];
+				// A custom destination may mutate the class before requesting
+				// the string-based property fallback.
+				tTJSString heldName(name);
+				tTJSVariant val = source;
 				if(val.Type() == tvtObject)
 				{
 					// change object's objthis if the object's objthis is null
@@ -355,10 +359,21 @@ tTJSNativeClass::FuncCall(tjs_uint32 flag, const tjs_char * membername,
 				}
 
 				if(Dest->PropSetByVS(TJS_MEMBERENSURE|TJS_IGNOREPROP|flags,
-					param[0]->AsStringNoAddRef(), &val, Dest) == TJS_E_NOTIMPL)
+					name, &val, Dest) == TJS_E_NOTIMPL)
 					Dest->PropSet(TJS_MEMBERENSURE|TJS_IGNOREPROP|flags,
-					param[0]->GetString(), NULL, &val, Dest);
+						originalName ? originalName->GetString() : heldName.c_str(),
+						NULL, &val, Dest);
 			}
+		}
+		tjs_error TJS_INTF_METHOD FuncCall(
+			tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint,
+			tTJSVariant *result, tjs_int numparams, tTJSVariant **param,
+			iTJSDispatch2 *objthis)
+		{
+			// *param[0] = name   *param[1] = flags   *param[2] = value
+			const tjs_uint32 flags = (tjs_int)*param[1];
+			if (!(flags & TJS_STATICMEMBER))
+				Copy(param[0]->AsStringNoAddRef(), flags, *param[2], param[0]);
 			if(result) *result = (tjs_int)(1); // returns true
 			return TJS_S_OK;
 		}
@@ -367,7 +382,9 @@ tTJSNativeClass::FuncCall(tjs_uint32 flag, const tjs_char * membername,
 	tCallback callback;
 	callback.Dest = objthis;
 
-	// enumerate members
+	// Keep virtual enumeration, including custom/native subclasses. The normal
+	// symbol-table enumerator can feed this typed copier without packing three
+	// callback variants per member; other enumerators keep using FuncCall.
 	tTJSVariantClosure clo(&callback, (iTJSDispatch2*)NULL);
 	EnumMembers(TJS_IGNOREPROP, &clo, this);
 

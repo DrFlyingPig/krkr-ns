@@ -4,6 +4,7 @@
 #include "CharacterSet.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSSlowOperation.h"
+#include "KrkrNSVMProf.h"
 #include "StorageIntf.h"
 #include "UtilStreams.h"
 #include "SharedMemoryStream.h"
@@ -204,7 +205,7 @@ class PsbReader
 	std::shared_ptr<const ByteVector> Storage;
 	const ByteVector &Data;
 	PsbHeader Header;
-	std::vector<tjs_string> Names;
+	std::vector<ttstr> Names;
 	std::vector<ttstr> Strings;
 	std::vector<tjs_uint32> ChunkOffsets;
 	std::vector<tjs_uint32> ChunkLengths;
@@ -326,7 +327,7 @@ class PsbReader
 			const PsbArray indexes = ReadArray(Header.OffsetEncrypt);
 			Names.reserve(indexes.Values.size());
 			for (tjs_uint32 index : indexes.Values)
-				Names.push_back(ReadZeroString(static_cast<size_t>(Header.OffsetNames) + index));
+				Names.emplace_back(ReadZeroString(static_cast<size_t>(Header.OffsetNames) + index));
 			return;
 		}
 
@@ -352,7 +353,7 @@ class PsbReader
 				chr = code;
 			}
 			std::reverse(bytes.begin(), bytes.end());
-			Names.push_back(Utf8(bytes.data(), bytes.size()));
+			Names.emplace_back(Utf8(bytes.data(), bytes.size()));
 		}
 	}
 
@@ -497,13 +498,20 @@ class PsbReader
 					const tjs_uint32 nameIndex = nameIndexes.Values[i];
 					if (nameIndex >= Names.size()) throw std::runtime_error("Invalid PSB property name index");
 					ParsedValue item = ParseValue(base + offsets.Values[i], depth + 1);
-					const tjs_string &name = Names[nameIndex];
-					dictionary->PropSet(TJS_MEMBERENSURE, name.c_str(), nullptr, &item.Value, dictionary);
+					const ttstr &name = Names[nameIndex];
+					// Repeated PSB keys share their TJS string and cached hash, as
+					// native member copying already does. Dictionary symbols hold
+					// their own references after this reader is destroyed. Preserve
+					// the empty-name path: an empty ttstr has no variant string.
+					if (auto *key = name.AsVariantStringNoAddRef())
+						dictionary->PropSetByVS(TJS_MEMBERENSURE, key, &item.Value, dictionary);
+					else
+						dictionary->PropSet(TJS_MEMBERENSURE, name.c_str(), nullptr, &item.Value, dictionary);
 					if (item.IsResource)
 					{
 						auto &resourceNames = item.IsExtraResource ? ExtraResourceNames : ResourceNames;
 						if (resourceNames.find(item.ResourceIndex) == resourceNames.end())
-							resourceNames[item.ResourceIndex] = name;
+							resourceNames[item.ResourceIndex] = name.AsStdString();
 					}
 				}
 				result.Value = tTJSVariant(dictionary, dictionary);
@@ -614,6 +622,7 @@ void TJS_INTF_METHOD tTJSNI_PSBFile::Invalidate()
 {
 	if (Root)
 	{
+		KrkrNSVMProfNativeScope profile("psb-root-release");
 		Root->Release();
 		Root = nullptr;
 	}

@@ -747,8 +747,8 @@ void tTVPNativeBaseBitmap::ApplyFont()
 	// apply font
 	if(FontChanged || GlobalFontState != TVPGlobalFontStateMagic)
 	{
-		Independ();
-
+		// Font state belongs to this wrapper. Measuring text does not write
+		// shared pixels; drawing and writable scan lines detach them instead.
 		FontChanged = false;
 		GlobalFontState = TVPGlobalFontStateMagic;
 		CachedText.Clear();

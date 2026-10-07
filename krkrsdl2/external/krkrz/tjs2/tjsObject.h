@@ -388,6 +388,16 @@ extern tjs_int TJSObjectHashBitsLimit;
 */
 
 
+// Optional typed callback for copying raw members. EnumMembers still dispatches
+// virtually; custom enumerators can use the ordinary FuncCall interface. The
+// fast path is only valid with IGNOREPROP and a value, and always continues.
+class tTJSCustomObject;
+class tTJSMemberCopyCallback : public tTJSDispatch
+{
+public:
+	virtual void CopyMembers(const tTJSCustomObject &source) = 0;
+};
+
 class tTJSCustomObject : public tTJSDispatch
 {
 	typedef tTJSDispatch inherited;
@@ -563,6 +573,28 @@ private:
 		iTJSDispatch2 *objthis);
 	//---------------------------------------------------------------------
 public:
+	// Raw, chain-first iteration for the typed native member copier. Property
+	// access remains in EnumMembers; callers here only copy stored values.
+	template<typename Consumer> void EnumStoredMembers(Consumer consumer) const
+	{
+		auto call = [&consumer](const tTJSSymbolData *data) {
+			if (!(data->SymFlags & TJS_SYMBOL_USING)) return;
+			tjs_uint32 flags = 0;
+			if (data->SymFlags & TJS_SYMBOL_HIDDEN) flags |= TJS_HIDDENMEMBER;
+			if (data->SymFlags & TJS_SYMBOL_STATIC) flags |= TJS_STATICMEMBER;
+			consumer(data->Name, flags, *reinterpret_cast<const tTJSVariant *>(&data->Value));
+		};
+		for (const tTJSSymbolData *bucket = Symbols, *end = Symbols + HashSize; bucket < end; ++bucket)
+		{
+			for (const tTJSSymbolData *data = bucket->Next; data; )
+			{
+				const tTJSSymbolData *next = data->Next;
+				call(data);
+				data = next;
+			}
+			call(bucket);
+		}
+	}
 	void Clear() { DeleteAllMembers(); }
 	/**
 	 * rebuild hash table

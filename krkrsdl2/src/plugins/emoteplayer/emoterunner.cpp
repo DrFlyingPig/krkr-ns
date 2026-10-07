@@ -360,11 +360,10 @@ void emotenoderef::checkDrawStatus(float tick, std::vector<emoteRender>& renderL
     {
         isIcon = true;
 
-        if (tmpic != ic) // 纹理只需在图标切换时确认加载
-        {
-            ic = tmpic;
-            ic->ensureLoad();
-        }
+        ic = tmpic;
+        // Already uploaded icons return immediately. Retry an unavailable or
+        // failed backend on the next progress call even if this icon is unchanged.
+        ic->ensureLoad();
         width = ic->width;
         height = ic->height;
         originX = ic->originX;

@@ -393,11 +393,13 @@ public:
     double texWidth = 0;
     double texHeight = 0;
 
-    uint8_t* data = nullptr; // icon数据（RGBA，统一字节序）
+    uint8_t* data = nullptr; // temporary decoded RGBA; the backend owns its copy
     void* selftexture = nullptr; // 纹理句柄（由 core/render 的 2D 渲染器管理）
 
 private:
     emotefile* _filePtr = nullptr;
+    bool pixelsDecoded = false;
+    bool textureReady = false;
 };
 
 class emotesource

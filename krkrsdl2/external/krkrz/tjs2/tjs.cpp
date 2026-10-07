@@ -30,6 +30,7 @@
 #include "tjsByteCodeLoader.h"
 #include "tjsBinarySerializer.h"
 #include "tjsRegExp.h"
+#include "KrkrNSVMProf.h"
 
 namespace TJS
 {
@@ -519,6 +520,7 @@ tjs_int32 tTJS::GetPPValue(const tjs_char *name)
 //---------------------------------------------------------------------------
 void tTJS::DoGarbageCollection()
 {
+	KrkrNSVMProfNativeScope profile("tjs-gc");
 	// do garbage collection
 	TJSVariantArrayStackCompactNow();
 	TJSCompactStringHeap();

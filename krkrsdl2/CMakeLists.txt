@@ -167,6 +167,7 @@ list(FILTER KRKRSDL2OPUS_SRC INCLUDE REGEX "^external/krkrz/external/opus")
 set_source_files_properties(${KRKRSDL2OPUS_SRC} PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/external/krkrz/external/opus/silk;${CMAKE_CURRENT_SOURCE_DIR}/external/krkrz/external/opus/silk/fixed;${CMAKE_CURRENT_SOURCE_DIR}/external/krkrz/external/opus/silk/float")
 
 list(APPEND KRKRSDL2COMMON_SRC src/support/roundevenf.c)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
 list(APPEND KRKRSDL2COMMON_SRC src/plugins/kremscripten.cpp)
