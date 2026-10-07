@@ -111,8 +111,11 @@ public:
 
 	tTJSCriticalSection & GetBufferCS() { return BufferCS; }
 
-	void PushPlayStream( class tTVPSoundSamplesBuffer* buffer );
+	tjs_int PushPlayStream( class tTVPSoundSamplesBuffer* buffer );
 	void ReleasePlayedSamples( class tTVPSoundSamplesBuffer* buffer, bool continued );
+	void WakeDecodeThread(); // completion callback: signal only, do not take locks
+	void DispatchAudioCallbacks(); // called with the decoder lock held
+	void ReschedulePendingLabelEvent(tjs_int step); // called outside owner/decoder locks
 
 	tjs_int FireLabelEventsAndGetNearestLabelEventStep(tjs_int64 tick);
 	tjs_int GetNearestEventStep();

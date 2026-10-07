@@ -209,12 +209,20 @@ void tTVPSoundBuffers::ReleaseBuffers(bool disableevent) {
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::Shutdown() {
-	if( EventThread )
-		delete EventThread, EventThread = nullptr;
+	tTVPSoundEventThread* retired;
+	{
+		tTJSCriticalSectionHolder holder(BufferCS);
+		retired = EventThread;
+		EventThread = nullptr;
+	}
+	// The thread can be waiting for BufferCS. Detach it before joining, and
+	// let decoder label requests observe the detached dispatcher safely.
+	delete retired;
 	ReleaseBuffers();
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::EnsureBufferWorking() {
+	tTJSCriticalSectionHolder holder(BufferCS);
 	if( EventThread == nullptr ) {
 		EventThread = new tTVPSoundEventThread(this);
 	}
@@ -222,6 +230,7 @@ void tTVPSoundBuffers::EnsureBufferWorking() {
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::CheckAllSleep() {
+	tTJSCriticalSectionHolder holder(BufferCS);
 	if( EventThread ) EventThread->CheckBufferSleep();
 }
 //---------------------------------------------------------------------------
@@ -231,23 +240,29 @@ void tTVPSoundBuffers::AddBuffer( tTJSNI_QueueSoundBuffer * buffer ) {
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::RemoveBuffer( tTJSNI_QueueSoundBuffer * buffer) {
-	bool bufferempty;
+	tTVPSoundEventThread* retired = nullptr;
 	{
 		tTJSCriticalSectionHolder holder(BufferCS);
 		auto i = std::find(Buffers.begin(), Buffers.end(), buffer);
 		if(i != Buffers.end())
 			Buffers.erase(i);
-		bufferempty = Buffers.size() == 0;
+		if( Buffers.empty() ) {
+			retired = EventThread;
+			EventThread = nullptr;
+		}
 	}
-	if(bufferempty) {
-		if(EventThread)
-			delete EventThread, EventThread = nullptr;
-	}
+	delete retired;
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::ReschedulePendingLabelEvent(tjs_int tick) {
-	if(EventThread)
-		EventThread->ReschedulePendingLabelEvent(tick);
+	if(tick == TVP_TIMEOFS_INVALID_VALUE) return;
+	const tjs_uint32 targetTick = TVPGetRoughTickCount32() + tick;
+	tTJSCriticalSectionHolder holder(BufferCS);
+	if(EventThread) {
+		// Waiting for the dispatcher lock must not move the label deadline.
+		const tjs_int remaining = (tjs_int)(targetTick - TVPGetRoughTickCount32());
+		EventThread->ReschedulePendingLabelEvent(remaining > 0 ? remaining : 0);
+	}
 }
 //---------------------------------------------------------------------------
 void tTVPSoundBuffers::ResetVolumeToAllSoundBuffer() {

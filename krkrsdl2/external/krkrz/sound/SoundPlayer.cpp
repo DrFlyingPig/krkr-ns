@@ -43,15 +43,29 @@ void tTVPSoundPlayer::PushSamplesBuffer( tTVPSoundSamplesBuffer* buf ) {
 //---------------------------------------------------------------------------
 void tTVPSoundPlayer::Callback( class iTVPAudioStream* stream ) {
 	tTVPSoundSamplesBuffer* sample = nullptr;
+	bool continued = false;
 	{
 		tTJSCriticalSectionHolder holder(Owner->GetBufferCS());
+		continued = Playing && !BufferEnded;
 		if( Samples.size() > 0 ) {
 			auto itr = Samples.begin();
 			sample = *itr;
 			Samples.erase( itr );
 		}
 	}
-	if( sample ) Owner->ReleasePlayedSamples( sample, !BufferEnded );
+	if( sample ) Owner->ReleasePlayedSamples( sample, continued );
+}
+//---------------------------------------------------------------------------
+void tTVPSoundPlayer::WakeCallback( class iTVPAudioStream*, void* user ) {
+	// Called with FAudio locks held: only signal the existing decoder event.
+	static_cast<tTVPSoundPlayer*>(user)->Owner->WakeDecodeThread();
+}
+//---------------------------------------------------------------------------
+void tTVPSoundPlayer::DispatchCallbacks() {
+	// The caller holds the decoder lock before taking the owner lock. Retiring
+	// the stream takes this same owner lock, so old callbacks cannot hit a new one.
+	tTJSCriticalSectionHolder holder(Owner->GetBufferCS());
+	if( Stream ) Stream->DispatchCallbacks();
 }
 //---------------------------------------------------------------------------
 void tTVPSoundPlayer::CreateStream( iTVPAudioDevice* device, tTVPWaveFormat& format, tjs_uint samplesCount ) {
@@ -77,7 +91,7 @@ void tTVPSoundPlayer::CreateStream( iTVPAudioDevice* device, tTVPWaveFormat& for
 		TVPThrowExceptionMessage(TJS_W("Faild to create audio stream."));
 	}
 	StreamFormat = format;
-	Stream->SetCallback( StreamCallback, this );
+	Stream->SetDeferredCallback( StreamCallback, this, WakeCallback );
 }
 //---------------------------------------------------------------------------
 tjs_int64 tTVPSoundPlayer::GetCurrentPlayingPosition() {

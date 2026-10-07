@@ -39,6 +39,8 @@ public:
 		player->Callback( stream );
 	}
 	void Callback( class iTVPAudioStream* stream );
+	static void WakeCallback( class iTVPAudioStream* stream, void* user );
+	void DispatchCallbacks();
 	void CreateStream( class iTVPAudioDevice* device, tTVPWaveFormat& format, tjs_uint samplesCount );
 	void Start();
 	void Stop();

@@ -40,6 +40,8 @@ void tTVPSoundDecodeThread::Execute(void) {
 	SetPriority(TVPDecodeThreadHighPriority);
 	while( !GetTerminated() ) {
 		tjs_uint32 count = 0;
+		tjs_int labelEventStep = TVP_TIMEOFS_INVALID_VALUE;
+		tjs_uint32 labelEventTick = 0;
 		{
 			// KRKR-ns device diagnosis: this thread holds OneLoopCS across
 			// buf->Decode(), which reads the storage.  The main thread's
@@ -48,6 +50,9 @@ void tTVPSoundDecodeThread::Execute(void) {
 			// liveness during a stall.
 			const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
 			tTJSCriticalSectionHolder cs_holder(OneLoopCS);
+			// Completion callbacks only wake us. Recycle their buffers here,
+			// using the same decoder -> owner lock order as normal decoding.
+			Owner->DispatchAudioCallbacks();
 			count = Samples.size();
 			if( count ) {
 				// バッファにデコードしたSampleを入れる
@@ -58,7 +63,8 @@ void tTVPSoundDecodeThread::Execute(void) {
 				DecodedSamples += buf->GetInSamples();
 
 				// デコード済みSampleを再生ストリームへ移動
-				Owner->PushPlayStream( buf );
+				labelEventStep = Owner->PushPlayStream( buf );
+				labelEventTick = TVPGetRoughTickCount32();
 				Samples.erase( itr );
 				count = Samples.size();
 			}
@@ -66,6 +72,12 @@ void tTVPSoundDecodeThread::Execute(void) {
 			if( krkrns_dt >= 300 )
 				KRKRNS_LOG("[slow] snd-decode %ums queued=%u", krkrns_dt, (unsigned)count);
 			krkrns_lastWork = krkrns_t0;
+		}
+		// The event thread holds the global sound-list lock. It may wait for
+		// us during shutdown, so never acquire that lock while holding ours.
+		if( labelEventStep != TVP_TIMEOFS_INVALID_VALUE ) {
+			const tjs_int remaining = (tjs_int)(labelEventTick + labelEventStep - TVPGetRoughTickCount32());
+			Owner->ReschedulePendingLabelEvent(remaining > 0 ? remaining : 0);
 		}
 		{
 			// Liveness: one line per 10 s of an otherwise silent thread, so a

@@ -39,6 +39,7 @@ public:
 	void PushSamplesBuffer( tTVPSoundSamplesBuffer* buf );
 	// サンプルバッファキューを空にする
 	void ClearQueue();
+	void Wake() { Event.Set(); }
 };
 
 

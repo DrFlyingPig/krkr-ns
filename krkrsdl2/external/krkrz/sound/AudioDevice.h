@@ -41,6 +41,11 @@ class iTVPAudioStream
 public:
 	virtual ~iTVPAudioStream(){}
 	virtual void SetCallback( StreamQueueCallback callback, void* user ) = 0;
+	// Backends whose completion callbacks run under device locks can defer
+	// engine work until the decoder dispatches it. Wake must only signal work.
+	virtual void SetDeferredCallback( StreamQueueCallback callback, void* user,
+		StreamQueueCallback wake ) { SetCallback(callback, user); }
+	virtual void DispatchCallbacks() {}
 	virtual void Enqueue( void *data, size_t size, bool last ) = 0;
 	virtual void ClearQueue() = 0;
 

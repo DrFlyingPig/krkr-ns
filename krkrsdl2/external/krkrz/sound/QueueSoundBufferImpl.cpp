@@ -269,8 +269,9 @@ tjs_uint tTJSNI_QueueSoundBuffer::Decode( void *buffer, tjs_uint bufsamplelen, t
 	return w;
 }
 //---------------------------------------------------------------------------
-void tTJSNI_QueueSoundBuffer::PushPlayStream( tTVPSoundSamplesBuffer* buffer ) {
-	if( !BufferPlaying ) return;
+tjs_int tTJSNI_QueueSoundBuffer::PushPlayStream( tTVPSoundSamplesBuffer* buffer ) {
+	tTJSCriticalSectionHolder holder(BufferCS);
+	if( !BufferPlaying ) return TVP_TIMEOFS_INVALID_VALUE;
 
 	ResetLastCheckedDecodePos();
 
@@ -294,9 +295,22 @@ void tTJSNI_QueueSoundBuffer::PushPlayStream( tTVPSoundSamplesBuffer* buffer ) {
 		// sort
 		std::sort(LabelEventQueue.begin(), LabelEventQueue.end(), tTVPWaveLabel::tSortByOffsetFuncObj());
 
-		// re-schedule label events
-		TVPSoundBuffers.ReschedulePendingLabelEvent(GetNearestEventStep());
+		// The caller schedules after releasing the owner and decoder locks.
+		return GetNearestEventStep();
 	}
+	return TVP_TIMEOFS_INVALID_VALUE;
+}
+//---------------------------------------------------------------------------
+void tTJSNI_QueueSoundBuffer::ReschedulePendingLabelEvent(tjs_int step) {
+	TVPSoundBuffers.ReschedulePendingLabelEvent(step);
+}
+//---------------------------------------------------------------------------
+void tTJSNI_QueueSoundBuffer::WakeDecodeThread() {
+	if( Thread ) Thread->Wake();
+}
+//---------------------------------------------------------------------------
+void tTJSNI_QueueSoundBuffer::DispatchAudioCallbacks() {
+	Player.DispatchCallbacks();
 }
 //---------------------------------------------------------------------------
 void tTJSNI_QueueSoundBuffer::Update() {
@@ -433,6 +447,8 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 
 	// play from first
 	tjs_int64 predecodedSamples = 0;
+	tjs_int labelEventStep = TVP_TIMEOFS_INVALID_VALUE;
+	tjs_uint32 labelEventTick = 0;
 	// Retire the stopped voice before reusing its sample buffers. Backend
 	// teardown can wait for callbacks, so neither owner nor decoder locks
 	// may be held here. Preserve the format to reuse matching allocations.
@@ -471,8 +487,13 @@ void tTJSNI_QueueSoundBuffer::StartPlay()
 
 		// re-schedule label events
 		ResetLastCheckedDecodePos();
-		TVPSoundBuffers.ReschedulePendingLabelEvent(GetNearestEventStep());
+		labelEventStep = GetNearestEventStep();
+		labelEventTick = TVPGetRoughTickCount32();
 	}	// end of thread protected block
+	if( labelEventStep != TVP_TIMEOFS_INVALID_VALUE ) {
+		const tjs_int remaining = (tjs_int)(labelEventTick + labelEventStep - TVPGetRoughTickCount32());
+		TVPSoundBuffers.ReschedulePendingLabelEvent(remaining > 0 ? remaining : 0);
+	}
 
 	// ensure thread
 	ThreadCallbackEnabled = true;

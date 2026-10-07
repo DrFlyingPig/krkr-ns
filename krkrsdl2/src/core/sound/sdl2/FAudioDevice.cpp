@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <vector>
 #include <algorithm>
+#include <atomic>
 #include "AudioDevice.h"
 #include "MsgIntf.h"
 #include "DebugIntf.h"
@@ -168,6 +169,9 @@ class FAudioStream : public iTVPAudioStream
 
 	StreamQueueCallback QueueCallback;
 	void* UserData;
+	StreamQueueCallback WakeCallback = nullptr;
+	bool DeferredCallback = false;
+	std::atomic<unsigned> PendingCallbacks{0};
 
 private:
 	float CalcCommonVolume(float balance_sign) const
@@ -264,6 +268,21 @@ public:
 	{
 		QueueCallback = callback;
 		UserData = user;
+	}
+	virtual void SetDeferredCallback(StreamQueueCallback callback, void* user,
+		StreamQueueCallback wake) override
+	{
+		SetCallback(callback, user);
+		WakeCallback = wake;
+		DeferredCallback = true;
+	}
+	virtual void DispatchCallbacks() override
+	{
+		const unsigned count = PendingCallbacks.exchange(0, std::memory_order_acquire);
+		for (unsigned i = 0; i < count; ++i)
+		{
+			if (QueueCallback != nullptr) QueueCallback(this, UserData);
+		}
 	}
 
 	virtual void Enqueue(void *data, size_t size, bool last) override
@@ -436,6 +455,14 @@ public:
 
 	virtual void OnBufferEnd(void *pBufferContext)
 	{
+		if (DeferredCallback)
+		{
+			// FAudio retains bufferLock during normal playback completion.
+			// Never enter the engine's sound/decoder locks from this thread.
+			PendingCallbacks.fetch_add(1, std::memory_order_release);
+			if (WakeCallback != nullptr) WakeCallback(this, UserData);
+			return;
+		}
 		if (QueueCallback == nullptr)
 		{
 			return;
