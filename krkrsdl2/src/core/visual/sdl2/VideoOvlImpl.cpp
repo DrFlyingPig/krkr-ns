@@ -533,6 +533,20 @@ void tTJSNI_VideoOverlay::Rewind()
 }
 void tTJSNI_VideoOverlay::Prepare()
 {	// prepare movie
+	TVPAddLog(TJS_W("[video] Prepare"));
+#ifdef __SWITCH__
+	// Same meaning as the Windows path below: Prepare rewinds to the first
+	// frame and starts playback.  KAG's movie.tjs calls Prepare and then waits
+	// for the player's events instead of calling play itself, so with this body
+	// missing the movie never started and the opening screen stayed blank.
+	if( VideoOverlay && (Mode == vomLayer) )
+	{
+		Pause();
+		Rewind();
+		IsPrepare = true;
+		Play();
+	}
+#endif
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)
 	if( VideoOverlay && (Mode == vomLayer) )
 	{
@@ -545,11 +559,13 @@ void tTJSNI_VideoOverlay::Prepare()
 }
 void tTJSNI_VideoOverlay::SetSegmentLoop( int comeFrame, int goFrame )
 {
+	TVPAddLog(TJS_W("[video] SetSegmentLoop"));
 	SegLoopStartFrame = comeFrame;
 	SegLoopEndFrame = goFrame;
 }
 void tTJSNI_VideoOverlay::SetPeriodEvent( int eventFrame )
 {
+	TVPAddLog(TJS_W("[video] SetPeriodEvent"));
 	EventFrame = eventFrame;
 
 	if( eventFrame <= GetFrame() )
@@ -925,6 +941,7 @@ void tTJSNI_VideoOverlay::WndProc( NativeEvent& ev )
 //---------------------------------------------------------------------------
 void tTJSNI_VideoOverlay::SetTimePosition( tjs_uint64 p )
 {
+	TVPAddLog(TJS_W("[video] SetTimePosition"));
 #if (defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE) && defined(KRKRSDL2_ENABLE_VIDEOOVERLAY)) || defined(__SWITCH__)
 	if(VideoOverlay)
 	{
@@ -1046,10 +1063,12 @@ void tTJSNI_VideoOverlay::SetLoop( bool b )
 }
 void tTJSNI_VideoOverlay::SetLayer1( tTJSNI_BaseLayer *l )
 {
+	TVPAddLog(TJS_W("[video] SetLayer1"));
 	Layer1 = l;
 }
 void tTJSNI_VideoOverlay::SetLayer2( tTJSNI_BaseLayer *l )
 {
+	TVPAddLog(TJS_W("[video] SetLayer2"));
 	Layer2 = l;
 }
 void tTJSNI_VideoOverlay::SetMode( tTVPVideoOverlayMode m )
