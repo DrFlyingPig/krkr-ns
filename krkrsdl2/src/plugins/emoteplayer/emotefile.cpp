@@ -591,6 +591,12 @@ emotenode::emotenode(emotemotion* rootmotion,
     }
     filePtr->parseNumber(tmp, _rootData["type"]);
     type = static_cast<uint8_t>(tmp);
+    it = _rootData.find("stencilType");
+    if (it != _rootData.end())
+    {
+        filePtr->parseNumber(tmp, it->second);
+        stencilType = static_cast<uint32_t>(tmp);
+    }
     // mask
     it = _rootData.find("meshSyncChildMask");
     if (it != _rootData.end())

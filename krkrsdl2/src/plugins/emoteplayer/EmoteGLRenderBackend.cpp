@@ -37,13 +37,19 @@ uniform bool enableMask;
 uniform vec2 viewportSize;
 uniform float opa;
 uniform bool enableColor;
+uniform bool multiplyColor;
 uniform vec4 uniformColor;
 void main() {
     if (enableMask && texture2D(maskTexture, gl_FragCoord.xy / viewportSize).a < 0.5)
         discard;
     vec4 color = texture2D(texture1, texCoord);
     if (enableColor) color = vec4(uniformColor.rgb, uniformColor.a * color.a);
-    color.a *= opa;
+    color.a *= multiplyColor ? clamp(opa, 0.0, 1.0) : opa;
+    // Mode 19 (PS multiply): RGB must include the effective source alpha
+    // before DST_COLOR / ONE_MINUS_SRC_ALPHA blending.
+    if (multiplyColor) {
+        color.rgb *= color.a;
+    }
     gl_FragColor = color;
 }
 )";
@@ -122,7 +128,7 @@ struct EmoteGLRenderBackend::Impl
     SDL_Window* savedWindow = nullptr;
     bool active = false, failed = false;
     GLuint program = 0, vbo = 0, ibo = 0;
-    GLint textureLoc, maskLoc, enableMaskLoc, viewportLoc, opacityLoc, colorEnabledLoc, colorLoc;
+    GLint textureLoc, maskLoc, enableMaskLoc, viewportLoc, opacityLoc, colorEnabledLoc, multiplyColorLoc, colorLoc;
     Image* target = nullptr;
     Image* mask = nullptr;
     int blend = 0;
@@ -266,6 +272,7 @@ struct EmoteGLRenderBackend::Impl
             viewportLoc = GetUniformLocation(program, "viewportSize");
             opacityLoc = GetUniformLocation(program, "opa");
             colorEnabledLoc = GetUniformLocation(program, "enableColor");
+            multiplyColorLoc = GetUniformLocation(program, "multiplyColor");
             colorLoc = GetUniformLocation(program, "uniformColor");
             GenBuffers(1, &vbo); GenBuffers(1, &ibo);
             Disable(GL_DEPTH_TEST); Disable(GL_SCISSOR_TEST); Disable(GL_CULL_FACE);
@@ -575,6 +582,14 @@ bool EmoteGLRenderBackend::selfTest()
     return ok;
 }
 void* EmoteGLRenderBackend::CreateTarget(int w, int h) { return impl->create(w, h, true); }
+bool EmoteGLRenderBackend::GetTargetSize(void* target, int& width, int& height) const
+{
+    auto* image = impl->find(target);
+    if (!image || !image->target) return false;
+    width = image->width;
+    height = image->height;
+    return true;
+}
 void* EmoteGLRenderBackend::CreateTexture(int w, int h) { return impl->create(w, h, false); }
 void EmoteGLRenderBackend::DestroyTarget(void* target) { impl->destroy(target); }
 void EmoteGLRenderBackend::DestroyTexture(void* texture) { impl->destroy(texture); }
@@ -729,9 +744,14 @@ void EmoteGLRenderBackend::DrawMesh(const float* vertices, int count, const uint
     gl.Uniform2f(gl.viewportLoc, float(gl.target->width), float(gl.target->height));
     gl.Uniform1f(gl.opacityLoc, opacity);
     gl.Uniform1i(gl.colorEnabledLoc, gl.blend == 21);
+    gl.Uniform1i(gl.multiplyColorLoc, gl.blend == 19);
     gl.Uniform4fv(gl.colorLoc, 1, gl.color);
     switch (gl.blend)
     {
+    case 19:
+        gl.BlendFuncSeparate(GL_DST_COLOR, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        gl.BlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+        break;
     case 1: case 4:
         gl.BlendFuncSeparate(GL_DST_COLOR, GL_ONE, GL_ZERO, GL_ONE);
         gl.BlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);

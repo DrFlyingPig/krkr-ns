@@ -73,6 +73,7 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 
 - Supports backgrounds, character art, text, choices, and common transitions while preserving the game's aspect ratio.
 - Supports E-mote animated characters and improves the return to the title screen after limited animations.
+- Fixes layer offsets, mask clipping, and multiplicative blending in some E-mote animations.
 - Supports transparent AlphaMovie playback, looping, and frame skipping.
 - Includes the native LayerExRaster plugin for script-driven ripple effects used by some scene transitions.
 - Music and voice support WAV, OGG, Opus, and some AAC/M4A and MP3 content, including files whose extension does not match the actual audio format. Video support includes parts of WMV, MP4, and MPEG, with volume control for video playback.
@@ -86,6 +87,7 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 - Reduces repeated work for large E-mote animations and parallelizes parts of transitions, falling back to synchronous drawing when thread resources are unavailable.
 - Reports image loading and decoding errors, with a custom-artwork alternative for images that cannot be previewed.
 - Fixes audio underruns in some video playback cases and improves end-of-video audio handling and resource cleanup.
+- Fixes stalled Switch audio-buffer waits that could freeze some opening movies.
 - Cleans up windows, audio, timers, and events when leaving a game, improving recovery after script cleanup errors and return to the library.
 - Fixes object-cleanup crashes in quick-load flows for some games and improves resource release when videos are closed and reopened.
 - Keeps the launcher usable after a startup-script failure.

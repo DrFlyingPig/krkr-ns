@@ -24,6 +24,7 @@ public:
     void ResetForEngineRestart() override;
 
     void* CreateTarget(int width, int height) override;
+    bool GetTargetSize(void* target, int& width, int& height) const override;
     void DestroyTarget(void* target) override;
     void SetTarget(void* target) override;
     void ClearTarget(bool clearColor) override;

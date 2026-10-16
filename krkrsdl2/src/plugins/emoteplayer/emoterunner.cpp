@@ -65,6 +65,15 @@ static void prepareSurfaceChain(const std::vector<emoteRender>& renderMethod,
     uint32_t currInheritMask = 0xFFFFFFF;
     for (int i = surfaceCount - 1; i >= 0; i--)
     {
+        // A transparent parent (not the drawable itself) is skipped during
+        // parent lookup. Its transform and inheritance flags cannot affect
+        // descendants; its independent stencil geometry is still retained.
+        if (i < surfaceCount - 1 &&
+            (renderMethod[i].currInheritMask & 0x00400000u))
+        {
+            matrices[static_cast<size_t>(i)] = glm::mat4(1.0f);
+            continue;
+        }
         currInheritMask &= renderMethod[i].currInheritMask;
         glm::mat4 model = glm::mat4(1.0f); // 注:复合顺序是反过来的
         if (i < surfaceCount - 1 && i > 0 && ((currInheritMask & 0x1FC) != 0x1FC))
@@ -145,6 +154,8 @@ static void prepareSurfaceChain(const std::vector<emoteRender>& renderMethod,
     glm::mat4 pending(1.0f);
     for (int i = surfaceCount - 2; i >= 0; --i)
     {
+        if (renderMethod[i].currInheritMask & 0x00400000u)
+            continue;
         if (renderMethod[i].type == 1)
         {
             bezierSteps.push_back({pending, i});
@@ -160,8 +171,13 @@ static void prepareSurfaceChain(const std::vector<emoteRender>& renderMethod,
             glm::mat4 normalize(0.0f);
             normalize[0][0] = 1.0f / renderMethod[i].width;
             normalize[1][1] = 1.0f / renderMethod[i].height;
-            normalize[3][0] = renderMethod[i].originX / renderMethod[i].width;
-            normalize[3][1] = renderMethod[i].originY / renderMethod[i].height;
+            // The parent's image anchor affects its own vertices, not its
+            // children's coordinate frame. Undo that local offset before
+            // applying the parent's positional/linear transform.
+            normalize[3][0] = (renderMethod[i].originX + renderMethod[i].currOx) /
+                              renderMethod[i].width;
+            normalize[3][1] = (renderMethod[i].originY + renderMethod[i].currOy) /
+                              renderMethod[i].height;
             normalize[3][3] = 1.0f;
             affine = affine * normalize;
         }
@@ -207,8 +223,8 @@ static void evaluatePreparedSurfaceChain(
     {
         trans = step.affineBefore * trans;
         const emoteRender& surface = renderMethod[static_cast<size_t>(step.surfaceIndex)];
-        const float patchU = (trans.y + surface.originY) / surface.height;
-        const float patchV = (trans.x + surface.originX) / surface.width;
+        const float patchU = (trans.y + surface.originY + surface.currOy) / surface.height;
+        const float patchV = (trans.x + surface.originX + surface.currOx) / surface.width;
         float bx, by;
         evalBezierSurface(surface.controlPts, patchU, patchV, bx, by);
         trans = matrices[static_cast<size_t>(step.surfaceIndex)] *
@@ -453,16 +469,20 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
         currTick = std::min(
             currTick, (float)currentNode->frameList.at(currentNode->frameList.size() - 2)->time);
     }
-    // 不会处理，先跳过
+    // A stencil with a source texture needs its own image geometry.  Only a
+    // source-less grouping node uses the enclosing layout dimensions.
     if (currentNode->type == 12)
     {
         checkDrawStatus(currTick, renderList, lim);
         isNeedDraw = true;
-        isLayout = true;
-        originX = lim.originX;
-        originY = lim.originY;
-        width = lim.width;
-        height = lim.height;
+        if (!isIcon)
+        {
+            isLayout = true;
+            originX = lim.originX;
+            originY = lim.originY;
+            width = lim.width;
+            height = lim.height;
+        }
     }
     // 对于参数节点 进行参数反查来定位tick
     else if (currentNode->isParameterize)
@@ -644,6 +664,12 @@ void emotenoderef::progress(float tick, std::vector<emoteRender>& renderList, em
                     renderMethod.at(0).layerNode.push_back(tmpNode);
                 }
             }
+        }
+
+        if (!renderMethod.empty() && currentNode->type == 12 &&
+            currentNode->stencilType == 1 && isIcon)
+        {
+            renderMethod.front().selfMaskLayers.push_back(this);
         }
 
         // shape节点: 将currZx/currZy重置为1，避免与width/height双重缩放(px = zx * shapeUnit * 1)
@@ -852,13 +878,18 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
         return false; // 跳过无需绘制的 和 非icon的 和 无method 的节点
     if (!renderer || !target)
         return false;
+    if (!inMaskPass && currentNode->type == 12 && currentNode->stencilType == 1)
+        return false; // the stencil's RGB is never scene content
 
     // 跳过空网格
     if (_meshVertices.empty() || _meshIndices.empty())
         return false;
 
-    // 提前绘制好蒙版目标（不考虑复合蒙版的情况）
-    if (renderMethod.at(0).hasStencil && maskTarget != 0)
+    void* combinedMask = inMaskPass ? maskTarget : nullptr;
+    // Build a named group's union first, then intersect each enclosing
+    // source-texture stencil. Mask passes only consume the preceding result;
+    // they never recursively rebuild their inherited stencil chain.
+    if (!inMaskPass && renderMethod.at(0).hasStencil && maskTarget != nullptr)
     {
         renderer->SetTarget(maskTarget);
         renderer->ClearTarget(true);
@@ -885,6 +916,8 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
             }
             renderMethod.at(0).hasStencil = false;
         }
+        else
+            combinedMask = maskTarget;
 #if defined(__SWITCH__) && defined(KRKRNS_EMOTE_CAPTURE_DIAGNOSTICS)
         // KRKR-ns diagnostic: snapshot the mask target so a partial mask
         // (which would discard everything outside its covered area) can be
@@ -913,9 +946,33 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
 #endif
     }
 
+    if (!inMaskPass && maskTarget != nullptr)
+    {
+        for (auto* selfMask : renderMethod.front().selfMaskLayers)
+        {
+            if (!selfMask)
+                continue;
+            void* destination = maskTarget;
+            if (combinedMask == maskTarget)
+            {
+                int maskWidth = 0, maskHeight = 0;
+                if (!renderer->GetTargetSize(maskTarget, maskWidth, maskHeight))
+                    return false;
+                destination = refTop->acquireMaskScratch(renderer, maskWidth, maskHeight);
+            }
+            if (!destination)
+                return false;
+            renderer->SetTarget(destination);
+            renderer->SetMask(nullptr);
+            renderer->ClearTarget(true);
+            selfMask->draw(renderer, destination, lim, combinedMask, true);
+            combinedMask = destination;
+        }
+    }
+
     // 主体绘制（SetTarget 内部完成视口/深度/混合基础状态设置）
     renderer->SetTarget(target);
-    renderer->SetMask(renderMethod.at(0).hasStencil ? maskTarget : nullptr);
+    renderer->SetMask(combinedMask);
 
     // 透明度与混色
     // Stencil sources use their texture alpha even when the source layer is
@@ -928,8 +985,8 @@ bool emotenoderef::draw(krkrsdl3::iTVPRenderBackend* renderer, void* target, emo
             totalOpa *= renderMethod.at(i).opa;
     }
     int blendMode = currbm;
-    if (blendMode == 6 && inMaskPass)
-        blendMode = 0; // 蒙版形状按普通 alpha 轮廓绘制，写入蒙版目标
+    if (inMaskPass)
+        blendMode = 0; // stencil coverage comes from texture alpha, not color blending
     float uniformColor[4] = {0, 0, 0, 0};
     if (blendMode == 21 && frame)
     {
@@ -1165,6 +1222,25 @@ emoteengine::~emoteengine()
 {
     if (_mainMotionRef)
         delete _mainMotionRef;
+    if (_maskScratch && _maskScratchRenderer)
+        _maskScratchRenderer->DestroyTarget(_maskScratch);
+}
+void* emoteengine::acquireMaskScratch(krkrsdl3::iTVPRenderBackend* renderer, int width, int height)
+{
+    if (_maskScratch && (_maskScratchRenderer != renderer ||
+                         _maskScratchWidth != width || _maskScratchHeight != height))
+    {
+        _maskScratchRenderer->DestroyTarget(_maskScratch);
+        _maskScratch = nullptr;
+    }
+    if (!_maskScratch)
+    {
+        _maskScratch = renderer->CreateTarget(width, height);
+        _maskScratchRenderer = renderer;
+        _maskScratchWidth = width;
+        _maskScratchHeight = height;
+    }
+    return _maskScratch;
 }
 void emoteengine::progress(float tick, std::vector<emoteRender>& renderList, emotelimit lim)
 {

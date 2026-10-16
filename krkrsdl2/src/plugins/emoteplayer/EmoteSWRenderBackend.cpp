@@ -58,6 +58,14 @@ static ColorRGBA BlendPixels(ColorRGBA src, ColorRGBA dst, int mode,
     // Multiply-add modes deliberately ignore sa; even a transparent source
     // can alter their RGB. Other modes leave every destination byte unchanged.
     if (sa == 0.0f && mode != 1 && mode != 4) return dst;
+    if (mode == 19)
+    {
+        // PS multiply (19 & 0xf == 3), retaining destination alpha. The
+        // image's alpha/opacity interpolates between identity and Src*Dst.
+        return {Clampf(dst.r * (1.0f - sa + sa * src.r / 255.0f) + 0.5f),
+                Clampf(dst.g * (1.0f - sa + sa * src.g / 255.0f) + 0.5f),
+                Clampf(dst.b * (1.0f - sa + sa * src.b / 255.0f) + 0.5f), dst.a};
+    }
     if (sa >= 1.0f)
     {
         // Fully opaque source: plain overwrite (matches SRC_ALPHA blending).
@@ -476,6 +484,15 @@ void* EmoteSWRenderBackend::CreateTarget(int width, int height)
     return target;
 }
 
+bool EmoteSWRenderBackend::GetTargetSize(void* handle, int& width, int& height) const
+{
+    auto* target = FindTarget(handle);
+    if (!target) return false;
+    width = target->width;
+    height = target->height;
+    return true;
+}
+
 void EmoteSWRenderBackend::DestroyTarget(void* handle)
 {
     Target* target = FindTarget(handle);
@@ -755,6 +772,29 @@ bool EmoteSWRenderBackend::DrawMeshGpu(const float* vertices,
                                        Target* targetAsTexture,
                                        float opacity)
 {
+    if (blendMode_ == 19)
+    {
+        // SDL geometry cannot premultiply each sampled texel's RGB by its
+        // effective alpha. Preserve all rendered targets before permanently
+        // handing this backend instance to its source-equivalent CPU path.
+        // Read raw framebuffer bytes here: LockTarget's SDL-only conversion
+        // to straight alpha is not part of the CPU/GL framebuffer contract.
+        if (!gpuDisabled_)
+        {
+            for (Target* target : targets_)
+            {
+                if (!target->gpuTexture) continue;
+                if (!BindGpuTarget(target->gpuTexture, target->width, target->height) ||
+                    SDL_RenderReadPixels(gpuRenderer_, nullptr, SDL_PIXELFORMAT_RGBA32,
+                        target->pixels.data(), target->width * 4) != 0)
+                    throw std::runtime_error("Cannot preserve E-mote GPU target for multiply fallback");
+            }
+            ReleaseGpuResources(true);
+            gpuDisabled_ = true;
+            KRKRNS_LOG("[emote] PS multiply switches SDL geometry to CPU rendering");
+        }
+        return false;
+    }
     if (!currentTarget_ || !EnsureTargetGpu(currentTarget_))
         return false;
 
@@ -1010,7 +1050,7 @@ static void SwRasterizeBandImpl(SwBandJob& j)
         // the common alpha mode; every float op keeps BlendPixels' exact
         // order so the output is bit-identical.  Other modes and the row
         // tail keep the scalar path below.
-        const bool neonBlend = (j.blendMode != 6 && j.blendMode != 21 &&
+        const bool neonBlend = (j.blendMode != 6 && j.blendMode != 21 && j.blendMode != 19 &&
                                 j.blendMode != 1 && j.blendMode != 4);
         if (neonBlend)
         {
@@ -1332,7 +1372,7 @@ static void SwRasterizeBandImpl(SwBandJob& j)
 static bool SwCanDrawRectangleRows(const SwBandJob& j)
 {
     return j.fullCoverage && !j.hasStencil &&
-        j.blendMode != 1 && j.blendMode != 4 && j.blendMode != 6 && j.blendMode != 21 &&
+        j.blendMode != 1 && j.blendMode != 4 && j.blendMode != 6 && j.blendMode != 21 && j.blendMode != 19 &&
         j.maxX - j.minX + 1 >= 64 && j.A_v == 0.f &&
         (!j.splitUVs || j.secondAv == 0.f);
 }
@@ -1341,7 +1381,7 @@ static bool SwBuildTextureXs(SwBandJob& j, std::vector<int32_t>& coordinates)
 {
     const int width = j.maxX - j.minX + 1;
     if (j.sourceAliased || j.hasStencil || j.B_u != 0.f || j.A_v != 0.f ||
-        j.blendMode == 1 || j.blendMode == 4 || j.blendMode == 6 || j.blendMode == 21 ||
+        j.blendMode == 1 || j.blendMode == 4 || j.blendMode == 6 || j.blendMode == 21 || j.blendMode == 19 ||
         width < 64 || j.rows < 96 || (uint64_t)width * j.rows < 66 * 500 ||
         (j.splitUVs && (j.secondBu != 0.f || j.secondAv != 0.f)))
         return false;
@@ -1586,7 +1626,7 @@ static void SwRasterizeBand(SwBandJob& j)
     {
 #if defined(__SWITCH__) || defined(KRKRNS_EMOTE_TEST_NEON)
         if (!j.sourceAliased && j.A_v == 0.f && j.blendMode != 1 && j.blendMode != 4 &&
-            j.blendMode != 6 && j.blendMode != 21)
+            j.blendMode != 6 && j.blendMode != 21 && j.blendMode != 19)
         {
             if (j.textureXs) SwRasterizeBandImpl<true, false, false, true, true>(j);
             else SwRasterizeBandImpl<true, false, false, true>(j);
@@ -1675,7 +1715,7 @@ static bool SwTryMergeRectangle(SwBandJob& first, const SwBandJob& second)
     if (shared[0] < 0)
         return false;
 
-    const bool neonBlend = first.blendMode != 6 && first.blendMode != 21 &&
+    const bool neonBlend = first.blendMode != 6 && first.blendMode != 21 && first.blendMode != 19 &&
                            first.blendMode != 1 && first.blendMode != 4;
     for (int t = 0; t < 2; ++t)
         for (int i = 0; i < 3; ++i)
@@ -2032,7 +2072,7 @@ void EmoteSWRenderBackend::DrawMeshCpu(const float* vertices,
         const bool rowSample = SwCanDrawRectangleRows(first) || (!first.fullCoverage &&
             !first.sourceAliased && !first.hasStencil && first.maxX - first.minX + 1 >= 64 &&
             first.A_v == 0.f && first.blendMode != 1 && first.blendMode != 4 &&
-            first.blendMode != 6 && first.blendMode != 21);
+            first.blendMode != 6 && first.blendMode != 21 && first.blendMode != 19);
         KRKRNS_LOG("[emote] mesh sample=%u target=%dx%d texture=%dx%d mode=%d stencil=%d vertices=%d indices=%d boundsPx=%llu bands=%d rect=%d splitUVs=%d opaque=%d rowCopy=%d rowSample=%d xMap=%d opacity=%.3f wall=%.2fms",
                    meshSamples, width, height, texW, texH, blendMode_, hasStencil,
                    vertexCount, indexCount, (unsigned long long)meshPixels,

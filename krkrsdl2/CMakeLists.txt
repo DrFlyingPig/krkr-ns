@@ -782,6 +782,12 @@ endif()
 set_target_properties(${KRKRSDL2_NAME} PROPERTIES C_STANDARD 11)
 set_target_properties(${KRKRSDL2_NAME} PROPERTIES CXX_STANDARD ${KRKRSDL2_CXX_STANDARD})
 target_sources(${KRKRSDL2_NAME} PRIVATE ${KRKRSDL2_SRC})
+if(NINTENDO_SWITCH)
+# A direct executable object overrides the SDK archive's audio bootstrap.
+# Putting it in krkrsdl2common would leave it unreferenced until SDL is linked.
+target_sources(${KRKRSDL2_NAME} PRIVATE
+    src/core/sound/sdl2/switch/SDL_switchaudio_krkrns.cpp)
+endif()
 target_compile_definitions(${KRKRSDL2_NAME} PUBLIC ${KRKRSDL2_DEFINITIONS})
 target_compile_options(${KRKRSDL2_NAME} PUBLIC $<$<COMPILE_LANGUAGE:C>:${KRKRSDL2_CFLAGS}>)
 target_compile_options(${KRKRSDL2_NAME} PUBLIC $<$<COMPILE_LANGUAGE:CXX>:${KRKRSDL2_CXXFLAGS}>)

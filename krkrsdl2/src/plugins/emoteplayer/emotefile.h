@@ -95,6 +95,7 @@ public:
     uint32_t meshSyncChildMask = 0;
     uint32_t inheritMask = 0x20007FC;
     uint8_t type = 0;
+    uint32_t stencilType = 0;
     bool isParameterize = false;
     int32_t parameterIdx = -1;
     std::string label;

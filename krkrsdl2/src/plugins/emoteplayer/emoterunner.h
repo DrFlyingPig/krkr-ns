@@ -41,6 +41,9 @@ namespace emoteplayer
 
         bool hasStencil = false;
         std::vector<emotenoderef*> layerNode;
+        // Source-texture stencils are nested clips, independent of the
+        // explicit composite group's union of named mask layers.
+        std::vector<emotenoderef*> selfMaskLayers;
 
         // 基础参数
         float originX = 0;
@@ -180,6 +183,7 @@ namespace emoteplayer
         float _zMax = 0.0f;
 
         ~emoteengine();
+        void* acquireMaskScratch(krkrsdl3::iTVPRenderBackend* renderer, int width, int height);
 
         // progress/draw接口(替代_mainMotionRef)
         void progress(float tick, std::vector<emoteRender>& renderList, emotelimit lim);
@@ -211,5 +215,10 @@ namespace emoteplayer
 
         // shapeList(供emotemotionref::contains查询碰撞)
         std::vector<emoterect> shapeList;
+    private:
+        krkrsdl3::iTVPRenderBackend* _maskScratchRenderer = nullptr;
+        void* _maskScratch = nullptr;
+        int _maskScratchWidth = 0;
+        int _maskScratchHeight = 0;
     };
 }

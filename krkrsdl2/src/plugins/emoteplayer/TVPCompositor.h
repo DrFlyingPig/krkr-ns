@@ -12,6 +12,8 @@ class iTVPRenderBackend
 public:
     virtual ~iTVPRenderBackend() = default;
     virtual void* CreateTarget(int width, int height) = 0;
+    // Physical target size can differ from the logical motion canvas.
+    virtual bool GetTargetSize(void* target, int& width, int& height) const { return false; }
     virtual void DestroyTarget(void* target) = 0;
     virtual void SetTarget(void* target) = 0;
     virtual void ClearTarget(bool clearColor) = 0;
