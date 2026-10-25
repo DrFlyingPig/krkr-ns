@@ -419,20 +419,24 @@ void krkrsdl2_prof_accum_layer(unsigned w, unsigned h)
 	g_krkrns_prof.layer_px += (unsigned long long)w * h;
 }
 
+// Completed engine content updates are independent of which hosted window
+// owns the final swap. Resident GPU updates have zero display-upload bytes.
+static tjs_uint64 krkrns_content_frame_counter_value = 0;
 void krkrsdl2_prof_accum_upload(double ms, unsigned bytes)
 {
 	g_krkrns_prof.upload_ms += ms;
 	g_krkrns_prof.upload_bytes += bytes;
 	g_krkrns_prof.update_frames++;
+	++krkrns_content_frame_counter_value;
 }
 
-// Monotonic count of presented frames.  The eval-storm guard in
-// ScriptMgnIntf.cpp uses it to tell a slow synchronous load (no frames, but it
-// finishes) from a runaway loop that keeps running while frames are still
-// being presented.
+// Display submissions include repeats of a resident canvas. Script progress
+// protection separately observes completed content updates, so a static quad
+// does not relax the eval-storm guard's existing limit.
 static tjs_uint64 krkrns_frame_counter_value = 0;
 void krkrsdl2_frame_tick() { krkrns_frame_counter_value++; }
 tjs_uint64 krkrsdl2_frame_counter() { return krkrns_frame_counter_value; }
+tjs_uint64 krkrsdl2_content_frame_counter() { return krkrns_content_frame_counter_value; }
 
 void krkrsdl2_prof_accum_present(double ms)
 {
@@ -1315,6 +1319,7 @@ protected:
 	/* KRKR-ns patch: set by the trace marker, captured at the next present */
 	bool traceCapturePending = false;
 	bool gpuResidentPresentLogged = false;
+	bool cachedFrameReady = false;
 	/* Shadow of the last uploaded surface content. The engine's update_rect
 	   under-reports scene switches, so the upload damage is derived from
 	   actual pixel differences instead of that rect. */
@@ -1528,6 +1533,11 @@ public:
 	static TVPWindowWindow *find_host_for_secondary_window(TVPWindowWindow *self);
 	/* The hosted child that currently owns input (modal), or null. */
 	TVPWindowWindow *hosted_modal_child();
+	TVPWindowWindow *PresentationOwner();
+	bool CanPresentCachedFrame();
+	void DrawHostedLayer(TVPWindowWindow *child, int logicalWidth, int logicalHeight);
+	void DrawHostedPresentation();
+	bool PresentCompletedFrame(bool gpuPresented, bool cachedPresent, bool presentationOwner);
 #endif
 	enum CloseAction
 	{
@@ -2142,11 +2152,106 @@ TVPWindowWindow *TVPWindowWindow::find_host_for_secondary_window(TVPWindowWindow
 
 TVPWindowWindow *TVPWindowWindow::hosted_modal_child()
 {
-	for (TVPWindowWindow *w : krkrsdl2_live_windows)
+	const auto eligible = [this](TVPWindowWindow *w) {
+		return w && w->hostWindow == this && w->in_mode_ &&
+			w->isVisible && !w->isBeingDeleted && w->renderer == this->renderer;
+	};
+	// Nested showModal calls leave the outer dialog's in_mode_ set. The
+	// current window, then the last-created live modal, owns the top layer.
+	if (eligible(_currentWindowWindow)) return _currentWindowWindow;
+	for (auto it = krkrsdl2_live_windows.rbegin(); it != krkrsdl2_live_windows.rend(); ++it)
 	{
-		if (w->hostWindow == this && w->in_mode_) return w;
+		if (eligible(*it)) return *it;
 	}
 	return nullptr;
+}
+
+TVPWindowWindow *TVPWindowWindow::PresentationOwner()
+{
+	TVPWindowWindow *host = this->hostWindow ? this->hostWindow : this;
+	if (!host->window || !host->renderer || !host->isVisible || host->isBeingDeleted)
+		return nullptr;
+	const Uint32 flags = SDL_GetWindowFlags(host->window);
+	if (!(flags & SDL_WINDOW_SHOWN) || (flags & (SDL_WINDOW_HIDDEN | SDL_WINDOW_MINIMIZED)))
+		return nullptr;
+	if (auto *modal = host->hosted_modal_child()) return modal;
+	const auto eligible = [host](TVPWindowWindow *w) {
+		return w && w->hostWindow == host && w->isVisible && !w->isBeingDeleted &&
+			w->renderer == host->renderer;
+	};
+	if (eligible(_currentWindowWindow)) return _currentWindowWindow;
+	for (auto it = krkrsdl2_live_windows.rbegin(); it != krkrsdl2_live_windows.rend(); ++it)
+		if (eligible(*it)) return *it;
+	return host;
+}
+
+bool TVPWindowWindow::CanPresentCachedFrame()
+{
+	// Cocos keeps drawing its resident sprite every display frame even when
+	// KiriKiri did not repaint the layer tree. Reuse that completed texture;
+	// do not manufacture engine damage or read CPU pixels to fill this frame.
+	return cachedFrameReady && renderer && window && surface && texture && bitmapCompletion &&
+		isVisible && !isBeingDeleted && !krkrsdl2_glc_enabled() && PresentationOwner() == this;
+}
+
+void TVPWindowWindow::DrawHostedLayer(TVPWindowWindow *child, int logicalWidth, int logicalHeight)
+{
+	if (!child || !child->isVisible || child->isBeingDeleted ||
+		!child->cachedFrameReady || !child->surface || !child->texture ||
+		child->renderer != this->renderer) return;
+	const int width = child->surface->w, height = child->surface->h;
+	if (width <= 0 || height <= 0) { child->hostDst = SDL_Rect{0, 0, 0, 0}; return; }
+	SDL_Rect destination{(logicalWidth - width) / 2, (logicalHeight - height) / 2, width, height};
+	if (destination.x + width > logicalWidth) destination.x = logicalWidth - width;
+	if (destination.y + height > logicalHeight) destination.y = logicalHeight - height;
+	if (destination.x < 0) destination.x = 0;
+	if (destination.y < 0) destination.y = 0;
+	child->hostDst = destination;
+	SDL_RenderCopy(this->renderer, child->PresentationTexture(), nullptr, &destination);
+}
+
+void TVPWindowWindow::DrawHostedPresentation()
+{
+	int logicalWidth = 0, logicalHeight = 0;
+	SDL_RenderGetLogicalSize(this->renderer, &logicalWidth, &logicalHeight);
+	if (logicalWidth <= 0 || logicalHeight <= 0)
+		SDL_GetWindowSize(this->window, &logicalWidth, &logicalHeight);
+	SDL_RenderClear(this->renderer);
+	if (this->hostWindow->cachedFrameReady && this->hostWindow->texture && this->hostWindow->surface)
+		SDL_RenderCopy(this->renderer, this->hostWindow->PresentationTexture(), nullptr, nullptr);
+	// All hosted windows share the physical host, including nested modals.
+	// Keep outer dialogs below the current owner and perform one final swap.
+	for (TVPWindowWindow *child : krkrsdl2_live_windows)
+		if (child != this && child->hostWindow == this->hostWindow)
+			DrawHostedLayer(child, logicalWidth, logicalHeight);
+	DrawHostedLayer(this, logicalWidth, logicalHeight);
+}
+
+bool TVPWindowWindow::PresentCompletedFrame(bool gpuPresented, bool cachedPresent, bool presentationOwner)
+{
+	if (!gpuPresented && (!presentationOwner || !cachedFrameReady || !texture)) return false;
+	const Uint64 presentStart = SDL_GetPerformanceCounter();
+	// Legacy direct-GL composition already swapped. SDL owns the swap in the
+	// ordinary path, with exactly one owner for the whole hosted-window stack.
+	if (!gpuPresented) {
+		KrkrNSPerfScope perfPresent(KrkrNSPerfOp::Present);
+		if (cachedPresent) {
+			KrkrNSPerfScope perfRepeat(KrkrNSPerfOp::GpuDisplayRepeat);
+			SDL_RenderPresent(this->renderer);
+		} else SDL_RenderPresent(this->renderer);
+	}
+	const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
+	if (g_krkrns_prof.last_pres_ticks) {
+		const double gap = (presentStart - g_krkrns_prof.last_pres_ticks) * 1000.0 / frequency;
+		g_krkrns_prof.pres_gap_ms += gap;
+		if (!g_krkrns_prof.pres_gap_n || gap < g_krkrns_prof.pres_gap_min_ms)
+			g_krkrns_prof.pres_gap_min_ms = gap;
+		if (gap > g_krkrns_prof.pres_gap_max_ms) g_krkrns_prof.pres_gap_max_ms = gap;
+		++g_krkrns_prof.pres_gap_n;
+	}
+	g_krkrns_prof.last_pres_ticks = presentStart;
+	krkrsdl2_prof_accum_present((SDL_GetPerformanceCounter() - presentStart) * 1000.0 / frequency);
+	return true;
 }
 #endif
 
@@ -2972,6 +3077,7 @@ static bool KRKRNS_UploadProbe(SDL_Renderer* renderer)
 #ifdef __SWITCH__
 void TVPWindowWindow::InvalidateFullSurface(bool recreateTexture)
 {
+	this->cachedFrameReady = false;
 	// SDL_RENDER_DEVICE_RESET requires all textures to be recreated, including
 	// hosted windows sharing the same renderer. TickBeat has the creation path.
 	if (recreateTexture && this->texture)
@@ -3275,7 +3381,13 @@ void TVPWindowWindow::TickBeat()
 		}
 	}
 #endif
+#ifdef __SWITCH__
+	const bool presentationOwner = this->PresentationOwner() == this;
+	const bool cachedPresent = !this->needsGraphicUpdate && this->CanPresentCachedFrame();
+	if (this->needsGraphicUpdate || cachedPresent)
+#else
 	if (this->needsGraphicUpdate)
+#endif
 	{
 		if (this->bitmapCompletion)
 		{
@@ -3295,6 +3407,9 @@ void TVPWindowWindow::TickBeat()
 			if (this->renderer)
 			{
 #if defined(KRKRSDL2_ENABLE_ZOOM) || defined(KRKRSDL2_RENDERER_FULL_UPDATES)
+#ifdef __SWITCH__
+				if (presentationOwner)
+#endif
 				SDL_RenderFillRect(this->renderer, nullptr);
 #else
 				SDL_Rect logical_rect;
@@ -3343,7 +3458,11 @@ void TVPWindowWindow::TickBeat()
 					// damage (a static title screen), so the capture deadline is
 					// actually observed.
 					krkrsdl2_maybe_capture_frame(this, this->surface, this->renderer);
-					if (this->surface)
+					if (this->surface
+#ifdef __SWITCH__
+						&& !cachedPresent
+#endif
+					)
 					{
 						static void* lastPresentSurface = (void*)-1;
 						if (lastPresentSurface != (void*)this->surface)
@@ -3569,6 +3688,9 @@ const int sw = this->surface->w;
 							return; // Keep pending damage for the next frame.
 						}
 #ifdef __SWITCH__
+						this->cachedFrameReady = true;
+#endif
+#ifdef __SWITCH__
 						// Record what the GPU now holds. Rows outside `rect`
 						// are unchanged by definition, so only the uploaded
 						// band needs copying.
@@ -3610,6 +3732,10 @@ const int sw = this->surface->w;
 						}
 #endif
 					}
+#ifdef __SWITCH__
+					if (presentationOwner)
+					{
+#endif
 #if defined(KRKRSDL2_ENABLE_ZOOM)
 					SDL_Rect destrect;
 					destrect.x = this->LastSentDrawDeviceDestRect.left;
@@ -3631,54 +3757,7 @@ const int sw = this->surface->w;
 						// frame has to be redrawn here even though it presented
 						// this same frame already.
 						if (this->hostWindow && !gpuPresented)
-						{
-							int lw = 0, lh = 0;
-							SDL_RenderGetLogicalSize(this->renderer, &lw, &lh);
-							if (lw <= 0 || lh <= 0)
-							{
-								SDL_GetWindowSize(this->window, &lw, &lh);
-							}
-							const int qw = this->surface ? this->surface->w : 0;
-							const int qh = this->surface ? this->surface->h : 0;
-							static bool loggedHostedPresent = false;
-							if (!loggedHostedPresent)
-							{
-								loggedHostedPresent = true;
-								KRKRNS_LOG("[win] hosted present window=%p logical=%dx%d quad=%dx%d texture=%p",
-									(void *)this, lw, lh, qw, qh, (void *)this->texture);
-								krkrsdl2_log_flush();
-							}
-							SDL_RenderClear(this->renderer);
-							if (this->hostWindow->texture && this->hostWindow->surface)
-							{
-								SDL_RenderCopy(this->renderer, this->hostWindow->PresentationTexture(), nullptr, nullptr);
-							}
-							if (qw > 0 && qh > 0 && this->texture)
-							{
-								SDL_Rect dst;
-								dst.w = qw;
-								dst.h = qh;
-								// Always center inside the host's paint box.  The
-								// position a KAG dialog sets (0,0 at construction,
-								// and its own with(kag) setPos actually targets the
-								// MAIN window) would park the overlay in the top
-								// left corner; the game's intent -- and what the
-								// desktop window manager ends up doing anyway -- is
-								// a dialog in the middle of the game screen.
-								dst.x = (lw - qw) / 2;
-								dst.y = (lh - qh) / 2;
-								if (dst.x + dst.w > lw) dst.x = lw - dst.w;
-								if (dst.y + dst.h > lh) dst.y = lh - dst.h;
-								if (dst.x < 0) dst.x = 0;
-								if (dst.y < 0) dst.y = 0;
-								this->hostDst = dst;
-								SDL_RenderCopy(this->renderer, PresentationTexture(), nullptr, &dst);
-							}
-							else
-							{
-								this->hostDst = SDL_Rect{0, 0, 0, 0};
-							}
-						}
+							this->DrawHostedPresentation();
 						// The Switch swapchain does not preserve untouched pixels after
 						// Present, so redraw the complete resident texture each time.
 						// (Skipped on GPU-presented frames: the blit already wrote the
@@ -3772,9 +3851,12 @@ const int sw = this->surface->w;
 #else
 						SDL_RenderCopy(this->renderer, PresentationTexture(), &rect, &rect);
 #endif
+#ifdef __SWITCH__
+					}
+#endif
 					}
 				#ifdef __SWITCH__
-					if (this->traceCapturePending && this->renderer)
+					if (this->traceCapturePending && this->renderer && presentationOwner)
 					{
 					// Capture the presented backbuffer: comparing it with the
 					// surface BMP decides whether a defect lives in layer
@@ -3808,35 +3890,12 @@ const int sw = this->surface->w;
 				}
 #endif
 #ifdef __SWITCH__
-				const Uint64 presentStart = SDL_GetPerformanceCounter();
-				{
-					const double pf = (double)SDL_GetPerformanceFrequency();
-					if (g_krkrns_prof.last_pres_ticks)
-					{
-						const double gap = (double)(presentStart - g_krkrns_prof.last_pres_ticks) * 1000.0 / pf;
-						g_krkrns_prof.pres_gap_ms += gap;
-						if (!g_krkrns_prof.pres_gap_n || gap < g_krkrns_prof.pres_gap_min_ms)
-							g_krkrns_prof.pres_gap_min_ms = gap;
-						if (gap > g_krkrns_prof.pres_gap_max_ms)
-							g_krkrns_prof.pres_gap_max_ms = gap;
-						g_krkrns_prof.pres_gap_n++;
-					}
-					g_krkrns_prof.last_pres_ticks = presentStart;
-				}
-#endif
-				// GPU-presented frames were already swapped inside
-				// krkrsdl2_glc_readback (SDL_GL_SwapWindow); presenting an
-				// empty SDL queue again is a no-op at best and a skipped
-				// swap at worst on this driver.
-				if (!gpuPresented)
-				{
+				this->PresentCompletedFrame(gpuPresented, cachedPresent, presentationOwner);
+#else
+				if (!gpuPresented) {
 					KrkrNSPerfScope perfPresent(KrkrNSPerfOp::Present);
 					SDL_RenderPresent(this->renderer);
 				}
-#ifdef __SWITCH__
-				krkrsdl2_prof_accum_present(
-					(SDL_GetPerformanceCounter() - presentStart) * 1000.0 /
-					(double)SDL_GetPerformanceFrequency());
 #endif
 #if !defined(KRKRSDL2_ENABLE_ZOOM) && !defined(KRKRSDL2_RENDERER_FULL_UPDATES) && !defined(__SWITCH__)
 				if (logical_rect.w == rect.w && logical_rect.h == rect.h)

@@ -1849,8 +1849,10 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/eval)
 				static tjs_uint64 frameMark = 0;
 				static bool framesSinceBurst = false;
 				const tjs_uint64 now = TVPGetTickCount();
-				extern tjs_uint64 krkrsdl2_frame_counter();
-				const tjs_uint64 framesNow = krkrsdl2_frame_counter();
+				// Cached display refreshes do not establish new engine drawing
+				// progress and must not change the existing storm threshold.
+				extern tjs_uint64 krkrsdl2_content_frame_counter();
+				const tjs_uint64 framesNow = krkrsdl2_content_frame_counter();
 				if (!stormStart || now - stormStart > 3000)
 				{
 					stormStart = now;
