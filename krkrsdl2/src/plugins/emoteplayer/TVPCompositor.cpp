@@ -3,6 +3,7 @@
 #include "EmoteSWRenderBackend.h"
 #include "EmoteGLRenderBackend.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSResourcePolicy.h"
 
 extern SDL_Renderer* TVPGetPrimarySDLRenderer();
 // Set by SDLApplication.cpp while an engine session is being torn down
@@ -21,6 +22,16 @@ iTVPRenderBackend* TVPGetRenderBackend()
     static EmoteGLRenderBackend gpu;
     static EmoteSWRenderBackend cpu;
     iTVPRenderBackend*& selected = selectedBackend;
+    static bool selectedForSoftware = true;
+    if (!krkrsdl2_engine_teardown_active)
+    {
+        const bool software = krkrsdl2_force_software_composition();
+        // A rebuilt engine may select a different renderer for its next game.
+        // Old object destructors must still use their selected backend during
+        // teardown; reconsider the choice only once that teardown has ended.
+        if (software != selectedForSoftware) selected = nullptr;
+        selectedForSoftware = software;
+    }
     if (!selected)
     {
         // During teardown, E-mote object destructors (~EmotePlayer / ~D3DAdaptor
@@ -56,6 +67,7 @@ iTVPRenderBackend* TVPGetRenderBackend()
             fclose(f);
             wantGl = false;
         }
+        if (krkrsdl2_force_software_composition()) wantGl = false;
 #else
         wantGl = false; // other platforms keep the old opt-in behavior
 #endif

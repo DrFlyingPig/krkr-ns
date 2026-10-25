@@ -547,6 +547,7 @@ void tTVPBitmap::ResetGPUStorageIdentity()
 		GPUStorageSerial = nextSerial.fetch_add(1, std::memory_order_relaxed);
 	CPUVersion = 1;
 	CPUBufferExposed = false;
+	GPUWriteTracked.store(false, std::memory_order_relaxed);
 }
 
 krkrns::BitmapView tTVPBitmap::GetGPUView() const
@@ -555,11 +556,15 @@ krkrns::BitmapView tTVPBitmap::GetGPUView() const
 	if (row0 && Height > 0)
 		row0 += static_cast<std::size_t>(Height - 1) * PitchBytes;
 	return {this, GPUStorageSerial, CPUVersion, row0,
-		Width, Height, PitchStep, static_cast<int>(GetBPP()), CPUBufferExposed};
+		Width, Height, PitchStep, static_cast<int>(GetBPP()), CPUBufferExposed,
+		&GPUWriteTracked};
 }
 
 void tTVPBitmap::SyncForCPURead() const
 {
+	// Most bitmaps remain CPU-owned sources for the renderer. Their reads
+	// need no renderer mutex or hash lookup, just like NX's software textures.
+	if (!GPUWriteTracked.load(std::memory_order_acquire)) return;
 	if (!krkrns::GetBitmapCompositor().SyncCPU(GetGPUView()))
 		TVPThrowExceptionMessage(TJS_W("Cannot synchronize GPU bitmap pixels for CPU access"));
 }
@@ -569,7 +574,10 @@ void tTVPBitmap::BeforeCPUWrite(bool exposeBuffer) const
 	SyncForCPURead();
 	if (exposeBuffer) CPUBufferExposed = true;
 	++CPUVersion;
-	krkrns::GetBitmapCompositor().CPUWritten(GetGPUView());
+	// CPU source caches validate this generation in Source(). Only a storage
+	// that could hold GPU-written pixels needs eager target invalidation.
+	if (GPUWriteTracked.load(std::memory_order_acquire))
+		krkrns::GetBitmapCompositor().CPUWritten(GetGPUView());
 }
 #endif
 

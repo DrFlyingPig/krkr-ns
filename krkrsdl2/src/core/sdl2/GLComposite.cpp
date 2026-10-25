@@ -33,6 +33,7 @@
 #include "KrkrNSPaths.h"
 #include "GLCompositeBridge.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSResourcePolicy.h"
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <SDL_opengles2.h>
@@ -620,6 +621,7 @@ static bool RunProbe()
 
 bool krkrsdl2_glc_enabled()
 {
+    if (krkrsdl2_force_software_composition()) return false;
     // FBO creation happens lazily inside begin_frame on first use.
     if (!gMarkerChecked)
     {

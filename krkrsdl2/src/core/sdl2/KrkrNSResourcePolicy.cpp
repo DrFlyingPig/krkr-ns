@@ -2,12 +2,17 @@
 #include "KrkrNSResourcePolicy.h"
 #ifdef __SWITCH__
 #include "KrkrNSLog.h"
+#include "ReferenceRendererConfig.h"
 #include <switch.h>
+#include <atomic>
 #include <mutex>
 #include <new>
 
 namespace
 {
+std::atomic<bool> softwareComposition{true};
+std::atomic<unsigned> frameRate{60};
+
 struct ResourcePolicy
 {
     std::mutex mutex;
@@ -29,7 +34,8 @@ ResourcePolicy* State() noexcept
 
 bool Apply(ResourcePolicy& state) noexcept
 {
-    const ApmCpuBoostMode mode = state.session && state.gpuContexts == 0
+    const ApmCpuBoostMode mode = state.session &&
+        softwareComposition.load(std::memory_order_acquire) && state.gpuContexts == 0
         ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal;
     if (state.appliedMode == static_cast<int>(mode)) return true;
     if (mode == ApmCpuBoostMode_FastLoad &&
@@ -53,6 +59,43 @@ bool Apply(ResourcePolicy& state) noexcept
 }
 }
 
+bool krkrsdl2_force_software_composition() noexcept
+{
+    return softwareComposition.load(std::memory_order_acquire);
+}
+
+unsigned krkrsdl2_resource_policy_frame_rate() noexcept
+{
+    return frameRate.load(std::memory_order_acquire);
+}
+
+void krkrsdl2_resource_policy_select_renderer(const char* native_game_dir) noexcept
+{
+    // Resolve once per game before begin_session, as NX does before creating
+    // its render manager. Finished SDL texture display remains common to both.
+    softwareComposition.store(true, std::memory_order_release);
+    frameRate.store(60, std::memory_order_release);
+    try {
+        const auto settings = ReadReferenceRendererSettings(native_game_dir);
+        const unsigned selectedRate = settings.fpsLimit > 0
+            ? static_cast<unsigned>(settings.fpsLimit) : 60;
+        frameRate.store(selectedRate, std::memory_order_release);
+        KRKRNS_LOG("[renderer] fps_limit=%u source=%s", selectedRate, settings.fpsSource.c_str());
+        if (settings.renderer == "opengl") {
+            softwareComposition.store(false, std::memory_order_release);
+            KRKRNS_LOG("[renderer] renderer=opengl source=%s; available GPU paths with CPU fallback",
+                settings.rendererSource.c_str());
+        } else if (settings.renderer == "software") {
+            KRKRNS_LOG("[renderer] renderer=software source=%s", settings.rendererSource.c_str());
+        } else {
+            KRKRNS_LOG("[renderer] unsupported renderer=%s source=%s; using software fallback",
+                settings.renderer.c_str(), settings.rendererSource.c_str());
+        }
+    } catch (...) {
+        KRKRNS_LOG("[renderer] cannot read reference renderer settings; using software fallback");
+    }
+}
+
 void krkrsdl2_resource_policy_begin_session() noexcept
 {
     if (auto* state = State()) {
@@ -70,10 +113,12 @@ void krkrsdl2_resource_policy_end_session() noexcept
         state->session = false;
         Apply(*state);
     }
+    softwareComposition.store(true, std::memory_order_release);
 }
 
 bool krkrsdl2_resource_policy_acquire_gpu() noexcept
 {
+    if (krkrsdl2_force_software_composition()) return false;
     if (auto* state = State()) {
         std::lock_guard<std::mutex> lock(state->mutex);
         // This is a real renderer transition, not a per-frame retry. Even

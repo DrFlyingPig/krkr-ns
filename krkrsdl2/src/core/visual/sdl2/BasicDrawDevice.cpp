@@ -17,6 +17,7 @@
 #include "SDLBitmapCompletion.h"
 #ifdef __SWITCH__
 #include "SDLBitmapCompletionSource.h"
+#include "KrkrNSResourcePolicy.h"
 #endif
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
@@ -670,7 +671,8 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::StartBitmapCompletion(iTVPLayerManager
 		}
 	}
 #ifdef __SWITCH__
-	krkrns::GPUCompletionReceiverSlot() = bitmap_completion && Managers.size() == 1;
+	krkrns::GPUCompletionReceiverSlot() = bitmap_completion && Managers.size() == 1 &&
+		!krkrsdl2_force_software_composition();
 #endif
 #if 0
 	EnsureDevice();

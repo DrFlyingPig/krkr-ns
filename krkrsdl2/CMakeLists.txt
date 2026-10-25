@@ -161,6 +161,13 @@ list(APPEND KRKRSDL2COMMON_SRC ${KIRIKIRISDL2_SSE2_SRC})
 list(APPEND KRKRSDL2COMMON_SRC ${KIRIKIRISDL2_AVX2_SRC})
 list(APPEND KRKRSDL2COMMON_INCLUDES ${KIRIKIRISDL2_INCLUDES})
 
+if(NINTENDO_SWITCH)
+# Use the same portlibs PNG implementation as Kirikiroid2-NX, including its
+# native ARM row filters.  Keep the bundled implementation for other targets.
+list(FILTER KRKRSDL2COMMON_SRC EXCLUDE REGEX "^external/krkrz/external/lpng/")
+list(REMOVE_ITEM KRKRSDL2COMMON_INCLUDES external/krkrz/external/lpng)
+endif()
+
 set(KRKRSDL2OPUS_SRC "")
 list(APPEND KRKRSDL2OPUS_SRC ${KRKRSDL2COMMON_SRC})
 list(FILTER KRKRSDL2OPUS_SRC INCLUDE REGEX "^external/krkrz/external/opus")
@@ -263,8 +270,10 @@ list(APPEND KRKRSDL2_DEFINITIONS
 	HAVE_LRINTF
 	HAVE_LRINT
 	FLOAT_APPROX
-	PNG_ARM_NEON_OPT=0
 )
+if(NOT NINTENDO_SWITCH)
+list(APPEND KRKRSDL2_DEFINITIONS PNG_ARM_NEON_OPT=0)
+endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
 list(APPEND KRKRSDL2_LDFLAGS
@@ -627,10 +636,13 @@ elseif(NINTENDO_SWITCH)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 pkg_check_modules(VORBIS_STACK REQUIRED IMPORTED_TARGET vorbisfile vorbis ogg)
+pkg_check_modules(SWITCH_PNG REQUIRED IMPORTED_TARGET libpng16)
 
 # KRKR-ns built-ins: homebrew cannot load the Win32 psbfile plug-in, while
 # modern games commonly use PSB/PIMG UI archives containing PNG/TLG/WebP.
 list(APPEND KRKRSDL2COMMON_SRC
+external/tinyxml2/tinyxml2.cpp
+src/core/sdl2/ReferenceRendererConfig.cpp
 src/core/base/sdl2/XP3ExtractionFilter.cpp
 external/krkrz/visual/MenuItemIntf.cpp
 external/krkrz/visual/MenuItemImpl.cpp
@@ -708,6 +720,7 @@ src/core/sound/sdl2/VorbisWaveDecoder.cpp
 src/core/sound/sdl2/FFWaveDecoder.cpp
 )
 list(APPEND KRKRSDL2COMMON_INCLUDES
+external/tinyxml2
 src/plugins
 external/plutovg/include
 src/plugins/psbfile
@@ -753,6 +766,7 @@ list(APPEND KRKRSDL2_LDFLAGS
 list(APPEND KRKRSDL2_LIBS
 	PkgConfig::SDL2
 	PkgConfig::VORBIS_STACK
+	PkgConfig::SWITCH_PNG
 	webp
 )
 

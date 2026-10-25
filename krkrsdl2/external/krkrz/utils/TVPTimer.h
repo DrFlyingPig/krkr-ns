@@ -2,7 +2,11 @@
 #ifndef __TVP_TIMER_H__
 #define __TVP_TIMER_H__
 
+#ifdef __SWITCH__
+#include <memory>
+#else
 #include "TimerThread.h"
+#endif
 
 class TVPTimerEventIntarface {
 public:
@@ -19,6 +23,32 @@ public:
 	void Handle() override { (owner_->*handler_)(); }
 };
 
+#ifdef __SWITCH__
+// Internal engine timers follow the reference's main-frame progression. Script
+// Timer objects retain tTVPTimerBase and its independent pending-event thread.
+// Construction, mutation, destruction and ProgressAllTimer run on the main thread.
+class TVPTimer {
+	struct State;
+	struct Scheduler;
+	std::shared_ptr<State> state_;
+	static Scheduler& GetScheduler();
+	void SetHandler(std::shared_ptr<TVPTimerEventIntarface> handler);
+public:
+	TVPTimer();
+	virtual ~TVPTimer() noexcept(false);
+	TVPTimer(const TVPTimer&) = delete;
+	TVPTimer& operator=(const TVPTimer&) = delete;
+	template<typename T>
+	void SetOnTimerHandler(T* owner, void (T::*handler)()) {
+		SetHandler(std::make_shared<TVPTimerEvent<T>>(owner, handler));
+	}
+	virtual void SetInterval(tjs_uint64 milliseconds);
+	void SetEnabled(bool enabled);
+	bool GetEnabled() const;
+	bool GetEnable() const { return GetEnabled(); }
+	static void ProgressAllTimer();
+};
+#else
 class TVPTimer : public tTVPTimerBase {
 	TVPTimerEventIntarface* event_;
 
@@ -51,6 +81,7 @@ public:
 
 	void SetInterval(tjs_uint64 n) override;
 };
+#endif
 
 
 #endif // __TVP_TIMER_H__

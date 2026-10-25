@@ -45,6 +45,8 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 >
 > **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["Game01"] = "中文显示名称";`，只改变游戏库中的名称。
 
+渲染配置沿用 Kirikiroid2 的 XML：优先读取游戏目录的 `Kirikiroid2Preference.xml`，未设置的项再读取 `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`。`renderer` 默认 `software`，`fps_limit` 默认 `60`；选择 `opengl` 时启用当前支持的 GPU 合成，未支持的绘制仍由 CPU 处理。配置示例：`<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`。
+
 > 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份。
 >
 > 自行构建需准备 devkitPro / devkitA64、Switch 依赖库、CMake/Ninja 和 FFmpeg，并按本地环境配置脚本中的工具路径。FFmpeg 构建脚本见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)；运行 `build_nro.sh` 生成 `build-switch/krkrsdl2.nro`，加 `--no-emu-copy` 可跳过模拟器复制。
@@ -87,9 +89,10 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 - 普通内存整理时复用资源索引，减少切换画面时的重复扫描；散装资源目录变化、移除搜索路径及内存不足时会重新建立索引。
 - 支持后台图片预读，缓存整理或退出游戏时取消过期的预读任务。
 - 减少大面积 E-mote 动画的重复计算；Switch 按参考项目的帧节奏和调用线程顺序执行软件绘图。
-- 软件绘制期间使用系统 CPU 加速模式，启用 GPU 渲染时恢复常规性能模式。
-- 驱动支持时，普通图层按绘制顺序直接合成到常驻 GPU 画布，复用纹理并批量提交；画面未变化时复用已有纹理持续呈现。分组透明度、转场及特殊混合方式保留原有处理。
-- E-mote 复用 GPU 纹理，按画面变化区域回读像素，减少 GPU 与 CPU 之间的数据交换；驱动能力验证失败时自动回退原有回读路径。
+- 软件渲染会话请求系统 CPU 加速模式，OpenGL 会话使用常规性能模式；内部维护定时器随主循环推进，完整帧处理后再按配置帧率等待。
+- 纯 CPU 位图访问跳过 GPU 同步锁；Switch 图片解码使用带原生 ARM NEON 支持的 libpng。
+- OpenGL 模式下，驱动支持时，普通图层按绘制顺序直接合成到常驻 GPU 画布，复用纹理并批量提交；分组透明度、转场及特殊混合方式保留原有处理。两种渲染模式都在画面未变化时复用已有纹理持续呈现。
+- OpenGL 模式的 E-mote 复用 GPU 纹理，按画面变化区域回读像素，减少 GPU 与 CPU 之间的数据交换；驱动能力验证失败时自动回退原有回读路径。
 - 检查图片读取和解码错误，无法预览的图片会显示提示，也可改用自定义图片。
 - 修复部分影片播放中的音频断流，完善片尾音频处理和播放资源释放。
 - 修复 Switch 音频缓冲等待停滞导致的部分 OP 播放卡住。
@@ -148,7 +151,7 @@ KRKR-ns/
 
 ## 📄 许可
 
-本项目自身代码沿用 [krkrsdl2 的 MIT 许可](LICENSE)。引用的上游与第三方组件（krkrz、FAudio、SDL2、FFmpeg、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留原始许可证与归属，见组件目录内的 LICENSE/COPYING 文件。
+本项目自身代码沿用 [krkrsdl2 的 MIT 许可](LICENSE)。引用的上游与第三方组件（krkrz、FAudio、SDL2、FFmpeg、simde、zlib、FreeType、libjpeg-turbo、libpng、libogg/libvorbis、libopus 等）各自保留原始许可证与归属，见组件目录内的 LICENSE/COPYING 文件；TinyXML2 保留其源码头部的 zlib 许可。
 
 E-mote、AlphaMovie 与 LayerExRaster 的移植来源许可分别见 [E-mote 许可](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt)、[AlphaMovie 许可](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3) 和 [LayerExRaster 许可](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3)；FFmpeg 的源码版本与构建选项见 [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh)。
 

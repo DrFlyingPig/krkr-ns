@@ -54,6 +54,7 @@
 #ifdef __SWITCH__
 // KRKR-ns patch: declared in SDLApplication.cpp
 extern void switch_game_mount();
+#include "KrkrNSResourcePolicy.h"
 #endif
 #include "EventIntf.h"
 #include "StorageIntf.h"
@@ -882,6 +883,11 @@ void tTVPApplication::Run() {
 	{
 		return;
 	}
+#ifdef __SWITCH__
+	// Reference ProcessMessages advances internal engine timers after native
+	// callbacks. Script Timer pending events keep their existing delivery path.
+	TVPTimer::ProgressAllTimer();
+#endif
 	const Uint64 prof_t1 = SDL_GetPerformanceCounter();
 	KrkrNSVMProfDispatchScope vmDispatch;
 	KrkrNSPerfScope perfDispatch(KrkrNSPerfOp::Dispatch);
@@ -900,6 +906,18 @@ void tTVPApplication::Run() {
 		tTJSNI_Window *win = TVPGetWindowListAt(i);
 		win->TickBeat();
 	}
+#ifdef __SWITCH__
+	// The reference runs watchdog maintenance after event delivery and window
+	// ticks on this thread, outside the script timer's producer lock.
+	if (TVPSystemControl) TVPSystemControl->SystemWatchTimerTimer();
+#endif
+#if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
+	// Cocos budgets its complete update, including ordinary log writes,
+	// before sleeping. Draining after Run() would add disk work after this
+	// frame's remaining-time wait. Explicit lifecycle fsyncs stay unchanged.
+	KRKRNS_STAGE("main: log drain");
+	krkrsdl2_log_poll();
+#endif
 	const Uint64 prof_t3 = SDL_GetPerformanceCounter();
 	krkrsdl2_vmprof_report();
 #ifdef __SWITCH__
@@ -939,7 +957,7 @@ void tTVPApplication::Run() {
 		krkrsdl2_heartbeat_main_progress();
 		const Uint64 waitStart = SDL_GetPerformanceCounter();
 		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
-		const double remainingSeconds = 1.0 / 60.0 -
+		const double remainingSeconds = 1.0 / krkrsdl2_resource_policy_frame_rate() -
 			static_cast<double>(waitStart - prof_t0) / frequency;
 		if (remainingSeconds > 0.0)
 		{

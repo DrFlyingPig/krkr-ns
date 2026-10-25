@@ -64,9 +64,13 @@ tTVPSystemControl::tTVPSystemControl() : EventEnable(true) {
 
 	TVPSystemControlAlive = true;
 
+#ifndef __SWITCH__
 	SystemWatchTimer.SetOnTimerHandler( this, &tTVPSystemControl::SystemWatchTimerTimer );
 	SystemWatchTimer.SetInterval(50);
 	SystemWatchTimer.SetEnabled( true );
+#endif
+	// Switch follows the reference: Run invokes maintenance once after the
+	// frame's event delivery and window ticks, outside the script-Timer lock.
 }
 void tTVPSystemControl::InvokeEvents() {
 	CallDeliverAllEventsOnIdle();

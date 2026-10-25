@@ -2,6 +2,7 @@
 #pragma once
 #include <SDL.h>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <mutex>
 
@@ -17,6 +18,9 @@ struct BitmapView
     std::uint8_t* row0 = nullptr;
     int width = 0, height = 0, pitch = 0, bpp = 32;
     bool volatileCPU = false;
+    // Optional allocation-owned latch. Only registered GPU write targets
+    // need CPU read synchronization; cached CPU source textures do not.
+    std::atomic<bool>* gpuWriteTracked = nullptr;
 };
 
 enum class BitmapBlend { Copy, Alpha, AddAlpha };

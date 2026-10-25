@@ -17,6 +17,7 @@
 #include "BitmapInfomation.h"
 #ifdef __SWITCH__
 #include <cstdint>
+#include <atomic>
 namespace krkrns { struct BitmapView; }
 #endif
 
@@ -55,6 +56,7 @@ private:
 	std::uint64_t GPUStorageSerial = 0;
 	mutable std::uint64_t CPUVersion = 1;
 	mutable bool CPUBufferExposed = false;
+	mutable std::atomic<bool> GPUWriteTracked{false};
 	void ResetGPUStorageIdentity();
 	void SyncForCPURead() const;
 	void BeforeCPUWrite(bool exposeBuffer = false) const;

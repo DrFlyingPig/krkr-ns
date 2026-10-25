@@ -5742,11 +5742,6 @@ static bool process_events()
 	}
 	TVP_CATCH_AND_SHOW_SCRIPT_EXCEPTION(TJS_W("SDL event processing"));
 
-#if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
-	// Write-only drain: explicit lifecycle flushes retain their fsync semantics.
-	krkrsdl2_log_poll();
-#endif
-
 #if !defined(__EMSCRIPTEN__) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))
 	return true;
 #endif
@@ -6404,6 +6399,7 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));
 
 	krkrsdl2_game_mode = true;
+	krkrsdl2_resource_policy_select_renderer(native_game_dir.c_str());
 	krkrsdl2_resource_policy_begin_session();
 	krkrsdl2_game_had_window = false; // a window close before the game's own
 	                                  // window exists is not a quit

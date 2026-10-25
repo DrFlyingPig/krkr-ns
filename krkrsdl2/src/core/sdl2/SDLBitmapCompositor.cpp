@@ -647,6 +647,8 @@ bool SDLBitmapCompositor::SetOpaqueTarget(const BitmapView& view)
         auto* entry = impl_->Get(view);
         if (!entry) return false;
         entry->opaqueTarget = true;
+        if (view.gpuWriteTracked)
+            view.gpuWriteTracked->store(true, std::memory_order_release);
         return true;
     } catch (...) { return false; }
 }

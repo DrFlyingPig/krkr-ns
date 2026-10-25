@@ -45,6 +45,8 @@ The built-in light-themed library supports controller and touch input. Each game
 >
 > **Display names:** add `gameAliases["Game01"] = "中文显示名称";` to `sdmc:/switch/KRKR-ns/Names.tjs` to change a library label without changing the directory name.
 
+Renderer settings use Kirikiroid2 XML: values in the game's `Kirikiroid2Preference.xml` take priority over `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`. The defaults are `renderer=software` and `fps_limit=60`. Selecting `opengl` enables the GPU composition paths currently supported, with CPU handling for other drawing operations. Example: `<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`.
+
 Diagnostic logs are stored in `sdmc:/switch/KRKR-ns/log/`, with the three most recent logs kept automatically.
 
 To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/Ninja, and FFmpeg, then configure the tool paths in the build scripts. The FFmpeg build script is [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh). Run `build_nro.sh` to create `build-switch/krkrsdl2.nro`; add `--no-emu-copy` to skip copying it to the emulator.
@@ -84,7 +86,11 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 **Performance and stability**
 
 - Caches displayed text, images, and game resources to reduce repeated reads and drawing during library and menu use.
-- Reduces repeated work for large E-mote animations and parallelizes parts of transitions, falling back to synchronous drawing when thread resources are unavailable.
+- Reduces repeated work for large E-mote animations and follows the reference's frame cadence and calling-thread order for Switch software drawing.
+- Requests system CPU boost during software-rendered game sessions and normal performance mode for OpenGL sessions. Internal maintenance timers advance on the main loop, with the complete frame budgeted before waiting for the configured frame rate.
+- Skips GPU synchronization locks for CPU-only bitmap access and uses libpng with native ARM NEON support on Switch.
+- In OpenGL mode, supported ordinary layers compose directly into a persistent GPU canvas with texture reuse and batched submission. Group opacity, transitions, and special blends retain their existing handling. Both modes continue presenting the cached texture when the image has not changed.
+- E-mote in OpenGL mode reuses GPU textures and reads back changed regions, retaining the existing readback fallback when driver checks fail.
 - Reports image loading and decoding errors, with a custom-artwork alternative for images that cannot be previewed.
 - Fixes audio underruns in some video playback cases and improves end-of-video audio handling and resource cleanup.
 - Fixes stalled Switch audio-buffer waits that could freeze some opening movies.
@@ -144,7 +150,7 @@ KRKR-ns/
 
 ## 📄 License
 
-The project's own code is released under the [MIT license used by krkrsdl2](LICENSE). Upstream and third-party components, including krkrz, FAudio, SDL2, FFmpeg, simde, zlib, FreeType, libjpeg-turbo, libpng, libogg/libvorbis, and libopus, retain their original licenses and notices in their component directories.
+The project's own code is released under the [MIT license used by krkrsdl2](LICENSE). Upstream and third-party components, including krkrz, FAudio, SDL2, FFmpeg, simde, zlib, FreeType, libjpeg-turbo, libpng, libogg/libvorbis, and libopus, retain their original licenses and notices in their component directories. TinyXML2 retains the zlib license in its source headers.
 
 Licensing for the E-mote, AlphaMovie, and LayerExRaster ports is documented in [E-mote license](krkrsdl2/src/plugins/emoteplayer/UPSTREAM-LICENSE.txt), [AlphaMovie license](krkrsdl2/src/plugins/alphamovie/LICENSE.krkrsdl3), and [LayerExRaster license](krkrsdl2/src/plugins/layerexraster/LICENSE.krkrsdl3). Archive support and its dependencies retain the notices provided with their source directories. FFmpeg source versions and build options are documented in [build_ffmpeg_switch.sh](tools/build_ffmpeg_switch.sh).
 
