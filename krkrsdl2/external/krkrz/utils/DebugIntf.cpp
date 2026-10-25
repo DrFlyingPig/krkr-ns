@@ -463,7 +463,10 @@ void TVPAddLog(const ttstr &line, bool appendtoimportant)
 #ifdef __SWITCH__
 	// KRKR-ns patch: mirror engine log lines to the SD-card debug log
 	{
-		krkrsdl2_logf_impl("%s", line.AsNarrowStdString().c_str());
+		if (appendtoimportant)
+			KRKRNS_LOG("%s", line.AsNarrowStdString().c_str());
+		else
+			KRKRNS_LOG_GAME("%s", line.AsNarrowStdString().c_str());
 	}
 #endif
 }

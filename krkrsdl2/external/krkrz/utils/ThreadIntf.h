@@ -68,6 +68,12 @@ private:
 	bool ThreadStarting;
 
 #ifdef KRKRZ_USE_SDL_THREADS
+	bool ThreadActive;
+	bool PriorityConfigured;
+#ifdef __SWITCH__
+	Uint32 NativeThreadHandle;
+#endif
+	bool ApplyPriority(SDL_ThreadPriority priority);
 	static int StartProc(void * arg);
 #else
 	void StartProc();
@@ -87,7 +93,7 @@ protected:
 public:
 	void StartTread();
 #ifdef KRKRZ_USE_SDL_THREADS
-	void WaitFor() { if (Thread) SDL_WaitThread(Thread, nullptr); Thread = nullptr; }
+	void WaitFor();
 #else
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	void WaitFor() {}

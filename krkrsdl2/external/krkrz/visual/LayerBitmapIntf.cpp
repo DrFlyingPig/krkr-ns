@@ -25,6 +25,7 @@
 #include "tjsCommHead.h"
 #include "GLCompositeBridge.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSPerf.h"
 #ifdef __SWITCH__
 #include <SDL_timer.h>
 #endif
@@ -722,10 +723,9 @@ void tTVPBaseBitmap::PartialFillMask(const PartialFillMaskParam *param)
 bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tjs_int plane)
 {
+	KrkrNSPerfScope perfCopy(KrkrNSPerfOp::BitmapCopy);
 #ifdef __SWITCH__
-	// KRKR-ns profiler: plain (unblended) copies are the other half of the
-	// layer-tree compose work; counted with method 7 so the [prof] blt line
-	// separates blends from copies.  See Blt() above for the timer rationale.
+	// Copies have their own category; method 7 is bmDodge, not CopyRect.
 	struct ScopedCopyProf
 	{
 		Uint64 start;
@@ -734,13 +734,12 @@ bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		ScopedCopyProf(const void* dest, const tTVPRect& r)
 			: start(SDL_GetPerformanceCounter()),
 			  composeDest(krkrsdl2_glc_is_compose_dest(dest)),
-			  px((unsigned)((r.right - r.left > 0 && r.bottom - r.top > 0)
-				? (r.right - r.left) * (r.bottom - r.top) : 0)) {}
+			  px(0) {}
 		~ScopedCopyProf()
 		{
 			const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
 				(double)SDL_GetPerformanceFrequency();
-			krkrsdl2_prof_blt(composeDest ? 1 : 0, 7, ms, px);
+			krkrsdl2_prof_blt(composeDest ? 1 : 0, -1, ms, px);
 		}
 	} copyProf(this, refrect);
 	(void)copyProf;
@@ -829,6 +828,9 @@ bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 
 
         // transfer
+#ifdef __SWITCH__
+	copyProf.px = static_cast<unsigned>(refrect.get_width()) * refrect.get_height();
+#endif
         tjs_uint8 *dest = (tjs_uint8*)GetScanLineForWrite(0);
         const tjs_uint8 *src = (const tjs_uint8*)ref->GetScanLine(0);
         tjs_int dpitch = GetPitchBytes();
@@ -881,6 +883,8 @@ void TJS_USERENTRY tTVPBaseBitmap::PartialCopyRectEntry(void *v)
 
 void tTVPBaseBitmap::PartialCopyRect(const PartialCopyRectParam *param)
 {
+	KrkrNSPerfScope perfPixels(KrkrNSPerfOp::CopyPixels,
+		static_cast<std::uint64_t>(param->w) * param->h * (Is32BPP() ? 4 : 1));
 	// transfer
 	tjs_int pixelsize = (Is32BPP()?sizeof(tjs_uint32):sizeof(tjs_uint8));
 	tjs_int dpitch = param->dpitch;
@@ -1194,6 +1198,7 @@ bool tTVPBaseBitmap::Copy9Patch( const tTVPBaseBitmap *ref, tTVPRect& margin )
 bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		tTVPRect refrect, tTVPBBBltMethod method, tjs_int opa, bool hda)
 {
+	KrkrNSPerfScope perfBlt(KrkrNSPerfOp::BitmapBlt);
 #ifdef __SWITCH__
 	// KRKR-ns profiler: Blt is the layer-tree blend primitive; time it and
 	// split by destination (the compose buffer = what GPU compositing takes
@@ -1204,13 +1209,14 @@ bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 		bool composeDest;
 		int method;
 		unsigned px;
+		bool enabled = true;
 		ScopedBltProf(const void* dest, tjs_int m, const tTVPRect& r)
 			: start(SDL_GetPerformanceCounter()),
 			  composeDest(krkrsdl2_glc_is_compose_dest(dest)), method(m),
-			  px((unsigned)((r.right - r.left > 0 && r.bottom - r.top > 0)
-				? (r.right - r.left) * (r.bottom - r.top) : 0)) {}
+			  px(0) {}
 		~ScopedBltProf()
 		{
+			if (!enabled) return;
 			const double ms = (double)(SDL_GetPerformanceCounter() - start) * 1000.0 /
 				(double)SDL_GetPerformanceFrequency();
 			krkrsdl2_prof_blt(composeDest ? 1 : 0, method, ms, px);
@@ -1234,6 +1240,9 @@ bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 
 	if(opa == 255 && method == bmCopy && !hda)
 	{
+#ifdef __SWITCH__
+		bltProf.enabled = false;
+#endif
 		return CopyRect(x, y, ref, refrect);
 	}
 
@@ -1299,6 +1308,10 @@ bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 
 	if(refrect.top >= refrect.bottom) return false; // not drawable
 
+#ifdef __SWITCH__
+	bltProf.px = static_cast<unsigned>(refrect.get_width()) * refrect.get_height();
+#endif
+
         tjs_uint8 *dest = (tjs_uint8*)GetScanLineForWrite(0);
         const tjs_uint8 *src = (const tjs_uint8*)ref->GetScanLine(0);
         tjs_int dpitch = GetPitchBytes();
@@ -1350,6 +1363,8 @@ void TJS_USERENTRY tTVPBaseBitmap::PartialBltEntry(void *v)
 
 void tTVPBaseBitmap::PartialBlt(const PartialBltParam *param)
 {
+	KrkrNSPerfScope perfPixels(KrkrNSPerfOp::BlendPixels,
+		static_cast<std::uint64_t>(param->w) * param->h * 4);
   tjs_uint8 *dest;
   const tjs_uint8 *src;
   tjs_int dpitch, dx, dy, w, h, spitch, sx, sy;
@@ -1448,8 +1463,14 @@ void tTVPBaseBitmap::PartialBlt(const PartialBltParam *param)
 
 	case bmAlpha:
 		// alpha blending, ignoring destination alpha
+	{
+		KrkrNSPerfScope perfAlpha(opa == 255
+			? (hda ? KrkrNSPerfOp::AlphaHdaPixels : KrkrNSPerfOp::AlphaPixels)
+			: (hda ? KrkrNSPerfOp::AlphaHdaOpacityPixels : KrkrNSPerfOp::AlphaOpacityPixels),
+			static_cast<std::uint64_t>(w) * h * 4);
 		TVP_BLEND_4(TVPAlphaBlend);
 		break;
+	}
 
 	case bmAlphaOnAlpha:
 		// alpha blending, with consideration of destination alpha
@@ -2894,6 +2915,7 @@ int tTVPBaseBitmap::InternalAffineBlt(tTVPRect destrect, const tTVPBaseBitmap *r
 			tTVPRect * updaterect,
 			bool hda, tTVPBBStretchType mode, bool clear, tjs_uint32 clearcolor)
 {
+	KrkrNSPerfScope perfAffine(KrkrNSPerfOp::BitmapAffine);
 	// unlike other drawing methods, 'destrect' is the clip rectangle of the
 	// destination bitmap.
 	// affine transformation coordinates are to be applied on zero-offset
@@ -3210,6 +3232,7 @@ void TJS_USERENTRY tTVPBaseBitmap::PartialAffineBltEntry(void *v)
 
 void tTVPBaseBitmap::PartialAffineBlt(PartialAffineBltParam *param)
 {
+  KrkrNSPerfScope perfAffineRaster(KrkrNSPerfOp::BitmapAffineRaster);
   tjs_uint8 *dest = param->dest;
   const tjs_int destpitch = param->destpitch;
   tjs_int yc = param->yc;

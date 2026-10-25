@@ -12,6 +12,17 @@
 #include "blend_ps_functor_sse2.h"
 #include "interpolation_functor_sse2.h"
 
+#ifdef __SWITCH__
+#include "blend_function_neon.h"
+#ifdef KRKRNS_ALPHA_HOT_NEON
+#include "alpha_destination_neon.h"
+#endif
+#include "KrkrNSLog.h"
+#ifdef KRKRNS_INTERPOLATION_NEON
+#include "interpolation_neon.h"
+#endif
+#endif
+
 
 extern "C" {
 extern tjs_uint32 TVPCPUType;
@@ -877,13 +888,31 @@ static void TVP##NAME##_HDA_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs
 //DEFINE_BLEND_FUNCTION_MIN_VARIATION( AlphaBlend, alpha_blend )
 // AlphaBlendはソースが完全透明/不透明で分岐する特殊版を使うので、個別に書く
 static void TVPAlphaBlend_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len ) {
+#if defined(__SWITCH__) && !defined(KRKRNS_ALPHA_LEGACY)
+	if (len >= 16) {
+		TVPAlphaBlendNEON<false, false, true>(dest, src, len, 255, sse2_alpha_blend_functor());
+		return;
+	}
+#endif
 	copy_src_branch_func_sse2<sse2_alpha_blend_functor>( dest, src, len );
 }
 static void TVPAlphaBlend_HDA_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len ) {
+#if defined(__SWITCH__) && !defined(KRKRNS_ALPHA_LEGACY)
+	if (len >= 16) {
+		TVPAlphaBlendNEON<true, false, false>(dest, src, len, 255, sse2_alpha_blend_hda_functor());
+		return;
+	}
+#endif
 	copy_func_sse2<sse2_alpha_blend_hda_functor>( dest, src, len );
 }
 static void TVPAlphaBlend_o_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len, tjs_int opa ) {
 	sse2_alpha_blend_o_functor func(opa);
+#if defined(__SWITCH__) && !defined(KRKRNS_ALPHA_LEGACY)
+	if (len >= 16 && opa >= 0 && opa <= 255) {
+		TVPAlphaBlendNEON<false, true, false>(dest, src, len, opa, func);
+		return;
+	}
+#endif
 	blend_func_sse2( dest, src, len, func );
 }
 static void TVPAlphaBlend_HDA_o_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len, tjs_int opa ) {
@@ -891,8 +920,24 @@ static void TVPAlphaBlend_HDA_o_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src,
 	blend_func_sse2( dest, src, len, func );
 }
 static void TVPAlphaBlend_d_sse2_c( tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len ) {
+#if defined(__SWITCH__) && defined(KRKRNS_ALPHA_HOT_NEON)
+	if (len >= 16) {
+		TVPAlphaBlendDestinationNEON<false>(dest, src, len, 255, sse2_alpha_blend_d_functor());
+		return;
+	}
+#endif
 	copy_src_branch_func_sse2<sse2_alpha_blend_d_functor>( dest, src, len );
 }
+#if defined(__SWITCH__) && defined(KRKRNS_ALPHA_HOT_NEON)
+static void TVPAlphaBlend_HDA_o_neon_c(tjs_uint32* dest, const tjs_uint32* src,
+                                     tjs_int len, tjs_int opa) {
+	TVPAlphaBlendHDAOpacityNEON(dest, src, len, opa);
+}
+static void TVPAlphaBlend_do_neon_c(tjs_uint32* dest, const tjs_uint32* src,
+                                  tjs_int len, tjs_int opa) {
+	TVPAlphaBlendDoNEON(dest, src, len, opa);
+}
+#endif
 
 static void TVPConstAlphaBlend_SD_sse2_c(tjs_uint32 *dest, const tjs_uint32 *src1, const tjs_uint32 *src2, tjs_int len, tjs_int opa){
 	sse2_const_alpha_blend_functor func(opa);
@@ -1307,9 +1352,20 @@ void TVPGL_SSE2_Init() {
 		TVPAlphaBlend_o =  TVPAlphaBlend_o_sse2_c;
 		TVPAlphaBlend_HDA =  TVPAlphaBlend_HDA_sse2_c;
 		TVPAlphaBlend_d =  TVPAlphaBlend_d_sse2_c;
+#ifdef __SWITCH__
+#ifndef KRKRNS_ALPHA_LEGACY
+		KRKRNS_LOG("[render] native AArch64 NEON AlphaBlend/AlphaBlend_HDA/AlphaBlend_o spans active");
+#else
+		KRKRNS_LOG("[render] legacy alpha loops (A/B build)");
+#endif
+#endif
 		// TVPAlphaBlend_HDA_o
 		// TVPAlphaBlend_a
-		// TVPAlphaBlend_do
+#if defined(__SWITCH__) && defined(KRKRNS_ALPHA_HOT_NEON)
+		TVPAlphaBlend_do = TVPAlphaBlend_do_neon_c;
+		TVPAlphaBlend_HDA_o = TVPAlphaBlend_HDA_o_neon_c;
+		KRKRNS_LOG("[render] native AArch64 NEON HDA-opacity/destination-alpha spans active");
+#endif
 		// TVPAlphaBlend_ao
 		TVPConstAlphaBlend =  TVPConstAlphaBlend_sse2_c;
 		TVPConstAlphaBlend_HDA = TVPConstAlphaBlend_HDA_sse2_c;
@@ -1497,6 +1553,10 @@ void TVPGL_SSE2_Init() {
 		TVPInterpStretchAdditiveAlphaBlend_o = TVPInterpStretchAdditiveAlphaBlend_o_sse2_c;
 		TVPInterpStretchConstAlphaBlend = TVPInterpStretchConstAlphaBlend_sse2_c;
 #endif
+#if defined(__SWITCH__) && defined(KRKRNS_INTERPOLATION_NEON)
+		TVPInterpStretchCopy = TVPInterpStretchCopyNEON;
+		KRKRNS_LOG("[render] native AArch64 NEON bilinear StretchCopy/LinTransCopy active");
+#endif
 		// TVPFastLinearInterpH2F	// 使われなくなっているので未実装
 		// TVPFastLinearInterpH2B	// 使われなくなっているので未実装
 		// TVPFastLinearInterpV2	// 使われなくなっているので未実装
@@ -1525,6 +1585,9 @@ void TVPGL_SSE2_Init() {
 		// FIXME: These functions cause data abort on ARM
 		TVPInterpLinTransCopy = TVPInterpLinTransCopy_sse2_c;
 		TVPInterpLinTransConstAlphaBlend = TVPInterpLinTransConstAlphaBlend_sse2_c;
+#endif
+#if defined(__SWITCH__) && defined(KRKRNS_INTERPOLATION_NEON)
+		TVPInterpLinTransCopy = TVPInterpLinTransCopyNEON;
 #endif
 
 		// Box Blur ( TODO 実環境で要テスト)

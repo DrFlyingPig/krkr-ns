@@ -22,6 +22,8 @@ void krkrsdl2_vmprof_leave(KrkrNSVMProfScope *) noexcept;
 void krkrsdl2_vmprof_begin_dispatch() noexcept;
 void krkrsdl2_vmprof_end_dispatch() noexcept;
 void krkrsdl2_vmprof_report() noexcept;
+bool krkrsdl2_vmprof_begin_external() noexcept;
+void krkrsdl2_vmprof_end_external() noexcept;
 bool krkrsdl2_vmprof_native_begin(std::uint64_t &) noexcept;
 void krkrsdl2_vmprof_native_end(const char *, std::uint64_t) noexcept;
 
@@ -142,6 +144,22 @@ public:
     }
 };
 
+// A rendering callback may run after the outer dispatch capture has ended.
+// Nested callbacks mark the complete dispatch as containing onPaint work;
+// they participate in its existing capture without owning it.
+class KrkrNSVMProfExternalScope
+{
+    bool owned_;
+public:
+    KrkrNSVMProfExternalScope() noexcept : owned_(krkrsdl2_vmprof_begin_external()) {}
+    KrkrNSVMProfExternalScope(const KrkrNSVMProfExternalScope &) = delete;
+    KrkrNSVMProfExternalScope &operator=(const KrkrNSVMProfExternalScope &) = delete;
+    ~KrkrNSVMProfExternalScope() noexcept
+    {
+        if (owned_) krkrsdl2_vmprof_end_external();
+    }
+};
+
 #ifdef KRKRNS_VM_PROF_TEST
 struct KrkrNSVMProfTestRecord
 {
@@ -175,5 +193,6 @@ class KrkrNSVMProfNativeScope
 public:
     explicit KrkrNSVMProfNativeScope(const char *) noexcept {}
 };
+class KrkrNSVMProfExternalScope {};
 #endif
 #endif

@@ -1,17 +1,29 @@
 #pragma once
 #include "TVPCompositor.h"
+#include <cstdint>
 #include <memory>
 
 namespace krkrsdl3
 {
+// CPU-observed transfers/calls, not GPU hardware timings. The interface stays
+// available in control builds so one host test can compare both instance modes.
+struct EmoteResidentReadbackStats
+{
+    std::uint64_t fullReads = 0, mapReads = 0, mapBytes = 0, cacheHits = 0;
+    std::uint64_t dataRects = 0, dataBytes = 0, errors = 0, fallbacks = 0;
+    std::uint64_t baselineCopies = 0, liveGPUBytes = 0;
+    std::uint64_t probePasses = 0, probeFailures = 0, probeMapReads = 0;
+    std::uint64_t probeMapBytes = 0, probeCopies = 0, peakGPUBytes = 0;
+};
 // The E-mote mesh shader/blend contract is ported from the pinned open-source
 // plugin backend; a private GL context isolates it from SDL's cached GL state.
 class EmoteGLRenderBackend final : public iTVPRenderBackend
 {
 public:
-    EmoteGLRenderBackend();
+    explicit EmoteGLRenderBackend(bool useResidentReadback = true);
     ~EmoteGLRenderBackend() override;
     bool IsAvailable();
+    EmoteResidentReadbackStats GetResidentReadbackStats() const noexcept;
     void* CreateTarget(int width, int height) override;
     bool GetTargetSize(void* target, int& width, int& height) const override;
     void DestroyTarget(void* target) override;
@@ -22,6 +34,8 @@ public:
     void* GetTargetTexture(void* target) override;
     void UpdateTargetTexture(void* target, const uint8_t* pixels, int width, int height, int pitch) override;
     void* CreateTexture(int width, int height) override;
+    void* CreateTextureWithPixels(int width, int height, const uint8_t* pixels,
+                                 int pitch) override;
     void UpdateTexture(void* texture, const uint8_t* pixels, int width, int height, int pitch) override;
     void DestroyTexture(void* texture) override;
     uint8_t* LockTexture(void* texture, int& pitch) override;

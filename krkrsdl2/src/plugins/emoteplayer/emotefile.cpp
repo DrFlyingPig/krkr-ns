@@ -5,6 +5,7 @@
 #include "CharacterSet.h"
 #include "Platform.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 #include "tjsArray.h"
 #include "tjsDictionary.h"
 
@@ -1534,18 +1535,32 @@ void emoteicon::ensureLoad()
     krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
     if (renderer)
     {
-        void* texture = renderer->CreateTexture(width, height);
+        void* texture = nullptr;
+        {
+            // This records one initialization attempt on both paths. Bytes are
+            // the logical icon payload, not summed CPU/GPU transfer traffic.
+            KrkrNSPerfScope perfTextureInit(KrkrNSPerfOp::GpuTextureInit,
+                static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 4);
+#if defined(KRKRNS_EMOTE_ATOMIC_TEXTURE)
+            texture = renderer->CreateTextureWithPixels(width, height, data, width * 4);
+#else
+            texture = renderer->CreateTexture(width, height);
+            if (texture)
+            {
+                try
+                {
+                    renderer->UpdateTexture(texture, data, width, height, width * 4);
+                }
+                catch (...)
+                {
+                    renderer->DestroyTexture(texture);
+                    throw;
+                }
+            }
+#endif
+        }
         if (texture)
         {
-            try
-            {
-                renderer->UpdateTexture(texture, data, width, height, width * 4);
-            }
-            catch (...)
-            {
-                renderer->DestroyTexture(texture);
-                throw;
-            }
             selftexture = texture;
             textureReady = true;
             delete[] data;

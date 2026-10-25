@@ -35,6 +35,7 @@ struct State
     std::uint64_t start = 0, elapsed = 0, roots = 0;
     bool active = false, capturing = false, pending = false, failed = false;
     const char *failure = nullptr;
+    const char *captureSource = "dispatch";
 };
 std::atomic<SDL_threadID> owner{0};
 thread_local State *state = nullptr;
@@ -72,6 +73,11 @@ bool ClaimOwner() noexcept
     owner.compare_exchange_strong(expected, current, std::memory_order_relaxed);
     return owner.load(std::memory_order_relaxed) == current;
 }
+bool IsOwner() noexcept
+{
+    const SDL_threadID current = SDL_ThreadID();
+    return current && owner.load(std::memory_order_relaxed) == current;
+}
 void Fail(const char *reason) noexcept
 {
     requested = false;
@@ -108,6 +114,7 @@ void Begin(bool enabled) noexcept
     state->elapsed = 0;
     state->failed = false;
     state->failure = nullptr;
+    state->captureSource = "dispatch";
     state->pending = false;
     state->active = true;
     state->capturing = true;
@@ -148,6 +155,31 @@ void krkrsdl2_vmprof_begin_dispatch() noexcept
         }
     }
     Begin(requested);
+}
+
+bool krkrsdl2_vmprof_begin_external() noexcept
+{
+    if (!IsOwner() || !requested) return false;
+    if (state && (state->capturing || state->top))
+    {
+        // This remains the complete dispatch, including work outside onPaint.
+        if (std::strcmp(state->captureSource, "dispatch") == 0)
+            state->captureSource = "dispatch-with-on-paint";
+        return false;
+    }
+    // Report the previous dispatch before starting the callback's clock.
+    krkrsdl2_vmprof_report();
+    krkrsdl2_vmprof_begin_dispatch();
+    if (!state || !state->active || !state->capturing) return false;
+    state->captureSource = "layer-on-paint";
+    return true;
+}
+
+void krkrsdl2_vmprof_end_external() noexcept
+{
+    if (!IsOwner()) return;
+    krkrsdl2_vmprof_end_dispatch();
+    krkrsdl2_vmprof_report();
 }
 
 void krkrsdl2_vmprof_enter(KrkrNSVMProfScope *scope, const KrkrNSVMProfLabel &label) noexcept
@@ -225,7 +257,10 @@ void krkrsdl2_vmprof_report() noexcept
         return;
     }
     const double scale = Scale();
-    if (state->elapsed * scale <= 100.0) return;
+    const bool containsPaint = std::strcmp(state->captureSource, "layer-on-paint") == 0 ||
+        std::strcmp(state->captureSource, "dispatch-with-on-paint") == 0;
+    const double threshold = containsPaint ? 10.0 : 100.0;
+    if (state->elapsed * scale <= threshold) return;
     std::array<unsigned, 16> top{};
     unsigned size = 0;
     std::uint64_t entries = 0;
@@ -239,10 +274,10 @@ void krkrsdl2_vmprof_report() noexcept
         for (unsigned j = size - 1; j > pos; --j) top[j] = top[j - 1];
         top[pos] = i;
     }
-    KRKRNS_LOG("[vm-prof] dispatch=%.2f vm-roots=%.2f residual=%.2fms contexts=%u entries=%llu",
+    KRKRNS_LOG("[vm-prof] dispatch=%.2f vm-roots=%.2f residual=%.2fms contexts=%u entries=%llu source=%s threshold=%.2f",
         state->elapsed * scale, state->roots * scale,
         (state->elapsed >= state->roots ? state->elapsed - state->roots : 0) * scale,
-        state->count, static_cast<unsigned long long>(entries));
+        state->count, static_cast<unsigned long long>(entries), state->captureSource, threshold);
     for (unsigned i = 0; i < size; ++i)
     {
         const Record &record = state->records[top[i]];

@@ -2,6 +2,10 @@
 #include "EmoteGLRenderBackend.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSPerf.h"
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+#include "EmoteReadbackPlan.h"
+#endif
 #include <SDL.h>
 #include <SDL_opengles2.h>
 #include <algorithm>
@@ -53,6 +57,40 @@ void main() {
     gl_FragColor = color;
 }
 )";
+
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+// Compare the final RGBA8 images, including transparent RGB and pixels erased
+// by ClearTarget. A command/mesh estimate cannot determine unchanged pixels.
+// Both samplers use nearest filtering and the same texel-center coordinates.
+const char* damageFragmentShader = R"(
+#ifdef GL_ES
+precision highp float;
+#define EMOTE_SAMPLE_PRECISION highp
+#else
+#define EMOTE_SAMPLE_PRECISION
+#endif
+uniform EMOTE_SAMPLE_PRECISION sampler2D currentImage;
+uniform EMOTE_SAMPLE_PRECISION sampler2D previousImage;
+uniform vec2 imageSize;
+void main() {
+    vec2 origin = floor(gl_FragCoord.xy) * 16.0;
+    bool changed = false;
+    for (int row = 0; row < 16; ++row) {
+        for (int col = 0; col < 16; ++col) {
+            vec2 pixel = origin + vec2(float(col), float(row));
+            if (pixel.x < imageSize.x && pixel.y < imageSize.y) {
+                vec2 uv = (pixel + vec2(0.5)) / imageSize;
+                if (any(notEqual(texture2D(currentImage, uv),
+                                 texture2D(previousImage, uv))))
+                    changed = true;
+            }
+        }
+    }
+    gl_FragColor = changed ? vec4(1.0, 0.0, 0.0, 1.0)
+                           : vec4(0.0, 0.0, 0.0, 1.0);
+}
+)";
+#endif
 
 // Resolve through SDL so the same source exercises GLES2 on Switch and GL on
 // Windows. No platform-specific GL loader or SDL renderer internals are used.
@@ -106,6 +144,13 @@ struct EmoteGLRenderBackend::Impl
         int dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
         bool dirtyValid = false;
         bool cleared = false;
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        GLuint previousTexture = 0, damageTexture = 0, damageFbo = 0;
+        std::size_t residentBytes = 0;
+        int damageWidth = 0, damageHeight = 0;
+        bool previousValid = false, residentUnavailable = false, residentValidated = false;
+        std::vector<uint8_t> damagePixels;
+#endif
         void markDirty(int x0, int y0, int x1, int y1)
         {
             if (x0 >= x1 || y0 >= y1) return;
@@ -133,11 +178,25 @@ struct EmoteGLRenderBackend::Impl
     Image* mask = nullptr;
     int blend = 0;
     float color[4] = {};
+    bool residentRequested = true;
+    EmoteResidentReadbackStats residentStats;
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+    PFNGLCOPYTEXSUBIMAGE2DPROC CopyTexSubImage2D = nullptr;
+    PFNGLCOLORMASKPROC ColorMask = nullptr;
+    GLuint damageProgram = 0, damageVbo = 0, damageIbo = 0;
+    GLint damageCurrentLoc = -1, damagePreviousLoc = -1, damageSizeLoc = -1;
+    bool residentProgramFailed = false;
+    std::uint64_t residentLocks = 0;
+    static constexpr std::uint64_t ResidentBudget = 64u * 1024u * 1024u;
+#endif
     // 0 means one normal full-rectangle glReadPixels call.  Some Switch
     // compatibility renderers correctly rasterize the whole FBO but cap a
     // single readback row, so IsAvailable() can select a verified tile width.
     int readTileWidth = 0;
     std::vector<uint8_t> readScratch;
+#if defined(KRKRNS_EMOTE_REUSE_READBACK)
+    std::vector<uint8_t> tiledReadScratch;
+#endif
 
     void end()
     {
@@ -166,7 +225,20 @@ struct EmoteGLRenderBackend::Impl
         // silently fall back to corrupting full-width reads after an engine
         // restart.  readScratch is resized on demand.
         readScratch.clear();
+#if defined(KRKRNS_EMOTE_REUSE_READBACK)
+        tiledReadScratch.clear();
+#endif
         active = false; failed = false; blend = 0;
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        // The old context owns these objects. As with the mesh resources,
+        // resetting against an already retired SDL window issues no GL calls.
+        damageProgram = damageVbo = damageIbo = 0;
+        damageCurrentLoc = damagePreviousLoc = damageSizeLoc = -1;
+        residentProgramFailed = false;
+        residentStats.liveGPUBytes = 0;
+        CopyTexSubImage2D = nullptr;
+        ColorMask = nullptr;
+#endif
     }
     struct Scope
     {
@@ -305,6 +377,7 @@ struct EmoteGLRenderBackend::Impl
     void readPixels(Image* image, uint8_t* destination, int tileWidth,
                     bool clearBeforeRead = false)
     {
+        KrkrNSPerfScope perf(KrkrNSPerfOp::EmoteReadback);
         if (!image || !image->target || !destination)
             throw std::runtime_error("Invalid E-mote readback target");
         bind(image);
@@ -336,7 +409,11 @@ struct EmoteGLRenderBackend::Impl
             if (tileWidth <= 0 || tileWidth >= w)
             {
                 readScratch.resize(scratchRow * size_t(h));
-                ReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+                {
+                    KrkrNSPerfScope gpuReadback(KrkrNSPerfOp::GpuReadback);
+                    ReadPixels(x0, y0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+                    gpuReadback.Bytes(std::uint64_t(w) * h * 4);
+                }
                 for (int r = 0; r < h; ++r)
                     std::memcpy(destination + size_t(y0 + r) * rowBytes + size_t(x0) * 4,
                                 readScratch.data() + size_t(r) * scratchRow, scratchRow);
@@ -348,19 +425,35 @@ struct EmoteGLRenderBackend::Impl
             {
                 const int tw = std::min(tileWidth, x1 - tx);
                 const size_t tileRow = size_t(tw) * 4;
+#if defined(KRKRNS_EMOTE_REUSE_READBACK)
+                tiledReadScratch.resize(tileRow * size_t(h));
+                // Match a fresh zeroed tile if a driver writes only part of it.
+                std::fill(tiledReadScratch.begin(), tiledReadScratch.end(), 0);
+                uint8_t* tilePixels = tiledReadScratch.data();
+#else
                 std::vector<uint8_t> tile(tileRow * size_t(h));
-                ReadPixels(tx, y0, tw, h, GL_RGBA, GL_UNSIGNED_BYTE, tile.data());
+                uint8_t* tilePixels = tile.data();
+#endif
+                {
+                    KrkrNSPerfScope gpuReadback(KrkrNSPerfOp::GpuReadback);
+                    ReadPixels(tx, y0, tw, h, GL_RGBA, GL_UNSIGNED_BYTE, tilePixels);
+                    gpuReadback.Bytes(std::uint64_t(tw) * h * 4);
+                }
                 for (int r = 0; r < h; ++r)
                     std::memcpy(destination + size_t(y0 + r) * rowBytes + size_t(tx) * 4,
-                                tile.data() + size_t(r) * tileRow, tileRow);
+                                tilePixels + size_t(r) * tileRow, tileRow);
             }
             return;
         }
 
         if (tileWidth <= 0 || tileWidth >= image->width)
         {
-            ReadPixels(0, 0, image->width, image->height,
-                       GL_RGBA, GL_UNSIGNED_BYTE, destination);
+            {
+                KrkrNSPerfScope gpuReadback(KrkrNSPerfOp::GpuReadback);
+                ReadPixels(0, 0, image->width, image->height,
+                           GL_RGBA, GL_UNSIGNED_BYTE, destination);
+                gpuReadback.Bytes(std::uint64_t(image->width) * image->height * 4);
+            }
             return;
         }
 
@@ -376,21 +469,537 @@ struct EmoteGLRenderBackend::Impl
             readScratch.resize(tileBytes);
             if (clearBeforeRead)
                 std::fill(readScratch.begin(), readScratch.end(), 0);
-            ReadPixels(x, 0, width, image->height,
-                       GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+            {
+                KrkrNSPerfScope gpuReadback(KrkrNSPerfOp::GpuReadback);
+                ReadPixels(x, 0, width, image->height,
+                           GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+                gpuReadback.Bytes(std::uint64_t(width) * image->height * 4);
+            }
             for (int y = 0; y < image->height; ++y)
                 std::memcpy(destination + size_t(y) * rowBytes + size_t(x) * 4,
                             readScratch.data() + size_t(y) * tileRowBytes,
                             tileRowBytes);
         }
     }
-    void* create(int width, int height, bool renderTarget)
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+    void checkResidentError()
+    {
+        const GLenum error = GetError();
+        if (error == GL_NO_ERROR) return;
+        // A candidate failure must not poison the original full-read fallback.
+        for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+        throw std::runtime_error("E-mote resident readback GL error");
+    }
+    void releaseResident(Image& image)
+    {
+        image.previousValid = false;
+        image.residentValidated = false;
+        if (image.damageFbo) DeleteFramebuffers(1, &image.damageFbo);
+        if (image.damageTexture) DeleteTextures(1, &image.damageTexture);
+        if (image.previousTexture) DeleteTextures(1, &image.previousTexture);
+        image.damageFbo = image.damageTexture = image.previousTexture = 0;
+        residentStats.liveGPUBytes -= image.residentBytes;
+        image.residentBytes = 0;
+        image.damageWidth = image.damageHeight = 0;
+        std::vector<uint8_t>().swap(image.damagePixels);
+    }
+    bool ensureDamageProgram()
+    {
+        if (damageProgram) return true;
+        if (residentProgramFailed) return false;
+        GLuint vs = 0, fs = 0, candidate = 0, candidateVbo = 0, candidateIbo = 0;
+        try
+        {
+            CopyTexSubImage2D = reinterpret_cast<PFNGLCOPYTEXSUBIMAGE2DPROC>(
+                SDL_GL_GetProcAddress("glCopyTexSubImage2D"));
+            ColorMask = reinterpret_cast<PFNGLCOLORMASKPROC>(SDL_GL_GetProcAddress("glColorMask"));
+            if (!CopyTexSubImage2D || !ColorMask)
+                throw std::runtime_error("E-mote resident readback GL functions unavailable");
+            vs = compile(GL_VERTEX_SHADER, vertexShader);
+            fs = compile(GL_FRAGMENT_SHADER, damageFragmentShader);
+            candidate = CreateProgram();
+            if (!candidate) throw std::runtime_error("E-mote damage program allocation failed");
+            AttachShader(candidate, vs); AttachShader(candidate, fs);
+            BindAttribLocation(candidate, 0, "aPos");
+            LinkProgram(candidate);
+            GLint linked = 0;
+            GetProgramiv(candidate, GL_LINK_STATUS, &linked);
+            if (!linked) throw std::runtime_error("E-mote damage shader link failed");
+            const GLint currentLoc = GetUniformLocation(candidate, "currentImage");
+            const GLint previousLoc = GetUniformLocation(candidate, "previousImage");
+            const GLint sizeLoc = GetUniformLocation(candidate, "imageSize");
+            if (currentLoc < 0 || previousLoc < 0 || sizeLoc < 0)
+                throw std::runtime_error("E-mote damage shader uniforms unavailable");
+            const float positions[] = {-1.f, -1.f, 1.f, -1.f, 1.f, 1.f, -1.f, 1.f};
+            const uint16_t indices[] = {0, 1, 2, 0, 2, 3};
+            GenBuffers(1, &candidateVbo); GenBuffers(1, &candidateIbo);
+            if (!candidateVbo || !candidateIbo)
+                throw std::runtime_error("E-mote damage geometry allocation failed");
+            BindBuffer(GL_ARRAY_BUFFER, candidateVbo);
+            BufferData(GL_ARRAY_BUFFER, sizeof(positions), positions, GL_STATIC_DRAW);
+            BindBuffer(GL_ELEMENT_ARRAY_BUFFER, candidateIbo);
+            BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+            checkResidentError();
+            DeleteShader(vs); DeleteShader(fs); vs = fs = 0;
+            damageProgram = candidate; damageVbo = candidateVbo; damageIbo = candidateIbo;
+            damageCurrentLoc = currentLoc; damagePreviousLoc = previousLoc; damageSizeLoc = sizeLoc;
+            KRKRNS_LOG("[emote-resident] exact RGBA tile comparison enabled tile=16 budget=64MiB");
+            return true;
+        }
+        catch (...)
+        {
+            if (candidateIbo) DeleteBuffers(1, &candidateIbo);
+            if (candidateVbo) DeleteBuffers(1, &candidateVbo);
+            if (candidate) DeleteProgram(candidate);
+            if (fs) DeleteShader(fs);
+            if (vs) DeleteShader(vs);
+            residentProgramFailed = true;
+            throw;
+        }
+    }
+    bool ensureResident(Image& image)
+    {
+        if (image.residentUnavailable) return false;
+        if (image.width > 4096 || image.height > 4096)
+        {
+            image.residentUnavailable = true;
+            return false;
+        }
+        if (image.previousTexture && image.damageTexture && image.damageFbo) return true;
+        const int mapW = (image.width + 15) / 16;
+        const int mapH = (image.height + 15) / 16;
+        const std::uint64_t mapBytes = std::uint64_t(mapW) * mapH * 4;
+        const std::uint64_t imageBytes = std::uint64_t(image.width) * image.height * 4;
+        const std::uint64_t bytes = imageBytes + mapBytes;
+        // The first-use copy/map contract needs a separate same-size target.
+        // Include that transient payload before allocating persistent objects.
+        const std::uint64_t firstUseBytes = bytes + imageBytes;
+        if (firstUseBytes > ResidentBudget || residentStats.liveGPUBytes > ResidentBudget - firstUseBytes)
+        {
+            image.residentUnavailable = true;
+            return false;
+        }
+        if (!ensureDamageProgram())
+        {
+            image.residentUnavailable = true;
+            return false;
+        }
+        image.damagePixels.resize(static_cast<std::size_t>(mapBytes));
+        ActiveTexture(GL_TEXTURE0);
+        GenTextures(1, &image.previousTexture);
+        GenTextures(1, &image.damageTexture);
+        GenFramebuffers(1, &image.damageFbo);
+        if (!image.previousTexture || !image.damageTexture || !image.damageFbo)
+            throw std::runtime_error("E-mote resident textures allocation failed");
+        BindTexture(GL_TEXTURE_2D, image.previousTexture);
+        TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width, image.height,
+                   0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        BindTexture(GL_TEXTURE_2D, image.damageTexture);
+        TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, mapW, mapH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        BindFramebuffer(GL_FRAMEBUFFER, image.damageFbo);
+        FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image.damageTexture, 0);
+        if (CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            throw std::runtime_error("E-mote damage framebuffer incomplete");
+        checkResidentError();
+        image.damageWidth = mapW; image.damageHeight = mapH;
+        image.residentBytes = static_cast<std::size_t>(bytes);
+        residentStats.liveGPUBytes += bytes;
+        residentStats.peakGPUBytes = std::max(residentStats.peakGPUBytes, residentStats.liveGPUBytes);
+        return true;
+    }
+    void copyResidentBaseline(Image& image)
+    {
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuResidentCopy);
+        bind(&image);
+        ActiveTexture(GL_TEXTURE0);
+        BindTexture(GL_TEXTURE_2D, image.previousTexture);
+        CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, image.width, image.height);
+        checkResidentError();
+        image.previousValid = true;
+        ++residentStats.baselineCopies;
+        // This counter describes GPU-to-GPU payload, not CPU readback bytes.
+        perf.Bytes(std::uint64_t(image.width) * image.height * 4);
+    }
+    void readDamageMap(Image& image, GLuint currentTexture = 0)
+    {
+        if (!currentTexture) currentTexture = image.texture;
+        // Restore the old mesh path even if shader submission/readback fails.
+        // All of these objects belong to this same, already-active context.
+        struct Restore
+        {
+            Impl& gl;
+            Image& image;
+            GLuint comparedTexture;
+            GLint activeTexture = GL_TEXTURE0, textures[2] = {}, colorMask[4] = {};
+            GLint oldProgram = 0, arrayBuffer = 0, elementBuffer = 0;
+            bool blend, depth, scissor, cull, dither;
+            Restore(Impl& gl, Image& image, GLuint comparedTexture) :
+                gl(gl), image(image), comparedTexture(comparedTexture),
+                blend(gl.IsEnabled(GL_BLEND) != 0), depth(gl.IsEnabled(GL_DEPTH_TEST) != 0),
+                scissor(gl.IsEnabled(GL_SCISSOR_TEST) != 0), cull(gl.IsEnabled(GL_CULL_FACE) != 0),
+                dither(gl.IsEnabled(GL_DITHER) != 0)
+            {
+                gl.GetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+                gl.GetIntegerv(GL_CURRENT_PROGRAM, &oldProgram);
+                gl.GetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+                gl.GetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementBuffer);
+                gl.GetIntegerv(GL_COLOR_WRITEMASK, colorMask);
+                for (int i = 0; i < 2; ++i)
+                {
+                    gl.ActiveTexture(GL_TEXTURE0 + i);
+                    gl.GetIntegerv(GL_TEXTURE_BINDING_2D, &textures[i]);
+                }
+            }
+            ~Restore()
+            {
+                gl.ActiveTexture(GL_TEXTURE0);
+                gl.BindTexture(GL_TEXTURE_2D, comparedTexture);
+                gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                for (int i = 0; i < 2; ++i)
+                {
+                    gl.ActiveTexture(GL_TEXTURE0 + i);
+                    gl.BindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textures[i]));
+                }
+                gl.ActiveTexture(static_cast<GLenum>(activeTexture));
+                gl.UseProgram(static_cast<GLuint>(oldProgram));
+                gl.BindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(arrayBuffer));
+                gl.BindBuffer(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLuint>(elementBuffer));
+                gl.ColorMask(colorMask[0] != 0, colorMask[1] != 0, colorMask[2] != 0, colorMask[3] != 0);
+                if (blend) gl.Enable(GL_BLEND); else gl.Disable(GL_BLEND);
+                if (depth) gl.Enable(GL_DEPTH_TEST); else gl.Disable(GL_DEPTH_TEST);
+                if (scissor) gl.Enable(GL_SCISSOR_TEST); else gl.Disable(GL_SCISSOR_TEST);
+                if (cull) gl.Enable(GL_CULL_FACE); else gl.Disable(GL_CULL_FACE);
+                if (dither) gl.Enable(GL_DITHER); else gl.Disable(GL_DITHER);
+                gl.ClearColor(0, 0, 0, 0);
+                gl.BindFramebuffer(GL_FRAMEBUFFER, image.fbo);
+                gl.Viewport(0, 0, image.width, image.height);
+            }
+        };
+        {
+            Restore restore(*this, image, currentTexture);
+            {
+                KrkrNSPerfScope perf(KrkrNSPerfOp::GpuDamageCompare);
+                BindFramebuffer(GL_FRAMEBUFFER, image.damageFbo);
+                Viewport(0, 0, image.damageWidth, image.damageHeight);
+                Disable(GL_BLEND); Disable(GL_DEPTH_TEST); Disable(GL_SCISSOR_TEST);
+                Disable(GL_CULL_FACE); Disable(GL_DITHER);
+                ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                // A clipped/partially written compare target must conservatively
+                // request pixel reads, never classify undefined pixels as equal.
+                ClearColor(1, 0, 0, 1);
+                Clear(GL_COLOR_BUFFER_BIT);
+                UseProgram(damageProgram);
+                ActiveTexture(GL_TEXTURE0); BindTexture(GL_TEXTURE_2D, currentTexture);
+                TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                ActiveTexture(GL_TEXTURE1); BindTexture(GL_TEXTURE_2D, image.previousTexture);
+                Uniform1i(damageCurrentLoc, 0); Uniform1i(damagePreviousLoc, 1);
+                Uniform2f(damageSizeLoc, float(image.width), float(image.height));
+                BindBuffer(GL_ARRAY_BUFFER, damageVbo);
+                BindBuffer(GL_ELEMENT_ARRAY_BUFFER, damageIbo);
+                EnableVertexAttribArray(0);
+                VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+                DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
+                checkResidentError();
+            }
+            {
+                KrkrNSPerfScope mapPerf(KrkrNSPerfOp::GpuDamageMap);
+                PixelStorei(GL_PACK_ALIGNMENT, 1);
+                // The compatibility driver has truncated wide readbacks before.
+                // Untouched CPU flag bytes must mean changed, rather than hits.
+                std::fill(image.damagePixels.begin(), image.damagePixels.end(), 255);
+                const int tile = readTileWidth > 0 ? readTileWidth : image.damageWidth;
+                for (int x = 0; x < image.damageWidth; x += tile)
+                {
+                    const int width = std::min(tile, image.damageWidth - x);
+                    const std::size_t row = std::size_t(width) * 4;
+                    const std::size_t bytes = row * image.damageHeight;
+                    const bool wholeMap = width == image.damageWidth;
+                    uint8_t* pixels = image.damagePixels.data();
+                    if (!wholeMap)
+                    {
+                        readScratch.resize(bytes);
+                        std::fill(readScratch.begin(), readScratch.end(), 255);
+                        pixels = readScratch.data();
+                    }
+                    {
+                        KrkrNSPerfScope readPerf(KrkrNSPerfOp::GpuReadback);
+                        ReadPixels(x, 0, width, image.damageHeight,
+                                   GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                        checkResidentError();
+                        readPerf.Bytes(bytes);
+                    }
+                    ++residentStats.mapReads;
+                    residentStats.mapBytes += bytes;
+                    if (!wholeMap)
+                        for (int y = 0; y < image.damageHeight; ++y)
+                            std::memcpy(image.damagePixels.data() +
+                                (std::size_t(y) * image.damageWidth + x) * 4,
+                                pixels + std::size_t(y) * row, row);
+                }
+                mapPerf.Bytes(image.damagePixels.size());
+            }
+        }
+        checkResidentError();
+    }
+    void validateResidentCopy(Image& image)
+    {
+        if (image.residentValidated) return;
+        const std::uint64_t bytes = std::uint64_t(image.width) * image.height * 4;
+        if (bytes > ResidentBudget || residentStats.liveGPUBytes > ResidentBudget - bytes)
+            throw std::runtime_error("E-mote resident copy-probe budget unavailable");
+        // Probe a separate, same-size framebuffer. Neither the game's target
+        // nor its CPU mirror is changed by this compatibility contract.
+        struct Probe
+        {
+            Impl& gl;
+            Image& image;
+            GLuint texture = 0, fbo = 0;
+            const std::uint64_t bytes, mapReadsBefore, mapBytesBefore;
+            GLint activeTexture = GL_TEXTURE0, textures[2] = {}, colorMask[4] = {};
+            bool scissor;
+            Probe(Impl& gl, Image& image, std::uint64_t bytes) : gl(gl), image(image),
+                bytes(bytes), mapReadsBefore(gl.residentStats.mapReads),
+                mapBytesBefore(gl.residentStats.mapBytes), scissor(gl.IsEnabled(GL_SCISSOR_TEST) != 0)
+            {
+                gl.GetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+                gl.GetIntegerv(GL_COLOR_WRITEMASK, colorMask);
+                for (int i = 0; i < 2; ++i)
+                {
+                    gl.ActiveTexture(GL_TEXTURE0 + i);
+                    gl.GetIntegerv(GL_TEXTURE_BINDING_2D, &textures[i]);
+                }
+                gl.residentStats.liveGPUBytes += bytes;
+                gl.residentStats.peakGPUBytes = std::max(gl.residentStats.peakGPUBytes,
+                                                       gl.residentStats.liveGPUBytes);
+            }
+            ~Probe()
+            {
+                if (fbo) gl.DeleteFramebuffers(1, &fbo);
+                if (texture) gl.DeleteTextures(1, &texture);
+                gl.residentStats.liveGPUBytes -= bytes;
+                gl.residentStats.probeMapReads += gl.residentStats.mapReads - mapReadsBefore;
+                gl.residentStats.probeMapBytes += gl.residentStats.mapBytes - mapBytesBefore;
+                for (int i = 0; i < 2; ++i)
+                {
+                    gl.ActiveTexture(GL_TEXTURE0 + i);
+                    gl.BindTexture(GL_TEXTURE_2D, static_cast<GLuint>(textures[i]));
+                }
+                gl.ActiveTexture(static_cast<GLenum>(activeTexture));
+                gl.ColorMask(colorMask[0] != 0, colorMask[1] != 0, colorMask[2] != 0, colorMask[3] != 0);
+                if (scissor) gl.Enable(GL_SCISSOR_TEST); else gl.Disable(GL_SCISSOR_TEST);
+                gl.ClearColor(0, 0, 0, 0);
+                gl.BindFramebuffer(GL_FRAMEBUFFER, image.fbo);
+                gl.Viewport(0, 0, image.width, image.height);
+            }
+        } probe(*this, image, bytes);
+        try
+        {
+            ActiveTexture(GL_TEXTURE0);
+            GenTextures(1, &probe.texture);
+            GenFramebuffers(1, &probe.fbo);
+            if (!probe.texture || !probe.fbo)
+                throw std::runtime_error("E-mote copy-probe allocation failed");
+            BindTexture(GL_TEXTURE_2D, probe.texture);
+            TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.width, image.height,
+                       0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            BindFramebuffer(GL_FRAMEBUFFER, probe.fbo);
+            Viewport(0, 0, image.width, image.height);
+            Disable(GL_SCISSOR_TEST);
+            ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            // Start the destination at a known different value. Undefined
+            // texture memory that happens to match a probe is not a proof.
+            FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, image.previousTexture, 0);
+            if (CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                throw std::runtime_error("E-mote copy-probe baseline framebuffer incomplete");
+            ClearColor(0, 0, 0, 0); Clear(GL_COLOR_BUFFER_BIT);
+            FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, probe.texture, 0);
+            if (CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+                throw std::runtime_error("E-mote copy-probe framebuffer incomplete");
+            ClearColor(0.25f, 0.5f, 0.75f, 1.f); Clear(GL_COLOR_BUFFER_BIT);
+            {
+                KrkrNSPerfScope perf(KrkrNSPerfOp::GpuResidentCopy);
+                BindTexture(GL_TEXTURE_2D, image.previousTexture);
+                CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, image.width, image.height);
+                checkResidentError();
+                ++residentStats.probeCopies;
+                perf.Bytes(bytes);
+            }
+            readDamageMap(image, probe.texture);
+            for (std::size_t p = 0; p < image.damagePixels.size(); p += 4)
+                if (image.damagePixels[p] != 0)
+                    throw std::runtime_error("E-mote resident full-width copy contract failed");
+
+            // The map helper restores the ACTUAL target framebuffer. Explicitly
+            // rebind the temporary probe before clearing; never erase game data.
+            BindFramebuffer(GL_FRAMEBUFFER, probe.fbo);
+            Viewport(0, 0, image.width, image.height);
+            Disable(GL_SCISSOR_TEST); ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            ClearColor(0, 0, 0, 0); Clear(GL_COLOR_BUFFER_BIT);
+            checkResidentError();
+            readDamageMap(image, probe.texture);
+            for (std::size_t p = 0; p < image.damagePixels.size(); p += 4)
+                if (image.damagePixels[p] == 0)
+                    throw std::runtime_error("E-mote resident clear/map coverage contract failed");
+            image.residentValidated = true;
+            image.previousValid = false;
+            ++residentStats.probePasses;
+        }
+        catch (...)
+        {
+            ++residentStats.probeFailures;
+            image.residentValidated = false;
+            image.previousValid = false;
+            throw;
+        }
+    }
+    void readResidentRect(Image& image, const krkrns_emote_readback::Rect& rect)
+    {
+        bind(&image);
+        PixelStorei(GL_PACK_ALIGNMENT, 1);
+        const int tile = readTileWidth > 0 ? readTileWidth : rect.w;
+        const std::size_t destinationRow = std::size_t(image.width) * 4;
+        for (int x = rect.x; x < rect.x + rect.w; x += tile)
+        {
+            const int width = std::min(tile, rect.x + rect.w - x);
+            const std::size_t row = std::size_t(width) * 4;
+            const std::size_t bytes = row * rect.h;
+            readScratch.resize(bytes);
+            {
+                KrkrNSPerfScope perf(KrkrNSPerfOp::GpuReadback);
+                ReadPixels(x, rect.y, width, rect.h, GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
+                checkResidentError();
+                perf.Bytes(bytes);
+            }
+            ++residentStats.dataRects;
+            residentStats.dataBytes += bytes;
+            for (int y = 0; y < rect.h; ++y)
+                std::memcpy(image.pixels.data() + std::size_t(rect.y + y) * destinationRow + std::size_t(x) * 4,
+                            readScratch.data() + std::size_t(y) * row, row);
+        }
+    }
+    void readResidentFull(Image& image)
+    {
+        ++residentStats.fullReads;
+        const krkrns_emote_readback::Rect whole{0, 0, image.width, image.height};
+        readResidentRect(image, whole);
+    }
+    void readResident(Image& image)
+    {
+        KrkrNSPerfScope perf(KrkrNSPerfOp::EmoteReadback);
+        bool used = false;
+        try
+        {
+            checkResidentError();
+            if (ensureResident(image))
+            {
+                used = true;
+                validateResidentCopy(image);
+                if (!image.previousValid)
+                {
+                    // Every pixel of the CPU mirror and GPU baseline now has
+                    // one common generation; no old dirty-rectangle assumption.
+                    readResidentFull(image);
+                    copyResidentBaseline(image);
+                }
+                else if (!image.dirtyValid && !image.cleared)
+                    ++residentStats.cacheHits;
+                else
+                {
+                    readDamageMap(image);
+                    krkrns_emote_readback::Plan plan;
+                    if (!krkrns_emote_readback::BuildPlan(image.damagePixels.data(),
+                        image.damagePixels.size(), std::size_t(image.damageWidth) * 4,
+                        image.width, image.height, readTileWidth, plan, 8))
+                        throw std::runtime_error("E-mote damage readback plan invalid");
+                    if (plan.rects.empty()) ++residentStats.cacheHits;
+                    else
+                    {
+                        for (const auto& rect : plan.rects)
+                        {
+                            if (rect.x == 0 && rect.y == 0 && rect.w == image.width && rect.h == image.height)
+                                ++residentStats.fullReads;
+                            readResidentRect(image, rect);
+                        }
+                        // Only publish after all CPU rectangles and the whole
+                        // GPU baseline have reached the same current frame.
+                        copyResidentBaseline(image);
+                    }
+                }
+            }
+        }
+        catch (const std::exception& error)
+        {
+            ++residentStats.errors;
+            image.residentUnavailable = true;
+            releaseResident(image);
+            KRKRNS_LOG("[emote-resident] full-read fallback: %s", error.what());
+            for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+            used = false;
+        }
+        catch (...)
+        {
+            ++residentStats.errors;
+            image.residentUnavailable = true;
+            releaseResident(image);
+            for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+            used = false;
+        }
+        if (!used)
+        {
+            // A failed rectangle transfer may already have written some CPU
+            // pixels. Overwrite the complete target, including all old clears.
+            image.previousValid = false;
+            ++residentStats.fallbacks;
+            readResidentFull(image);
+        }
+        bind(&image);
+        UseProgram(program);
+        if (++residentLocks == 1 || residentLocks % 60 == 0)
+            KRKRNS_LOG("[emote-resident] locks=%llu full=%llu map=%llu mapBytes=%llu hits=%llu rects=%llu dataBytes=%llu errors=%llu fallback=%llu copies=%llu gpuBytes=%llu probePass=%llu probeFail=%llu probeMap=%llu probeMapBytes=%llu probeCopy=%llu peakGPUBytes=%llu",
+                (unsigned long long)residentLocks, (unsigned long long)residentStats.fullReads,
+                (unsigned long long)residentStats.mapReads, (unsigned long long)residentStats.mapBytes,
+                (unsigned long long)residentStats.cacheHits, (unsigned long long)residentStats.dataRects,
+                (unsigned long long)residentStats.dataBytes, (unsigned long long)residentStats.errors,
+                (unsigned long long)residentStats.fallbacks, (unsigned long long)residentStats.baselineCopies,
+                (unsigned long long)residentStats.liveGPUBytes,
+                (unsigned long long)residentStats.probePasses, (unsigned long long)residentStats.probeFailures,
+                (unsigned long long)residentStats.probeMapReads, (unsigned long long)residentStats.probeMapBytes,
+                (unsigned long long)residentStats.probeCopies, (unsigned long long)residentStats.peakGPUBytes);
+    }
+#endif
+    void* create(int width, int height, bool renderTarget,
+                 const uint8_t* initialPixels = nullptr, int initialPitch = 0)
     {
         if (width <= 0 || height <= 0) return nullptr;
         Scope scope(*this);
         auto image = std::make_unique<Image>();
         image->width = width; image->height = height; image->target = renderTarget;
         image->pixels.resize(size_t(width) * height * 4);
+        if (initialPixels)
+        {
+            // Keep the independent CPU mirror used by LockTexture. Source
+            // rows may have padding or run backwards, just like UpdateTexture.
+            for (int y = 0; y < height; ++y)
+                std::memcpy(image->pixels.data() + size_t(y) * width * 4,
+                            initialPixels + std::ptrdiff_t(y) * initialPitch,
+                            size_t(width) * 4);
+        }
         GenTextures(1, &image->texture);
         BindTexture(GL_TEXTURE_2D, image->texture);
         TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image->pixels.data());
@@ -411,7 +1020,18 @@ struct EmoteGLRenderBackend::Impl
         }
         else GenerateMipmap(GL_TEXTURE_2D);
         auto* result = image.get();
-        images.push_back(std::move(image));
+        try { images.push_back(std::move(image)); }
+        catch (...)
+        {
+            // A failed vector growth has not published this object. Retire its
+            // GPU allocation while the private context is still current.
+            if (image)
+            {
+                if (image->fbo) DeleteFramebuffers(1, &image->fbo);
+                if (image->texture) DeleteTextures(1, &image->texture);
+            }
+            throw;
+        }
         return result;
     }
     void destroy(void* handle)
@@ -419,6 +1039,9 @@ struct EmoteGLRenderBackend::Impl
         auto* image = find(handle);
         if (!image) return;
         Scope scope(*this);
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        releaseResident(*image);
+#endif
         if (image->fbo) DeleteFramebuffers(1, &image->fbo);
         DeleteTextures(1, &image->texture);
         if (target == image) target = nullptr;
@@ -434,6 +1057,11 @@ struct EmoteGLRenderBackend::Impl
             (stride < std::ptrdiff_t(width) * 4 && stride > -std::ptrdiff_t(width) * 4))
             throw std::runtime_error("Invalid E-mote texture update dimensions/pitch");
         Scope scope(*this);
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        // UpdateTargetTexture changes the CPU mirror without a matching GPU
+        // baseline generation. Re-establish both with a complete next read.
+        if (image->target) image->previousValid = false;
+#endif
         for (int y = 0; y < height; ++y)
             std::memcpy(image->pixels.data() + size_t(y) * image->width * 4,
                         pixels + std::ptrdiff_t(y) * stride, size_t(width) * 4);
@@ -445,7 +1073,14 @@ struct EmoteGLRenderBackend::Impl
     }
 };
 
-EmoteGLRenderBackend::EmoteGLRenderBackend() : impl(new Impl) {}
+EmoteGLRenderBackend::EmoteGLRenderBackend(bool useResidentReadback) : impl(new Impl)
+{
+    impl->residentRequested = useResidentReadback;
+}
+EmoteResidentReadbackStats EmoteGLRenderBackend::GetResidentReadbackStats() const noexcept
+{
+    return impl->residentStats;
+}
 EmoteGLRenderBackend::~EmoteGLRenderBackend()
 {
     // SDL may already have destroyed the window at process shutdown. GL owns
@@ -591,6 +1226,30 @@ bool EmoteGLRenderBackend::GetTargetSize(void* target, int& width, int& height) 
     return true;
 }
 void* EmoteGLRenderBackend::CreateTexture(int w, int h) { return impl->create(w, h, false); }
+void* EmoteGLRenderBackend::CreateTextureWithPixels(int w, int h, const uint8_t* pixels,
+                                                 int pitch)
+{
+#if defined(KRKRNS_EMOTE_ATOMIC_TEXTURE)
+    if (w <= 0 || h <= 0) return nullptr;
+    const std::ptrdiff_t stride = pitch;
+    if (!pixels || (stride < std::ptrdiff_t(w) * 4 && stride > -std::ptrdiff_t(w) * 4))
+        throw std::runtime_error("Invalid E-mote texture update dimensions/pitch");
+    // One private-context transaction initializes the final pixels and mipmap;
+    // the control path first uploads zeroes, then replaces them in another call.
+    void* result = impl->create(w, h, false, pixels, pitch);
+    if (result)
+    {
+        static const bool announced = [] {
+            KRKRNS_LOG("[emote] atomic texture initialization candidate enabled");
+            return true;
+        }();
+        (void)announced;
+    }
+    return result;
+#else
+    return iTVPRenderBackend::CreateTextureWithPixels(w, h, pixels, pitch);
+#endif
+}
 void EmoteGLRenderBackend::DestroyTarget(void* target) { impl->destroy(target); }
 void EmoteGLRenderBackend::DestroyTexture(void* texture) { impl->destroy(texture); }
 void EmoteGLRenderBackend::SetTarget(void* target)
@@ -623,7 +1282,12 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
         // bridge so the next optimization (direct/format readback vs
         // passthrough) can be chosen from data.
         const Uint64 t0 = SDL_GetPerformanceCounter();
-        impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+#if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        if (impl->residentRequested && !target->residentUnavailable && !impl->residentProgramFailed)
+            impl->readResident(*target);
+        else
+#endif
+            impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
         krkrsdl2_prof_emote_lock(
             (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 /
             (double)SDL_GetPerformanceFrequency());

@@ -22,6 +22,8 @@
 #include <SDL.h>
 #include "KrkrNSProf.h"
 #endif
+#include "KrkrNSPerf.h"
+#include "KrkrNSVMProf.h"
 #include "LayerIntf.h"
 #include "WindowIntf.h"
 #include "MsgIntf.h"
@@ -5529,6 +5531,8 @@ void tTJSNI_BaseLayer::BeforeCompletion()
 	// fire onPaint
 	if(CallOnPaint)
 	{
+		KrkrNSVMProfExternalScope vmPaint;
+		KrkrNSPerfScope perf(KrkrNSPerfOp::LayerOnPaint);
 		CallOnPaint = false;
 		static ttstr eventname(TJS_W("onPaint"));
 		TVPPostEvent(Owner, Owner, eventname, 0, TVP_EPT_IMMEDIATE, 0, NULL);
@@ -5538,6 +5542,7 @@ void tTJSNI_BaseLayer::BeforeCompletion()
 	// for transition
 	if(InTransition)
 	{
+		KrkrNSPerfScope perf(KrkrNSPerfOp::LayerTransitionStart);
 		// transition is processing
 
 		if(DivisibleTransHandler)
@@ -5563,6 +5568,7 @@ void tTJSNI_BaseLayer::BeforeCompletion()
 	if(InTransition && TransWithChildren &&
 		TransUpdateType == tutDivisible)
 	{
+		KrkrNSPerfScope perf(KrkrNSPerfOp::LayerTransitionChildren);
 		// complete all area of the layer
 		InTransition = false; // cheat!!!
 		TransDrawable.Src1Bmp = Complete();
@@ -5571,11 +5577,14 @@ void tTJSNI_BaseLayer::BeforeCompletion()
 		if(TransSrc) TransDrawable.Src2Bmp = TransSrc->Complete();
 	}
 
-	TVP_LAYER_FOR_EACH_CHILD_BEGIN(child)
+	{
+		KrkrNSPerfScope perf(KrkrNSPerfOp::LayerPrepareTree);
+		TVP_LAYER_FOR_EACH_CHILD_BEGIN(child)
 
-		child->BeforeCompletion();
+			child->BeforeCompletion();
 
-	TVP_LAYER_FOR_EACH_CHILD_END
+		TVP_LAYER_FOR_EACH_CHILD_END
+	}
 }
 //---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::AfterCompletion()
@@ -6569,15 +6578,18 @@ void tTJSNI_BaseLayer::InternalComplete(tTVPComplexRect & updateregion,
 //---------------------------------------------------------------------------
 void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 {
+	KrkrNSPerfScope perfPrepare(KrkrNSPerfOp::LayerPrepare);
 #ifdef __SWITCH__
 	const Uint64 profileStart = SDL_GetPerformanceCounter();
 #endif
 	BeforeCompletion();
+	perfPrepare.Finish();
 #ifdef __SWITCH__
 	const Uint64 profilePrepared = SDL_GetPerformanceCounter();
 #endif
 
 	if(Manager) Manager->NotifyUpdateRegionFixed();
+	KrkrNSPerfScope perfRaster(KrkrNSPerfOp::LayerRaster);
 
 	InCompletion = true;
 
@@ -6594,6 +6606,8 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 	if(Manager) Manager->GetLayerTreeOwner()->EndBitmapCompletion(Manager);
 
 	InCompletion = false;
+	perfRaster.Finish();
+	KrkrNSPerfScope perfFinish(KrkrNSPerfOp::LayerFinish);
 #ifdef __SWITCH__
 	const Uint64 profileRasterized = SDL_GetPerformanceCounter();
 #endif

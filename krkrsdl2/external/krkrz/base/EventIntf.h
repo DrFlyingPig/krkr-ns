@@ -256,6 +256,9 @@ extern void TVPEndContinuousEvent();
 extern void TVPDeliverContinuousEvent();
 	// must be called by each platforms's implementation
 
+// Main-thread-only logical activity, independent of platform wake pacing.
+extern bool TVPHasActiveContinuousEvents();
+
 extern void TVPAddContinuousHandler(tTJSVariantClosure clo);
 	// add callback function written in TJS
 extern void TVPRemoveContinuousHandler(tTJSVariantClosure clo);
@@ -274,7 +277,8 @@ extern bool TVPProcessContinuousHandlerEventFlag;
 #define TVP_COMPACT_LEVEL_IDLE        5  // the application is in idle state
 #define TVP_COMPACT_LEVEL_DEACTIVATE 10  // the application had been deactivated
 #define TVP_COMPACT_LEVEL_MINIMIZE   15  // the application had been minimized
-#define TVP_COMPACT_LEVEL_MAX       100  // strongest level, should clear all caches
+#define TVP_COMPACT_LEVEL_MAX       100  // explicit script/application compact request
+#define TVP_COMPACT_LEVEL_CRITICAL  110  // strongest recovery after allocation failure only
 //---------------------------------------------------------------------------
 class tTVPCompactEventCallbackIntf // callback class for compact event delivering
 {

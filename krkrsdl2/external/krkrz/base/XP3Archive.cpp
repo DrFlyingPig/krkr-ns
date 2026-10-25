@@ -13,6 +13,7 @@
 
 #include "XP3Archive.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 #include "MsgIntf.h"
 #include "DebugIntf.h"
 #include "EventIntf.h"
@@ -27,6 +28,8 @@
 #include <zlib/zlib.h>
 #endif
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 
 bool TVPAllowExtractProtectedStorage = true;
 
@@ -409,10 +412,13 @@ tTVPXP3Archive::tTVPXP3Archive(const ttstr & name) : tTVPArchive(name)
 
 					unsigned long destlen = (unsigned long)index_size;
 
+					KrkrNSPerfScope perfInflate(KrkrNSPerfOp::Inflate);
 					int result = uncompress(  /* uncompress from zlib */
 						(unsigned char *)indexdata,
 						&destlen, (unsigned char*)compressed,
 							(unsigned long)compressed_size);
+					perfInflate.Bytes(destlen);
+					perfInflate.Finish();
 					if(result != Z_OK ||
 						destlen != (unsigned long)index_size)
 							TVPThrowExceptionMessage(TVPUncompressionFailed);
@@ -715,7 +721,7 @@ public:
 //---------------------------------------------------------------------------
 class tTVPSegmentData
 {
-	tjs_int RefCount;
+	std::atomic<tjs_int> RefCount;
 	tjs_uint Size;
 	tjs_uint8 *Data;
 
@@ -734,8 +740,11 @@ public:
 
 			Data = new tjs_uint8 [outsize];
 			unsigned long destlen = outsize;
+			KrkrNSPerfScope perfInflate(KrkrNSPerfOp::Inflate, outsize);
 			int result = uncompress( (unsigned char*)Data, &outsize,
 				(unsigned char*)indata, insize);
+			perfInflate.Bytes(outsize);
+			perfInflate.Finish();
 			if(result != Z_OK || destlen != outsize)
 				TVPThrowExceptionMessage(TVPUncompressionFailed);
 			Size = outsize;
@@ -751,16 +760,12 @@ public:
 	const tjs_uint8 * GetData() const { return Data; }
 	tjs_uint GetSize() const { return Size; }
 
-	void AddRef() { RefCount ++; }
+	void AddRef() { RefCount.fetch_add(1, std::memory_order_relaxed); }
 	void Release()
 	{
-		if(RefCount == 1)
+		if(RefCount.fetch_sub(1, std::memory_order_acq_rel) == 1)
 		{
 			delete this;
-		}
-		else
-		{
-			RefCount--;
 		}
 	}
 };
@@ -775,10 +780,9 @@ static tjs_uint TVPSegmentCacheTotalBytes = 0;
 
 static tTJSCriticalSection TVPSegmentCacheCS;
 //---------------------------------------------------------------------------
-static void TVPCheckSegmentCacheLimit()
+// Caller holds TVPSegmentCacheCS.
+static void TVPCheckSegmentCacheLimitLocked()
 {
-	tTJSCriticalSectionHolder cs_holder(TVPSegmentCacheCS);
-
 	while(TVPSegmentCacheTotalBytes > TVPSegmentCacheLimit)
 	{
 		// chop last segment
@@ -818,7 +822,7 @@ struct tTVPClearSegmentCacheCallback : public tTVPCompactEventCallbackIntf
 		}
 	}
 } static TVPClearSegmentCacheCallback;
-static bool TVPClearSegmentCacheCallbackInit = false;
+static std::once_flag TVPClearSegmentCacheCallbackInit;
 //---------------------------------------------------------------------------
 static tTVPSegmentData * TVPSearchFromSegmentCache(
 	const tTVPSegmentCacheSearchData &sdata, tjs_uint32 hash)
@@ -839,19 +843,20 @@ static tTVPSegmentData * TVPSearchFromSegmentCache(
 static void TVPPushToSegmentCache(const tTVPSegmentCacheSearchData &sdata, tjs_uint32 hash,
 	tTVPSegmentData *data)
 {
-	if(!TVPClearSegmentCacheCallbackInit)
-	{
+	// Register outside the cache lock: compact callbacks may clear this cache.
+	std::call_once(TVPClearSegmentCacheCallbackInit, [] {
 		TVPAddCompactEventHook(&TVPClearSegmentCacheCallback);
-		TVPClearSegmentCacheCallbackInit = true;
-	}
+	});
 
 	tTJSCriticalSectionHolder cs_holder(TVPSegmentCacheCS);
 
+	tTVPSegmentDataHolder *previous = TVPSegmentCache.FindWithHash(sdata, hash);
+	const tjs_uint previous_size = previous ? previous->GetObjectNoAddRef()->GetSize() : 0;
 	tTVPSegmentDataHolder holder(data);
 	TVPSegmentCache.AddWithHash(sdata, hash, holder);
-	TVPSegmentCacheTotalBytes += data->GetSize();
+	TVPSegmentCacheTotalBytes = TVPSegmentCacheTotalBytes - previous_size + data->GetSize();
 
-	TVPCheckSegmentCacheLimit();
+	TVPCheckSegmentCacheLimitLocked();
 }
 //---------------------------------------------------------------------------
 
@@ -1036,6 +1041,7 @@ tjs_uint64 TJS_INTF_METHOD tTVPXP3ArchiveStream::Seek(tjs_int64 offset, tjs_int 
 //---------------------------------------------------------------------------
 tjs_uint TJS_INTF_METHOD tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_size)
 {
+	KrkrNSPerfScope perfRead(KrkrNSPerfOp::XP3Read);
 	EnsureSegment();
 
 	tjs_uint write_size = 0;
@@ -1081,6 +1087,7 @@ tjs_uint TJS_INTF_METHOD tTVPXP3ArchiveStream::Read(void *buffer, tjs_uint read_
 		SegmentRemain -= one_size;
 		read_size -= one_size;
 		write_size += one_size;
+		perfRead.Bytes(write_size);
 	}
 
 	return write_size;

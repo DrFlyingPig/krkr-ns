@@ -44,7 +44,9 @@ public:
             uploadRect = {0, 0, 0, 0};
             return 0;
         }
-        uploadRect = clipped;
+        // A partial writer can be the first update after creation or failure.
+        // Establish every resident pixel before allowing later partial updates.
+        uploadRect = !contentValid ? bounds : clipped;
         const int result = TVPUploadDirtySurface(renderer, texture, surface, uploadRect);
         // An overlay writer can consume its decoded frame before uploading.
         // A failed transfer must be retried even if the next frame has no new

@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1139,6 +1140,51 @@ bool AutoPathTableInit = false;
 // full-table rebuild (sec: device log "Rebuilding Auto Path Table ... 220-550ms"
 // repeated dozens of times) made the startup pause for many seconds.
 static size_t AutoPathBuiltCount = 0;
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+// Archive membership is immutable until an explicit archive-cache clear. Loose
+// folders are checked after compact/write invalidation before reusing the index.
+// Capture the same names GetListAt supplied to the real indexer, including .prop
+// files and their case; lowercasing here would hide .prop classification changes.
+struct tTVPAutoPathFolderSnapshot
+{
+	ttstr Path;
+	std::set<ttstr> Files;
+};
+static std::vector<tTVPAutoPathFolderSnapshot> AutoPathFolderSnapshots;
+static bool AutoPathFolderSnapshotsValid = false;
+static bool AutoPathFolderValidationPending = false;
+static tjs_int AutoPathPendingCompactLevel = 0;
+static tjs_uint64 AutoPathRetainedValidationCount = 0;
+
+static void TVPDeferAutoPathFolderValidation(tjs_int level)
+{
+	if (!AutoPathTableInit) return;
+	AutoPathFolderValidationPending = true;
+	AutoPathPendingCompactLevel = std::max(AutoPathPendingCompactLevel, level);
+}
+
+static bool TVPAutoPathFoldersUnchanged()
+{
+	KrkrNSPerfScope perf(KrkrNSPerfOp::AutoPathValidate);
+	if (!AutoPathFolderSnapshotsValid) return false;
+	for (const auto &snapshot : AutoPathFolderSnapshots)
+	{
+		// Property values can change without changing directory membership.
+		// Preserve the original refresh of their parsed objects on compact.
+		for (const auto &file : snapshot.Files)
+			if (TVPExtractStorageExt(file) == TJS_W(".prop")) return false;
+		class tLister : public iTVPStorageLister
+		{
+		public:
+			std::set<ttstr> Files;
+			void TJS_INTF_METHOD Add(const ttstr &file) { Files.insert(file); }
+		} lister;
+		TVPStorageMediaManager.GetListAt(snapshot.Path, &lister);
+		if (lister.Files != snapshot.Files) return false;
+	}
+	return true;
+}
+#endif
 // KRKR-ns diagnostic: how many unresolved-name reports to emit for the current
 // session.  0 outside a probe, so normal runs pay nothing.  Sized to outlast
 // boot: the earlier limit filled up entirely on optional files the game probes
@@ -1211,6 +1257,12 @@ static void TVPClearAutoPathCache()
 	TVPAutoPathTable.Clear();
 	AutoPathTableInit = false;
 	AutoPathBuiltCount = 0;
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	std::vector<tTVPAutoPathFolderSnapshot>().swap(AutoPathFolderSnapshots);
+	AutoPathFolderSnapshotsValid = false;
+	AutoPathFolderValidationPending = false;
+	AutoPathPendingCompactLevel = 0;
+#endif
 }
 // KRKR-ns: drop ONLY the name->placed-path lookup memo, keeping the
 // filename->auto-path table and the incremental-rebuild latches.  The table
@@ -1236,6 +1288,14 @@ struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
 		{
 			// clear the auto search path cache on application deactivate
 			tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+			if (level < TVP_COMPACT_LEVEL_CRITICAL)
+			{
+				TVPClearAutoPathLookupCache();
+				TVPDeferAutoPathFolderValidation(level);
+			}
+			else
+#endif
 			TVPClearAutoPathCache();
 		}
 	}
@@ -1383,7 +1443,11 @@ void TVPRemoveAutoPath(const ttstr &name)
 /* Enumerate one auto-path entry (an archive>subdir or a real folder) and add
  * its files to TVPAutoPathTable.  Used by both the full rebuild and the
  * incremental append. */
-static tjs_uint TVPEnumerateAutoPathEntry(const ttstr & path)
+static tjs_uint TVPEnumerateAutoPathEntry(const ttstr & path
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	, std::vector<tTVPAutoPathFolderSnapshot> &snapshots
+#endif
+)
 {
 	tjs_uint count = 0;
 
@@ -1471,6 +1535,12 @@ static tjs_uint TVPEnumerateAutoPathEntry(const ttstr & path)
 			}
 		} lister;
 		TVPStorageMediaManager.GetListAt(path, &lister);
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+		tTVPAutoPathFolderSnapshot snapshot;
+		snapshot.Path = path;
+		snapshot.Files = lister.list; // before .prop processing removes names
+		snapshots.push_back(snapshot);
+#endif
 
 		if( !TVPIgnoreFileProperty )
 		{
@@ -1507,6 +1577,36 @@ static tjs_uint TVPEnumerateAutoPathEntry(const ttstr & path)
 //---------------------------------------------------------------------------
 static tjs_uint TVPRebuildAutoPathTable()
 {
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+	if (AutoPathFolderValidationPending && AutoPathTableInit)
+	{
+		const tjs_int level = AutoPathPendingCompactLevel;
+		bool unchanged = false;
+		try { unchanged = TVPAutoPathFoldersUnchanged(); }
+		catch (...)
+		{
+			// Do not publish an uncertain snapshot. The ordinary rebuild below
+			// retries the same storage API and preserves its normal failure path.
+			KRKRNS_LOG("[autopath] retained validation failed level=%d; rebuilding", level);
+		}
+		if (unchanged)
+		{
+			AutoPathFolderValidationPending = false;
+			AutoPathPendingCompactLevel = 0;
+			++AutoPathRetainedValidationCount;
+			if (AutoPathRetainedValidationCount == 1 || (AutoPathRetainedValidationCount % 64) == 0)
+				KRKRNS_LOG("[autopath] retained index validations=%llu table=%u paths=%u folders=%u level=%d",
+					(unsigned long long)AutoPathRetainedValidationCount, (unsigned)TVPAutoPathTable.GetCount(),
+					(unsigned)TVPAutoPathList.size(), (unsigned)AutoPathFolderSnapshots.size(), level);
+		}
+		else
+		{
+			KRKRNS_LOG("[autopath] folder membership changed or unavailable level=%d; rebuilding", level);
+			TVPClearAutoPathCache();
+		}
+	}
+#endif
 	// KRKR-ns: incremental — when the table is already built, only the auto
 	// paths added since the last build are enumerated and appended.  KAG
 	// mounts archives one at a time, and the old version wiped the table on
@@ -1515,10 +1615,13 @@ static tjs_uint TVPRebuildAutoPathTable()
 	// repeated dozens of times, 220-550ms each, on the device).
 	if(AutoPathTableInit && AutoPathBuiltCount >= TVPAutoPathList.size())
 		return 0; // nothing new since the last build
+	KrkrNSPerfScope perf(KrkrNSPerfOp::AutoPathRebuild);
 
 	TVPInitStorageOptions();
 
+#ifndef KRKRNS_RETAIN_AUTOPATH_INDEX
 	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+#endif
 
 	tjs_uint64 tick = TVPGetTickCount();
 	static bool indexSizeLogged = false;
@@ -1530,21 +1633,47 @@ static tjs_uint TVPRebuildAutoPathTable()
 	TVPAddLog( (const tjs_char*)TVPInfoRebuildingAutoPath );
 
 	tjs_uint totalcount = 0;
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	std::vector<tTVPAutoPathFolderSnapshot> snapshots;
+	try
+	{
+		if (AutoPathTableInit) snapshots = AutoPathFolderSnapshots;
+#endif
 	if(AutoPathTableInit)
 	{
 		const size_t total = TVPAutoPathList.size();
 		for(size_t i = AutoPathBuiltCount; i < total; i++)
-			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]);
+			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+				, snapshots
+#endif
+			);
 		AutoPathBuiltCount = total;
 	}
 	else
 	{
 		TVPAutoPathTable.Clear();
 		for(size_t i = 0; i < TVPAutoPathList.size(); i++)
-			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]);
+			totalcount += TVPEnumerateAutoPathEntry(TVPAutoPathList[i]
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+				, snapshots
+#endif
+			);
 		AutoPathBuiltCount = TVPAutoPathList.size();
 		AutoPathTableInit = true;
 	}
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+		AutoPathFolderSnapshots.swap(snapshots);
+		AutoPathFolderSnapshotsValid = true;
+		AutoPathFolderValidationPending = false;
+		AutoPathPendingCompactLevel = 0;
+	}
+	catch (...)
+	{
+		TVPClearAutoPathCache();
+		throw;
+	}
+#endif
 
 	tjs_uint64 endtick = TVPGetTickCount();
 
@@ -2096,6 +2225,11 @@ tTJSBinaryStream * TVPCreateStream(const ttstr & _name, tjs_uint32 flags)
 //---------------------------------------------------------------------------
 void TVPClearStorageCaches()
 {
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	// Also called by directory/file operations and plugins without an outer
+	// stream lock. Serialize invalidation with worker index validation/build.
+	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+#endif
 	// clear all storage related caches.  The auto-path TABLE survives: this
 	// runs on every write-mode stream open and every directory change, and the
 	// table depends only on the auto-path list, which neither touches.  Wiping
@@ -2104,6 +2238,9 @@ void TVPClearStorageCaches()
 	// system-save probe during a game's boot.
 	TVPClearXP3SegmentCache();
 	TVPClearAutoPathLookupCache();
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	TVPDeferAutoPathFolderValidation(0);
+#endif
 }
 //---------------------------------------------------------------------------
 
@@ -2942,7 +3079,13 @@ TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/chopStorageExt)
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/clearArchiveCache)
 {
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+#endif
 	TVPClearArchiveCache();
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	TVPClearAutoPathCache();
+#endif
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/clearArchiveCache)

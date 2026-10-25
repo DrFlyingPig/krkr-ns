@@ -14,6 +14,7 @@
 #include "ThreadIntf.h"
 #include "MsgIntf.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 #include "EventIntf.h"
 
 #ifdef __SWITCH__
@@ -42,7 +43,18 @@
 // tTVPThread : a wrapper class for thread
 //---------------------------------------------------------------------------
 tTVPThread::tTVPThread()
- : Thread(nullptr), Terminated(false), ThreadStarting(false)
+ : Thread(nullptr)
+#ifdef KRKRZ_USE_SDL_THREADS
+ , ThreadId(0)
+#endif
+ , Terminated(false), ThreadStarting(false)
+#ifdef KRKRZ_USE_SDL_THREADS
+ , ThreadActive(false), PriorityConfigured(false)
+#ifdef __SWITCH__
+ , NativeThreadHandle(0)
+#endif
+ , _Priority(SDL_THREAD_PRIORITY_NORMAL)
+#endif
 {
 #ifdef KRKRZ_USE_SDL_THREADS
 	Mtx = SDL_CreateMutex();
@@ -53,10 +65,7 @@ tTVPThread::tTVPThread()
 tTVPThread::~tTVPThread()
 {
 #ifdef KRKRZ_USE_SDL_THREADS
-	if( Thread != nullptr ) {
-		SDL_WaitThread(Thread, NULL);
-		Thread = nullptr;
-	}
+	WaitFor();
 	SDL_DestroyCond(Cond);
 	SDL_DestroyMutex(Mtx);
 #else
@@ -81,12 +90,26 @@ void tTVPThread::StartProc()
 #ifdef KRKRZ_USE_SDL_THREADS
 	// スレッドが開始されたのでフラグON
 	tTVPThread* _this = (tTVPThread*)arg;
-	_this->ThreadId = SDL_ThreadID();
 	SDL_LockMutex(_this->Mtx);
+	_this->ThreadId = SDL_ThreadID();
+#ifdef __SWITCH__
+	_this->NativeThreadHandle = threadGetCurHandle();
+#endif
+	_this->ThreadActive = true;
+	if (_this->PriorityConfigured && !_this->ApplyPriority(_this->_Priority))
+		_this->_Priority = SDL_THREAD_PRIORITY_NORMAL;
 	_this->ThreadStarting = true;
 	SDL_CondBroadcast(_this->Cond);
 	SDL_UnlockMutex(_this->Mtx);
 	(_this)->Execute();
+	SDL_LockMutex(_this->Mtx);
+	_this->ThreadActive = false;
+#ifdef __SWITCH__
+	// SDL owns the native handle. Retire our borrowed handle before SDL exits
+	// and can close it, serialized with every cross-thread priority update.
+	_this->NativeThreadHandle = 0;
+#endif
+	SDL_UnlockMutex(_this->Mtx);
 
 	return 0;
 #else
@@ -106,6 +129,10 @@ void tTVPThread::StartTread()
 {
 #ifdef KRKRZ_USE_SDL_THREADS
 	if( Thread == nullptr ) {
+		SDL_LockMutex(Mtx);
+		ThreadStarting = false;
+		ThreadId = 0;
+		SDL_UnlockMutex(Mtx);
 		void *caller = __builtin_return_address(0);
 		KRKRNS_LOG("[thread] StartTread caller=%p", caller);
 		Thread = SDL_CreateThread(tTVPThread::StartProc, "tTVPThread", this);
@@ -116,7 +143,7 @@ void tTVPThread::StartTread()
 			// the pool is sitting on.  Deliver a compact event (the same
 			// recovery a failed bitmap allocation uses) and retry once.
 			KRKRNS_LOG("[thread] SDL_CreateThread failed: %s; compacting and retrying", SDL_GetError());
-			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
+			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
 			Thread = SDL_CreateThread(tTVPThread::StartProc, "tTVPThread", this);
 			if (Thread == nullptr) {
 				KRKRNS_LOG("[thread] SDL_CreateThread retry failed: %s", SDL_GetError());
@@ -146,10 +173,49 @@ void tTVPThread::StartTread()
 #endif
 }
 //---------------------------------------------------------------------------
+#ifdef KRKRZ_USE_SDL_THREADS
+void tTVPThread::WaitFor()
+{
+	if (Thread) SDL_WaitThread(Thread, nullptr);
+	Thread = nullptr;
+}
+
+bool tTVPThread::ApplyPriority(SDL_ThreadPriority priority)
+{
+#ifdef __SWITCH__
+	// Preserve the installed SDL Switch mapping. Higher/Highest still map to
+	// NORMAL below; only the explicit TimeCritical request selects HIGH.
+	const u32 nativePriority = priority == SDL_THREAD_PRIORITY_HIGH ? 0x2b : 0x3b;
+	const Result rc = svcSetThreadPriority(NativeThreadHandle, nativePriority);
+	if (R_FAILED(rc)) {
+		KRKRNS_LOG("[thread] priority set failed handle=%x priority=%u rc=%x",
+			NativeThreadHandle, nativePriority, rc);
+		return false;
+	}
+	return true;
+#else
+	// SDL only exposes a current-thread setter. Never apply another thread's
+	// requested priority to the caller on platforms without a target API here.
+	if (ThreadId != SDL_ThreadID()) {
+		KRKRNS_LOG("[thread] target priority update unsupported on this SDL platform");
+		return false;
+	}
+	if (SDL_SetThreadPriority(priority) != 0) {
+		KRKRNS_LOG("[thread] priority set failed: %s", SDL_GetError());
+		return false;
+	}
+	return true;
+#endif
+}
+#endif
+//---------------------------------------------------------------------------
 tTVPThreadPriority tTVPThread::GetPriority()
 {
 #ifdef KRKRZ_USE_SDL_THREADS
-	switch(_Priority)
+	SDL_LockMutex(Mtx);
+	const SDL_ThreadPriority priority = _Priority;
+	SDL_UnlockMutex(Mtx);
+	switch(priority)
 	{
 	case SDL_THREAD_PRIORITY_LOW:			return ttpIdle;
 	case SDL_THREAD_PRIORITY_NORMAL:		return ttpNormal;
@@ -230,8 +296,12 @@ void tTVPThread::SetPriority(tTVPThreadPriority pri)
 	case ttpHighest:		npri = SDL_THREAD_PRIORITY_NORMAL;		break;
 	case ttpTimeCritical:	npri = SDL_THREAD_PRIORITY_HIGH;		break;
 	}
-	SDL_SetThreadPriority(npri);
-	_Priority = npri;
+	SDL_LockMutex(Mtx);
+	if (!ThreadActive || ApplyPriority(npri)) {
+		_Priority = npri;
+		PriorityConfigured = true;
+	}
+	SDL_UnlockMutex(Mtx);
 #else
 #ifdef _WIN32
 	int npri = THREAD_PRIORITY_NORMAL;
@@ -293,7 +363,9 @@ tjs_int TVPGetProcessorNum( void )
 		const Result rc = svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
 		if (R_SUCCEEDED(rc) && mask)
 			return static_cast<tjs_int>(__builtin_popcountll(mask));
-		return std::max<tjs_int>(1, SDL_GetCPUCount());
+		// Without a capability mask, one submitting thread is the only safe
+		// execution width; a hardware CPU count can include forbidden cores.
+		return 1;
 	}();
 	return processors;
 #else
@@ -311,9 +383,9 @@ tjs_int TVPGetProcessorNum( void )
 tjs_int TVPGetThreadNum( void )
 {
 #ifdef KRKRZ_USE_SDL_THREADS
-	tjs_int threadNum = TVPDrawThreadNum ? TVPDrawThreadNum : TVPGetProcessorNum();
-	threadNum = std::min( threadNum, TVPMaxThreadNum );
-	return threadNum;
+	const tjs_int processors = std::max<tjs_int>(1, TVPGetProcessorNum());
+	const tjs_int threadNum = TVPDrawThreadNum ? TVPDrawThreadNum : processors;
+	return std::max<tjs_int>(1, std::min(threadNum, std::min(processors, TVPMaxThreadNum)));
 #else
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	return 1;
@@ -476,8 +548,11 @@ public:
 	void WaitForTask() {
 #ifdef KRKRZ_USE_SDL_THREADS
 		SDL_LockMutex(completion_mtx);
-		while (SDL_AtomicGet(&running_thread_count) != 0)
-			SDL_CondWait(completion_cv, completion_mtx);
+		if (SDL_AtomicGet(&running_thread_count) != 0) {
+			KrkrNSPerfScope perfWait(KrkrNSPerfOp::ThreadWait);
+			while (SDL_AtomicGet(&running_thread_count) != 0)
+				SDL_CondWait(completion_cv, completion_mtx);
+		}
 		SDL_UnlockMutex(completion_mtx);
 #else
 #if (!defined(__EMSCRIPTEN__)) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))

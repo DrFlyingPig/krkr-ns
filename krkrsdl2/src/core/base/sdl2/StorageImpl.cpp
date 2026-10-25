@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 #include "SevenZipArchive.h"
 
 #include "MsgIntf.h"
@@ -1159,7 +1160,10 @@ tjs_uint TJS_INTF_METHOD tTVPLocalFileStream::Read(void *buffer, tjs_uint read_s
 	// most one per half second) so a frozen session shows whether storage was
 	// still being served and how slow it was.
 	const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
+	KrkrNSPerfScope perfRead(KrkrNSPerfOp::DiskRead);
 	size_t ret = SDL_RWread(io_handle, buffer, 1, read_size);
+	perfRead.Bytes(ret);
+	perfRead.Finish();
 	const tjs_uint32 krkrns_dt = TVPGetRoughTickCount32() - krkrns_t0;
 	if (krkrns_dt >= 300)
 	{

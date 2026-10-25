@@ -19,6 +19,7 @@
 #include "tjsCommHead.h"
 #include "LayerIntf.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSPerf.h"
 #include <SDL.h>
 
 namespace emoteplayer
@@ -67,6 +68,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                                     int sourceHeight,
                                     tTVPRect* dirtyRect)
 {
+    KrkrNSPerfScope perf(KrkrNSPerfOp::EmoteLayerBridge);
     EmoteProfTimer profTimer(krkrsdl2_prof_emote_readback);
     (void)profTimer;
     if (dirtyRect)
@@ -146,84 +148,195 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         int dirtyRight = 0;
         int dirtyBottom = 0;
         const Uint64 cvtStart = SDL_GetPerformanceCounter();
-        for (int y = 0; y < copyHeight; ++y)
         {
-            uint8_t* destinationRow =
-                destination + static_cast<std::ptrdiff_t>(y) * destinationStride;
-            const uint8_t* sourceRow =
-                source + static_cast<std::ptrdiff_t>(y) * sourceStride;
-            // The E-mote backend is RGBA, while a 32-bpp Kirikiri Layer is
-            // BGRA in memory.  Preserve G/A and exchange R/B at the boundary.
-            // Compare against the previous layer at the same time so Kirikiri
-            // only recomposes the pixels that actually changed.  This also
-            // catches transparent pixels left behind when a sprite moves.
-            int rowLeft = copyWidth;
-            int rowRight = 0;
-            int x = 0;
+            KrkrNSPerfScope perfConvert(KrkrNSPerfOp::EmoteConvert);
+            for (int y = 0; y < copyHeight; ++y)
+            {
+                uint8_t* destinationRow =
+                    destination + static_cast<std::ptrdiff_t>(y) * destinationStride;
+                const uint8_t* sourceRow =
+                    source + static_cast<std::ptrdiff_t>(y) * sourceStride;
+                // The E-mote backend is RGBA, while a 32-bpp Kirikiri Layer is
+                // BGRA in memory.  Preserve G/A and exchange R/B at the boundary.
+                // Compare against the previous layer at the same time so Kirikiri
+                // only recomposes the pixels that actually changed.  This also
+                // catches transparent pixels left behind when a sprite moves.
+                int rowLeft = copyWidth;
+                int rowRight = 0;
+                int x = 0;
 #ifdef __SWITCH__
-            // Convert four RGBA pixels to Kirikiri BGRA at once.  The prior
-            // memcpy-per-pixel loop was measurable after GPU rendering became
-            // fast, especially when several full-stage E-mote layers coexist.
-            static const uint8_t swizzleBytes[16] = {
-                2, 1, 0, 3, 6, 5, 4, 7,
-                10, 9, 8, 11, 14, 13, 12, 15};
-            const uint8x16_t swizzle = vld1q_u8(swizzleBytes);
-            uint32x4_t lastChanged = vdupq_n_u32(0);
-            int lastChangedX = 0;
-            for (; x + 4 <= copyWidth; x += 4)
-            {
-                const uint8x16_t rgba = vld1q_u8(sourceRow + static_cast<size_t>(x) * 4u);
-                const uint8x16_t bgra = vqtbl1q_u8(rgba, swizzle);
-                const uint8x16_t old = vld1q_u8(destinationRow + static_cast<size_t>(x) * 4u);
-                const uint32x4_t changed = vmvnq_u32(vceqq_u32(
-                    vreinterpretq_u32_u8(old), vreinterpretq_u32_u8(bgra)));
-                if (vmaxvq_u32(changed) != 0)
+                // Convert four RGBA pixels to Kirikiri BGRA at once.  The prior
+                // memcpy-per-pixel loop was measurable after GPU rendering became
+                // fast, especially when several full-stage E-mote layers coexist.
+                static const uint8_t swizzleBytes[16] = {
+                    2, 1, 0, 3, 6, 5, 4, 7,
+                    10, 9, 8, 11, 14, 13, 12, 15};
+                const uint8x16_t swizzle = vld1q_u8(swizzleBytes);
+#if defined(KRKRNS_EMOTE_BRIDGE_BLOCK16)
+                const std::uintptr_t sourceAddress = reinterpret_cast<std::uintptr_t>(sourceRow);
+                const std::uintptr_t destinationAddress = reinterpret_cast<std::uintptr_t>(destinationRow);
+                const bool disjointRows = sourceAddress < destinationAddress
+                    ? destinationAddress - sourceAddress >= rowBytes
+                    : sourceAddress - destinationAddress >= rowBytes;
+                if (disjointRows)
                 {
-                    if (rowLeft == copyWidth)
-                        rowLeft = x + (vgetq_lane_u32(changed, 0) ? 0 :
-                                       vgetq_lane_u32(changed, 1) ? 1 :
-                                       vgetq_lane_u32(changed, 2) ? 2 : 3);
-                    rowRight = x + 4;
-                    lastChangedX = x;
-                    lastChanged = changed;
-                    // Equal groups need no write. Determine the precise right
-                    // edge once per row rather than extracting four lanes for
-                    // every converted group; transparent erasure still counts.
-                    vst1q_u8(destinationRow + static_cast<size_t>(x) * 4u, bgra);
+                    uint32x4_t firstChanged0 = vdupq_n_u32(0);
+                    uint32x4_t firstChanged1 = firstChanged0;
+                    uint32x4_t firstChanged2 = firstChanged0;
+                    uint32x4_t firstChanged3 = firstChanged0;
+                    uint32x4_t lastChanged0 = firstChanged0;
+                    uint32x4_t lastChanged1 = firstChanged0;
+                    uint32x4_t lastChanged2 = firstChanged0;
+                    uint32x4_t lastChanged3 = firstChanged0;
+                    int firstBlockX = -1;
+                    int lastBlockX = 0;
+                    for (; x + 16 <= copyWidth; x += 16)
+                    {
+                        const size_t offset = static_cast<size_t>(x) * 4u;
+                        const uint8x16_t bgra0 = vqtbl1q_u8(vld1q_u8(sourceRow + offset), swizzle);
+                        const uint8x16_t bgra1 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 16), swizzle);
+                        const uint8x16_t bgra2 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 32), swizzle);
+                        const uint8x16_t bgra3 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 48), swizzle);
+                        const uint32x4_t changed0 = vmvnq_u32(vceqq_u32(
+                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset)),
+                            vreinterpretq_u32_u8(bgra0)));
+                        const uint32x4_t changed1 = vmvnq_u32(vceqq_u32(
+                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 16)),
+                            vreinterpretq_u32_u8(bgra1)));
+                        const uint32x4_t changed2 = vmvnq_u32(vceqq_u32(
+                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 32)),
+                            vreinterpretq_u32_u8(bgra2)));
+                        const uint32x4_t changed3 = vmvnq_u32(vceqq_u32(
+                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 48)),
+                            vreinterpretq_u32_u8(bgra3)));
+                        const uint32x4_t changed = vorrq_u32(
+                            vorrq_u32(changed0, changed1), vorrq_u32(changed2, changed3));
+                        if (vmaxvq_u32(changed) != 0)
+                        {
+                            if (firstBlockX < 0)
+                            {
+                                firstBlockX = x;
+                                firstChanged0 = changed0;
+                                firstChanged1 = changed1;
+                                firstChanged2 = changed2;
+                                firstChanged3 = changed3;
+                            }
+                            lastBlockX = x;
+                            lastChanged0 = changed0;
+                            lastChanged1 = changed1;
+                            lastChanged2 = changed2;
+                            lastChanged3 = changed3;
+                            // Equal pixels in a changed block are rewritten verbatim.
+                            vst1q_u8(destinationRow + offset, bgra0);
+                            vst1q_u8(destinationRow + offset + 16, bgra1);
+                            vst1q_u8(destinationRow + offset + 32, bgra2);
+                            vst1q_u8(destinationRow + offset + 48, bgra3);
+                        }
+                    }
+                    if (firstBlockX >= 0)
+                    {
+                        uint32x4_t firstChanged = firstChanged0;
+                        int firstGroupX = 0;
+                        if (vmaxvq_u32(firstChanged0) == 0)
+                        {
+                            firstGroupX = 4;
+                            firstChanged = firstChanged1;
+                            if (vmaxvq_u32(firstChanged1) == 0)
+                            {
+                                firstGroupX = 8;
+                                firstChanged = firstChanged2;
+                                if (vmaxvq_u32(firstChanged2) == 0)
+                                {
+                                    firstGroupX = 12;
+                                    firstChanged = firstChanged3;
+                                }
+                            }
+                        }
+                        rowLeft = firstBlockX + firstGroupX +
+                            (vgetq_lane_u32(firstChanged, 0) ? 0 :
+                             vgetq_lane_u32(firstChanged, 1) ? 1 :
+                             vgetq_lane_u32(firstChanged, 2) ? 2 : 3);
+                        uint32x4_t finalChanged = lastChanged3;
+                        int lastGroupX = 12;
+                        if (vmaxvq_u32(lastChanged3) == 0)
+                        {
+                            lastGroupX = 8;
+                            finalChanged = lastChanged2;
+                            if (vmaxvq_u32(lastChanged2) == 0)
+                            {
+                                lastGroupX = 4;
+                                finalChanged = lastChanged1;
+                                if (vmaxvq_u32(lastChanged1) == 0)
+                                {
+                                    lastGroupX = 0;
+                                    finalChanged = lastChanged0;
+                                }
+                            }
+                        }
+                        rowRight = lastBlockX + lastGroupX +
+                            (vgetq_lane_u32(finalChanged, 3) ? 4 :
+                             vgetq_lane_u32(finalChanged, 2) ? 3 :
+                             vgetq_lane_u32(finalChanged, 1) ? 2 : 1);
+                    }
                 }
-            }
-            if (rowRight)
-                rowRight = lastChangedX + (vgetq_lane_u32(lastChanged, 3) ? 4 :
-                                          vgetq_lane_u32(lastChanged, 2) ? 3 :
-                                          vgetq_lane_u32(lastChanged, 1) ? 2 : 1);
 #endif
-            auto* destinationPixels = reinterpret_cast<std::uint32_t*>(destinationRow);
-            const auto* sourcePixels = reinterpret_cast<const std::uint32_t*>(sourceRow);
-            for (; x < copyWidth; ++x)
-            {
-                const std::uint32_t sourcePixel = sourcePixels[x];
-                const std::uint32_t convertedPixel =
-                    (sourcePixel & 0xff00ff00u) |
-                    ((sourcePixel & 0x000000ffu) << 16) |
-                    ((sourcePixel & 0x00ff0000u) >> 16);
-                if (destinationPixels[x] != convertedPixel)
+                uint32x4_t lastChanged = vdupq_n_u32(0);
+                int lastChangedX = -1;
+                for (; x + 4 <= copyWidth; x += 4)
                 {
-                    destinationPixels[x] = convertedPixel;
-                    if (rowLeft == copyWidth)
-                        rowLeft = x;
-                    rowRight = x + 1;
+                    const uint8x16_t rgba = vld1q_u8(sourceRow + static_cast<size_t>(x) * 4u);
+                    const uint8x16_t bgra = vqtbl1q_u8(rgba, swizzle);
+                    const uint8x16_t old = vld1q_u8(destinationRow + static_cast<size_t>(x) * 4u);
+                    const uint32x4_t changed = vmvnq_u32(vceqq_u32(
+                        vreinterpretq_u32_u8(old), vreinterpretq_u32_u8(bgra)));
+                    if (vmaxvq_u32(changed) != 0)
+                    {
+                        if (rowLeft == copyWidth)
+                            rowLeft = x + (vgetq_lane_u32(changed, 0) ? 0 :
+                                           vgetq_lane_u32(changed, 1) ? 1 :
+                                           vgetq_lane_u32(changed, 2) ? 2 : 3);
+                        rowRight = x + 4;
+                        lastChangedX = x;
+                        lastChanged = changed;
+                        // Equal groups need no write. Determine the precise right
+                        // edge once per row rather than extracting four lanes for
+                        // every converted group; transparent erasure still counts.
+                        vst1q_u8(destinationRow + static_cast<size_t>(x) * 4u, bgra);
+                    }
+                }
+                if (lastChangedX >= 0)
+                    rowRight = lastChangedX + (vgetq_lane_u32(lastChanged, 3) ? 4 :
+                                              vgetq_lane_u32(lastChanged, 2) ? 3 :
+                                              vgetq_lane_u32(lastChanged, 1) ? 2 : 1);
+#endif
+                auto* destinationPixels = reinterpret_cast<std::uint32_t*>(destinationRow);
+                const auto* sourcePixels = reinterpret_cast<const std::uint32_t*>(sourceRow);
+                for (; x < copyWidth; ++x)
+                {
+                    const std::uint32_t sourcePixel = sourcePixels[x];
+                    const std::uint32_t convertedPixel =
+                        (sourcePixel & 0xff00ff00u) |
+                        ((sourcePixel & 0x000000ffu) << 16) |
+                        ((sourcePixel & 0x00ff0000u) >> 16);
+                    if (destinationPixels[x] != convertedPixel)
+                    {
+                        destinationPixels[x] = convertedPixel;
+                        if (rowLeft == copyWidth)
+                            rowLeft = x;
+                        rowRight = x + 1;
+                    }
+                }
+                if (rowLeft < rowRight)
+                {
+                    dirtyLeft = std::min(dirtyLeft, rowLeft);
+                    dirtyTop = std::min(dirtyTop, y);
+                    dirtyRight = std::max(dirtyRight, rowRight);
+                    dirtyBottom = y + 1;
                 }
             }
-            if (rowLeft < rowRight)
-            {
-                dirtyLeft = std::min(dirtyLeft, rowLeft);
-                dirtyTop = std::min(dirtyTop, y);
-                dirtyRight = std::max(dirtyRight, rowRight);
-                dirtyBottom = y + 1;
-            }
+            if (dirtyRect && dirtyLeft < dirtyRight && dirtyTop < dirtyBottom)
+                *dirtyRect = tTVPRect(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
         }
-        if (dirtyRect && dirtyLeft < dirtyRight && dirtyTop < dirtyBottom)
-            *dirtyRect = tTVPRect(dirtyLeft, dirtyTop, dirtyRight, dirtyBottom);
         krkrsdl2_prof_emote_convert(
             (double)(SDL_GetPerformanceCounter() - cvtStart) * 1000.0 /
             (double)SDL_GetPerformanceFrequency());

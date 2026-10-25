@@ -6,6 +6,7 @@
 #include "DebugIntf.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
+#include "KrkrNSPerf.h"
 #include "GLCompositeBridge.h"
 #include <SDL.h>
 
@@ -116,6 +117,8 @@ void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 		r.set_offsets(copied.x, copied.y);
 		r.set_size(copied.w, copied.h);
 		update_rect.do_union(r);
+		krkrsdl2_perf_bytes(KrkrNSPerfOp::SurfaceCopy,
+			static_cast<std::uint64_t>(copied.w) * copied.h * 4);
 	}
 #ifdef __SWITCH__
 	else

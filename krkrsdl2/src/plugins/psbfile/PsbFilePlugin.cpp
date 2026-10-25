@@ -5,6 +5,7 @@
 #include "KrkrNSLog.h"
 #include "KrkrNSSlowOperation.h"
 #include "KrkrNSVMProf.h"
+#include "KrkrNSPerf.h"
 #include "StorageIntf.h"
 #include "UtilStreams.h"
 #include "SharedMemoryStream.h"
@@ -192,6 +193,28 @@ struct PsbArray
 	size_t End = 0;
 };
 
+#ifdef KRKRNS_PSB_ENTRY_VIEWS
+struct PsbArrayView
+{
+	struct Entries
+	{
+		const tjs_uint8 *Data = nullptr;
+		size_t Count = 0;
+		size_t Width = 0;
+
+		size_t size() const { return Count; }
+		tjs_uint32 operator[](size_t index) const
+		{
+			tjs_uint32 value = 0;
+			for (size_t byte = 0; byte < std::min(Width, size_t(4)); ++byte)
+				value |= static_cast<tjs_uint32>(Data[index * Width + byte]) << (byte * 8);
+			return value;
+		}
+	} Values;
+	size_t End = 0;
+};
+#endif
+
 struct ParsedValue
 {
 	tTJSVariant Value;
@@ -199,6 +222,73 @@ struct ParsedValue
 	tjs_uint32 ResourceIndex = 0;
 	bool IsExtraResource = false;
 };
+
+static tTJSArrayNI *ReserveFreshArray(iTJSDispatch2 *array, size_t count)
+{
+#ifdef KRKRNS_PSB_APPEND
+	tTJSArrayNI *native = nullptr;
+	if (TJS_SUCCEEDED(array->NativeInstanceSupport(TJS_NIS_GETINSTANCE,
+		TJSGetArrayClassID(), reinterpret_cast<iTJSNativeInstance **>(&native))) &&
+		native && native->Items.empty())
+	{
+		native->Items.reserve(count);
+		return native;
+	}
+#endif
+	return nullptr;
+}
+
+static void AppendFreshArray(iTJSDispatch2 *array, tTJSArrayNI *native,
+	tjs_uint index, const tTJSVariant &value)
+{
+	// Only used before publishing a new array. Add retains TJS closure ownership;
+	// no existing slot/property setter or script callback is bypassed.
+	if (native) static_cast<tTJSArrayObject *>(array)->Add(native, value);
+	else array->PropSetByNum(TJS_MEMBERENSURE, index, &value, array);
+}
+
+#ifdef KRKRNS_PSB_DICTIONARY_CAPACITY
+static iTJSDispatch2 *CreateCapacityDictionary(size_t count)
+{
+	// Obtain the same private native class used by the normal factory. This
+	// mirrors the binary serializer; the script-global Dictionary is unrelated.
+	struct ClassHolder
+	{
+		iTJSDispatch2 *Object = nullptr;
+		ClassHolder()
+		{
+			iTJSDispatch2 *fresh = nullptr;
+			try { fresh = TJSCreateDictionaryObject(&Object); }
+			catch (...)
+			{
+				if (Object) Object->Release();
+				throw;
+			}
+			if (fresh) fresh->Release();
+			if (!Object) throw std::runtime_error("Unable to obtain PSB dictionary class");
+		}
+		~ClassHolder() { if (Object) Object->Release(); }
+	};
+	static ClassHolder dictionaryClass;
+	tTJSVariant capacity(static_cast<tjs_int64>(count));
+	tTJSVariant *parameters[] = {&capacity};
+	iTJSDispatch2 *dictionary = nullptr;
+	const tjs_error status = dictionaryClass.Object->CreateNew(0, nullptr, nullptr,
+		&dictionary, 1, parameters, dictionaryClass.Object);
+	if (TJS_FAILED(status) || !dictionary)
+	{
+		if (dictionary) dictionary->Release();
+		throw std::runtime_error("Unable to create PSB dictionary");
+	}
+	static const bool announced = [count] {
+		KRKRNS_LOG("[psb] dictionary capacity candidate enabled count=%u",
+			static_cast<unsigned>(count));
+		return true;
+	}();
+	(void)announced;
+	return dictionary;
+}
+#endif
 
 class PsbReader
 {
@@ -269,6 +359,40 @@ class PsbReader
 		result.End = offset;
 		return result;
 	}
+
+#ifdef KRKRNS_PSB_ENTRY_VIEWS
+	PsbArrayView ReadEntryArray(size_t offset) const
+	{
+		Require(offset, 1, "array tag");
+		const int countWidth = static_cast<int>(Data[offset++]) - 0x0c;
+		if (countWidth < 1 || countWidth > 8)
+			throw std::runtime_error("Invalid PSB array count tag");
+		const tjs_uint64 count64 = ReadUInt(offset, static_cast<size_t>(countWidth), "array count");
+		offset += static_cast<size_t>(countWidth);
+		if (count64 > 0x1000000u) throw std::runtime_error("PSB array is unreasonably large");
+
+		Require(offset, 1, "array entry tag");
+		const int entryWidth = static_cast<int>(Data[offset++]) - 0x0c;
+		if (entryWidth < 0 || entryWidth > 8)
+			throw std::runtime_error("Invalid PSB array entry tag");
+
+		const size_t count = static_cast<size_t>(count64);
+		const size_t width = static_cast<size_t>(entryWidth);
+		if (width <= 4)
+			Require(offset, count * width, "array entry");
+		else
+		{
+			// Validate the whole table before creating any script object. Keep
+			// wide-entry overflow and truncation checks in the original order.
+			for (size_t i = 0; i < count; ++i)
+				if (ReadUInt(offset + i * width, width, "array entry") > 0xffffffffu)
+					throw std::runtime_error("PSB array entry exceeds 32 bits");
+		}
+		return {{Data.data() + offset, count, width}, offset + count * width};
+	}
+#else
+	PsbArray ReadEntryArray(size_t offset) const { return ReadArray(offset); }
+#endif
 
 	static tjs_string Utf8(const char *data, size_t length)
 	{
@@ -402,14 +526,23 @@ class PsbReader
 		}
 		if (tag >= 0x0d && tag <= 0x14)
 		{
-			const PsbArray values = ReadArray(offset - 1);
+			const auto values = ReadEntryArray(offset - 1);
 			iTJSDispatch2 *array = TJSCreateArrayObject();
-			for (tjs_uint i = 0; i < values.Values.size(); ++i)
+			try
 			{
-				tTJSVariant value(static_cast<tjs_int64>(values.Values[i]));
-				array->PropSetByNum(TJS_MEMBERENSURE, i, &value, array);
+				tTJSArrayNI *native = ReserveFreshArray(array, values.Values.size());
+				for (tjs_uint i = 0; i < values.Values.size(); ++i)
+				{
+					tTJSVariant value(static_cast<tjs_int64>(values.Values[i]));
+					AppendFreshArray(array, native, i, value);
+				}
+				result.Value = tTJSVariant(array, array);
 			}
-			result.Value = tTJSVariant(array, array);
+			catch (...)
+			{
+				array->Release();
+				throw;
+			}
 			array->Release();
 			return result;
 		}
@@ -457,15 +590,16 @@ class PsbReader
 		}
 		if (tag == 0x20)
 		{
-			const PsbArray offsets = ReadArray(offset);
+			const auto offsets = ReadEntryArray(offset);
 			const size_t base = offsets.End;
 			iTJSDispatch2 *array = TJSCreateArrayObject();
 			try
 			{
+				tTJSArrayNI *native = ReserveFreshArray(array, offsets.Values.size());
 				for (tjs_uint i = 0; i < offsets.Values.size(); ++i)
 				{
 					ParsedValue item = ParseValue(base + offsets.Values[i], depth + 1);
-					array->PropSetByNum(TJS_MEMBERENSURE, i, &item.Value, array);
+					AppendFreshArray(array, native, i, item.Value);
 				}
 				result.Value = tTJSVariant(array, array);
 			}
@@ -479,20 +613,28 @@ class PsbReader
 		}
 		if (tag == 0x21)
 		{
-			const PsbArray nameIndexes = ReadArray(offset);
-			const PsbArray offsets = ReadArray(nameIndexes.End);
+			const auto nameIndexes = ReadEntryArray(offset);
+			const auto offsets = ReadEntryArray(nameIndexes.End);
 			const size_t base = offsets.End;
 			if (nameIndexes.Values.size() != offsets.Values.size())
 				throw std::runtime_error("Mismatched PSB dictionary tables");
 
-			iTJSDispatch2 *dictionary = TJSCreateDictionaryObject();
+			iTJSDispatch2 *dictionary =
+#ifdef KRKRNS_PSB_DICTIONARY_CAPACITY
+				nameIndexes.Values.size() >= 8
+					? CreateCapacityDictionary(nameIndexes.Values.size())
+					:
+#endif
+				TJSCreateDictionaryObject();
 			try
 			{
+#ifndef KRKRNS_PSB_DICTIONARY_CAPACITY
 				// Match Dictionary.assign's capacity reservation. Large UI tables
 				// otherwise put thousands of keys into the default small hash.
 				if (nameIndexes.Values.size() >= 8)
 					static_cast<tTJSDictionaryObject *>(dictionary)->RebuildHash(
 						static_cast<tjs_int>(nameIndexes.Values.size()));
+#endif
 				for (size_t i = 0; i < nameIndexes.Values.size(); ++i)
 				{
 					const tjs_uint32 nameIndex = nameIndexes.Values[i];
@@ -534,6 +676,7 @@ public:
 
 	ParsedValue Parse()
 	{
+		KrkrNSPerfScope perfTables(KrkrNSPerfOp::PsbTables);
 		ParseHeader();
 		LoadNames();
 		LoadStrings();
@@ -548,6 +691,8 @@ public:
 			if (ExtraChunkOffsets.size() != ExtraChunkLengths.size())
 				throw std::runtime_error("Mismatched PSB extra resource tables");
 		}
+		perfTables.Finish();
+		KrkrNSPerfScope perfBuild(KrkrNSPerfOp::PsbBuild);
 		return ParseValue(Header.OffsetEntries, 0);
 	}
 
@@ -622,6 +767,7 @@ void TJS_INTF_METHOD tTJSNI_PSBFile::Invalidate()
 {
 	if (Root)
 	{
+		KrkrNSPerfScope perfRelease(KrkrNSPerfOp::PsbRelease);
 		KrkrNSVMProfNativeScope profile("psb-root-release");
 		Root->Release();
 		Root = nullptr;
@@ -633,21 +779,33 @@ bool tTJSNI_PSBFile::Load(const ttstr &storage)
 	KrkrNSSlowOperation slow("psb-load", &storage);
 	try
 	{
-		// Split the measurement per phase.  A single psb-load number says a
-		// scenario file took a second but not whether the cost is decompression,
-		// parsing or resource registration -- and those have completely
-		// different fixes.  This is the hot path for every PSB title, so the
-		// breakdown is worth three clock reads.
+		// Preserve phase logs while optional scopes separate nested I/O and
+		// table/object work from the enclosing load and parse measurements.
 		const ttstr placed = TVPGetPlacedPath(storage);
 		if (placed.IsEmpty()) throw std::runtime_error("PSB storage was not found");
 		const Uint32 t1 = SDL_GetTicks();
+		KrkrNSPerfScope perfRead(KrkrNSPerfOp::PsbRead);
 		std::unique_ptr<tTJSBinaryStream> stream(TVPCreateStream(placed, TJS_BS_READ));
-		const std::vector<tjs_uint8> raw = ReadAll(stream.get());
+		std::vector<tjs_uint8> raw = ReadAll(stream.get());
+		perfRead.Bytes(raw.size());
+		perfRead.Finish();
 		const Uint32 t2 = SDL_GetTicks();
-		const std::vector<tjs_uint8> expanded = ExpandMdf(raw);
+		KrkrNSPerfScope perfExpand(KrkrNSPerfOp::PsbExpand);
+#ifdef KRKRNS_PSB_APPEND
+		std::vector<tjs_uint8> expanded = ExpandMdf(std::move(raw));
+#else
+		std::vector<tjs_uint8> expanded = ExpandMdf(raw);
+#endif
+		perfExpand.Finish();
 		const Uint32 t3 = SDL_GetTicks();
+		KrkrNSPerfScope perfParse(KrkrNSPerfOp::PsbParse, expanded.size());
+#ifdef KRKRNS_PSB_APPEND
+		PsbReader reader(std::move(expanded));
+#else
 		PsbReader reader(expanded);
+#endif
 		ParsedValue root = reader.Parse();
+		perfParse.Finish();
 		if (root.Value.Type() != tvtObject) throw std::runtime_error("PSB root is not a dictionary");
 		const Uint32 t4 = SDL_GetTicks();
 
@@ -655,7 +813,9 @@ bool tTJSNI_PSBFile::Load(const ttstr &storage)
 		// The script may use an extension-less auto-path lookup.  psb:// URLs,
 		// however, are keyed by the placed container name (common.pimg, etc.).
 		const ttstr container = TVPExtractStorageName(placed);
+		KrkrNSPerfScope perfCommit(KrkrNSPerfOp::PsbCommit);
 		PsbMedia->Commit(container, reader.NamedResources());
+		perfCommit.Finish();
 		const Uint32 t5 = SDL_GetTicks();
 		// No file name here on purpose: AsNarrowStdString() THROWS on a path the
 		// active code page cannot represent, and game directories are routinely

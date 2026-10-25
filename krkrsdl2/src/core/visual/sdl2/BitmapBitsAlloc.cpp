@@ -122,7 +122,7 @@ void* tTVPBitmapBitsAlloc::Alloc( tjs_uint size, tjs_uint width, tjs_uint height
 	if(!ptr) {
 		LogMemory("bitmap-allocation-failed", allocbytes);
 		// Do GC
-		TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
+		TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
 		ptr = ptrorg = (tjs_uint8*)Allocator->allocate(allocbytes);
 		LogMemory(ptr ? "bitmap-recovered" : "bitmap-retry-failed", allocbytes);
 		if(!ptr) {

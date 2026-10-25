@@ -168,6 +168,83 @@ set_source_files_properties(${KRKRSDL2OPUS_SRC} PROPERTIES INCLUDE_DIRECTORIES "
 
 list(APPEND KRKRSDL2COMMON_SRC src/support/roundevenf.c)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSPerf.cpp)
+
+option(KRKRNS_ALPHA_NEON "Use the native Switch alpha loops" ON)
+option(KRKRNS_GAME_LOG_BATCH "Batch ordinary Switch engine log writes" ON)
+option(KRKRNS_INTERPOLATION_NEON "Use native Switch bilinear copy loops" ON)
+option(KRKRNS_ALPHA_HOT_NEON "Use native Switch opacity and destination-alpha loops" ON)
+option(KRKRNS_NATIVE_IDLE_WAKE "Avoid sleeping with queued Switch native notifications" OFF)
+option(KRKRNS_PSB_APPEND "Use native appends for fresh PSB arrays" OFF)
+option(KRKRNS_PSB_ENTRY_VIEWS "Use checked views for temporary PSB entry tables" OFF)
+option(KRKRNS_PSB_DICTIONARY_CAPACITY "Construct fresh PSB dictionaries with their final capacity" OFF)
+option(KRKRNS_ACTIVE_MAINTENANCE "Defer idle maintenance while continuous callbacks are active" OFF)
+option(KRKRNS_EMOTE_ATOMIC_TEXTURE "Initialize E-mote icon textures in one GPU transaction" OFF)
+option(KRKRNS_EMOTE_RESIDENT_READBACK "Keep E-mote frames on GPU and read back changed pixel tiles" ON)
+option(KRKRNS_RETAIN_AUTOPATH_INDEX "Reuse resource indices across compaction after validating loose folders" ON)
+option(KRKRNS_EMOTE_REUSE_READBACK "Reuse E-mote tiled readback scratch storage" OFF)
+option(KRKRNS_EMOTE_BRIDGE_BLOCK16 "Compare E-mote layer bridge pixels in 16-pixel blocks" OFF)
+if(NINTENDO_SWITCH)
+    if(NOT KRKRNS_ALPHA_NEON)
+        set_property(SOURCE external/krkrz/visual/gl/blend_function_sse2.cpp APPEND
+            PROPERTY COMPILE_DEFINITIONS KRKRNS_ALPHA_LEGACY)
+    endif()
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_GAME_LOG_BATCH)
+    set_property(SOURCE external/krkrz/utils/DebugIntf.cpp
+        src/core/sdl2/SDLApplication.cpp src/core/environ/sdl2/Application.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_GAME_LOG_BATCH)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_NATIVE_IDLE_WAKE)
+    set_property(SOURCE src/core/environ/sdl2/Application.cpp
+        src/core/base/sdl2/NativeEventQueue.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_NATIVE_IDLE_WAKE)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_INTERPOLATION_NEON)
+    set_property(SOURCE external/krkrz/visual/gl/blend_function_sse2.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_INTERPOLATION_NEON)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_ALPHA_HOT_NEON)
+    set_property(SOURCE external/krkrz/visual/gl/blend_function_sse2.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_ALPHA_HOT_NEON)
+endif()
+if(KRKRNS_PSB_APPEND)
+    set_property(SOURCE src/plugins/psbfile/PsbFilePlugin.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_PSB_APPEND)
+endif()
+if(KRKRNS_PSB_ENTRY_VIEWS)
+    set_property(SOURCE src/plugins/psbfile/PsbFilePlugin.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_PSB_ENTRY_VIEWS)
+endif()
+if(KRKRNS_PSB_DICTIONARY_CAPACITY)
+    set_property(SOURCE src/plugins/psbfile/PsbFilePlugin.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_PSB_DICTIONARY_CAPACITY)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_ACTIVE_MAINTENANCE)
+    set_property(SOURCE src/core/environ/sdl2/SystemControl.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_ACTIVE_MAINTENANCE)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_RETAIN_AUTOPATH_INDEX)
+    set_property(SOURCE external/krkrz/base/StorageIntf.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_RETAIN_AUTOPATH_INDEX)
+endif()
+if(KRKRNS_EMOTE_ATOMIC_TEXTURE)
+    set_property(SOURCE src/plugins/emoteplayer/emotefile.cpp
+        src/plugins/emoteplayer/EmoteGLRenderBackend.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_ATOMIC_TEXTURE)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_EMOTE_RESIDENT_READBACK)
+    set_property(SOURCE src/plugins/emoteplayer/EmoteGLRenderBackend.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_RESIDENT_READBACK)
+endif()
+if(KRKRNS_EMOTE_REUSE_READBACK)
+    set_property(SOURCE src/plugins/emoteplayer/EmoteGLRenderBackend.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_REUSE_READBACK)
+endif()
+if(KRKRNS_EMOTE_BRIDGE_BLOCK16)
+    set_property(SOURCE src/plugins/emoteplayer/emoteplayerclass.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_BRIDGE_BLOCK16)
+endif()
 
 if(${CMAKE_SYSTEM_NAME} STREQUAL "Emscripten")
 list(APPEND KRKRSDL2COMMON_SRC src/plugins/kremscripten.cpp)

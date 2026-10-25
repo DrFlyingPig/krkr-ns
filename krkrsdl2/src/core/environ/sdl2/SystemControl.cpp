@@ -24,6 +24,8 @@
 #include "Application.h"
 #include "TickCount.h"
 #include "Random.h"
+#include "KrkrNSLog.h"
+#include "KrkrNSPerf.h"
 
 tTVPSystemControl *TVPSystemControl;
 bool TVPSystemControlAlive = false;
@@ -199,14 +201,49 @@ void tTVPSystemControl::SystemWatchTimerTimer() {
 	}
 #endif
 
-	if( !ContinuousEventCalling && tick - LastCompactedTick > 4000 ) {
+#ifdef KRKRNS_ACTIVE_MAINTENANCE
+	static bool maintenanceCandidateLogged = false;
+	if (!maintenanceCandidateLogged) {
+		maintenanceCandidateLogged = true;
+		KRKRNS_LOG("[scheduler] active-maintenance candidate enabled bounded=30000ms");
+	}
+	// Real continuous work may defer idle maintenance, but a resident hook
+	// must not postpone it forever. Keep each operation's own last-run clock
+	// and bound the delay even in unlimited continuous mode. Explicit compact
+	// requests (including allocation-pressure MAX requests) are unaffected.
+	const auto idleMaintenanceDue = [tick](bool originalDue, tjs_uint32 lastTick) {
+		if (!TVPHasActiveContinuousEvents()) return originalDue;
+		if (static_cast<tjs_uint32>(tick - lastTick) >= 30000) return true;
+		static bool maintenanceDeferredLogged = false;
+		if (originalDue && !maintenanceDeferredLogged) {
+			maintenanceDeferredLogged = true;
+			KRKRNS_LOG("[scheduler] deferred idle maintenance for active continuous callbacks bounded=30000ms");
+		}
+		return false;
+	};
+#endif
+#ifdef KRKRNS_ACTIVE_MAINTENANCE
+	if( idleMaintenanceDue(!ContinuousEventCalling && tick - LastCompactedTick > 4000,
+		LastCompactedTick)
+#else
+	if( !ContinuousEventCalling && tick - LastCompactedTick > 4000
+#endif
+	) {
+		KrkrNSPerfScope perfCompact(KrkrNSPerfOp::IdleCompact);
 		// idle state over 4 sec.
 		LastCompactedTick = tick;
 
 		// fire compact event
 		TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_IDLE);
 	}
-	if( !ContinuousEventCalling && tick > LastRehashedTick + 1500 ) {
+#ifdef KRKRNS_ACTIVE_MAINTENANCE
+	if( idleMaintenanceDue(!ContinuousEventCalling && tick > LastRehashedTick + 1500,
+		LastRehashedTick)
+#else
+	if( !ContinuousEventCalling && tick > LastRehashedTick + 1500
+#endif
+	) {
+		KrkrNSPerfScope perfRehash(KrkrNSPerfOp::IdleRehash);
 		// TJS2 object rehash
 		LastRehashedTick = tick;
 		TJSDoRehash();

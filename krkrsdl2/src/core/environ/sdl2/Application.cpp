@@ -8,6 +8,7 @@
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
 #include "KrkrNSVMProf.h"
+#include "KrkrNSPerf.h"
 
 #include <algorithm>
 #include <string>
@@ -28,6 +29,9 @@
 #include "tjsDebug.h"
 
 #include "Application.h"
+#ifdef KRKRNS_NATIVE_IDLE_WAKE
+#include "NativeEventQueue.h"
+#endif
 #include "SysInitIntf.h"
 #include "SysInitImpl.h"
 #include "DebugIntf.h"
@@ -498,6 +502,7 @@ bool tTVPApplication::StartApplication( int argc, tjs_char* argv[] ) {
 
 		// TVPInitializeBaseSystems
 		KRKRNS_LOG("[app] TVPInitializeBaseSystems entry");
+		krkrsdl2_perf_init();
 		TVPInitializeBaseSystems();
 		KRKRNS_LOG("[app] TVPInitializeBaseSystems ok");
 
@@ -802,6 +807,9 @@ void tTVPApplication::ShowException( const tjs_char* e ) {
 	::MessageBox( NULL, e, TVPFatalError, MB_OK );
 #endif
 	TVPAddLog(ttstr(TVPFatalError) + TJS_W(": ") + e);
+#if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
+	krkrsdl2_log_flush();
+#endif
 	tjs_string e_utf16 = e;
 	std::string e_utf8;
 	tjs_string v_utf16 = (const tjs_char *)TVPFatalError;
@@ -833,6 +841,11 @@ void tTVPApplication::Run() {
 	tarminate_ = true;
 #endif
 	const Uint64 prof_t0 = SDL_GetPerformanceCounter();
+	krkrsdl2_perf_init();
+#ifdef __SWITCH__
+	extern tjs_uint64 krkrsdl2_frame_counter();
+	const auto presentedBefore = krkrsdl2_frame_counter();
+#endif
 #ifdef __SWITCH__
 	{
 		extern void TVPLogBitmapMemorySnapshot();
@@ -874,6 +887,7 @@ void tTVPApplication::Run() {
 	}
 	const Uint64 prof_t1 = SDL_GetPerformanceCounter();
 	KrkrNSVMProfDispatchScope vmDispatch;
+	KrkrNSPerfScope perfDispatch(KrkrNSPerfOp::Dispatch);
 	bool done = false;
 	if (TVPSystemControl)
 	{
@@ -882,6 +896,7 @@ void tTVPApplication::Run() {
 	}
 	const Uint64 prof_t2 = SDL_GetPerformanceCounter();
 	vmDispatch.Finish();
+	perfDispatch.Finish();
 	KRKRNS_STAGE("main: draw");
 	tjs_int count = TVPGetWindowCount();
 	for( tjs_int i = 0; i<count; i++ ) {
@@ -894,6 +909,12 @@ void tTVPApplication::Run() {
 	{
 		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
 		const double active = (prof_t3 - prof_t0) * 1000.0 / frequency;
+		krkrsdl2_perf_loop(active, krkrsdl2_frame_counter() != presentedBefore);
+		static Uint64 lastPerfReport = 0;
+		if (prof_t3 - lastPerfReport >= SDL_GetPerformanceFrequency() * 2) {
+			krkrsdl2_perf_report();
+			lastPerfReport = prof_t3;
+		}
 		if (active >= 100.0)
 			KRKRNS_LOG("[stall] active=%.1fms events=%.1f dispatch=%.1f draw=%.1f",
 				active, (prof_t1 - prof_t0) * 1000.0 / frequency,
@@ -922,7 +943,24 @@ void tTVPApplication::Run() {
 			{
 				extern void krkrsdl2_prof_wait_event(double ms);
 				const Uint64 krkrsns_w0 = SDL_GetPerformanceCounter();
+#ifdef KRKRNS_NATIVE_IDLE_WAKE
+				static bool nativeIdleCandidateLogged = false;
+				if (!nativeIdleCandidateLogged)
+				{
+					nativeIdleCandidateLogged = true;
+					KRKRNS_LOG("[scheduler] native-idle-wake candidate enabled (50ms fallback)");
+				}
+				const bool nativePendingSkip = krkrsdl2_wait_for_native_events();
+				static bool nativeIdleSkipLogged = false;
+				if (nativePendingSkip && !nativeIdleSkipLogged)
+				{
+					nativeIdleSkipLogged = true;
+					KRKRNS_LOG("[scheduler] native-idle-wake skipped wait for pending payload");
+				}
+				if (!nativePendingSkip)
+#else
 				SDL_WaitEvent(NULL);
+#endif
 				krkrsdl2_prof_wait_event(
 					(double)(SDL_GetPerformanceCounter() - krkrsns_w0) * 1000.0 /
 					(double)SDL_GetPerformanceFrequency());

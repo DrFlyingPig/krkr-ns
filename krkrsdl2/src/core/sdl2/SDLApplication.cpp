@@ -33,6 +33,7 @@
 #include "SDLBitmapCompletion.h"
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
+#include "KrkrNSPerf.h"
 #include "ScriptMgnIntf.h"
 #include "SystemControl.h"
 #include "PluginImpl.h"
@@ -82,11 +83,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <stdarg.h>
+#include <cerrno>
+#include <mutex>
+#include "KrkrNSLogBatch.h"
 // Set once the process starts tearing down.  The diagnostic heartbeat thread
 // is detached and would otherwise keep calling write() after libnx has
 // reclaimed its thread-local storage, faulting in armGetTls (observed as an
 // "Invalid memory access at 0x0" right after the guest issued Exit).
-volatile bool krkrsdl2_log_shutdown = false;
+std::atomic<bool> krkrsdl2_log_shutdown{false};
 // Keep only the two newest krkrsdl2_debug_*.log files in the log folder (the
 // current boot adds a third); every older boot log is deleted, so the log
 // folder does not fill up with one file per launch.  The legacy fixed-name
@@ -143,45 +147,139 @@ static void krkrsdl2_prune_old_logs(void)
 }
 
 static int krkrsdl2_log_fd = -1;
+static std::mutex krkrsdl2_log_mutex;
+static thread_local KrkrNSLogBatchBuffer<> krkrsdl2_log_buffer;
+#ifdef KRKRNS_GAME_LOG_BATCH
+// Ordinary engine messages share bounded storage so a worker may exit without
+// leaving an unwritten TLS tail. The file mutex also orders urgent diagnostics.
+static KrkrNSLogBatchBuffer<> krkrsdl2_game_log_buffer;
+static unsigned krkrsdl2_game_log_poll_tick = 0;
+#endif
+
+// Caller holds the file lock through successful short writes.
+static std::ptrdiff_t krkrsdl2_log_write_locked(const char* data, std::size_t size)
+{
+    if (krkrsdl2_log_fd < 0)
+    {
+        krkrsdl2_prune_old_logs();
+        mkdir(KRKRNS_BASE_A "/log", 0777);
+        char logname[128];
+        std::snprintf(logname, sizeof(logname), KRKRNS_BASE_A "/log/krkrsdl2_debug_%lld.log",
+            static_cast<long long>(time(nullptr)));
+        krkrsdl2_log_fd = open(logname, O_WRONLY | O_CREAT | O_TRUNC);
+    }
+    if (krkrsdl2_log_fd < 0) return -1;
+    std::size_t sent = 0;
+    while (sent < size)
+    {
+        const auto count = write(krkrsdl2_log_fd, data + sent, size - sent);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) return sent ? static_cast<std::ptrdiff_t>(sent) : count;
+        sent += static_cast<std::size_t>(count);
+    }
+    return static_cast<std::ptrdiff_t>(sent);
+}
+
+static std::ptrdiff_t krkrsdl2_log_write(const char* data, std::size_t size)
+{
+    std::lock_guard<std::mutex> lock(krkrsdl2_log_mutex);
+    if (krkrsdl2_log_shutdown) return -1;
+#ifdef KRKRNS_GAME_LOG_BATCH
+    if (!krkrsdl2_game_log_buffer.Flush(krkrsdl2_log_write_locked)) return -1;
+#endif
+    return krkrsdl2_log_write_locked(data, size);
+}
+
+void krkrsdl2_log_batch_begin() { krkrsdl2_log_buffer.Begin(); }
+void krkrsdl2_log_batch_end() { krkrsdl2_log_buffer.End(krkrsdl2_log_write); }
 
 /* Force the log out of the SD write cache.  A guest that dies right after the
    last line loses exactly the lines that matter (the emulator's virtual SD
    keeps them cached), so the lifecycle events worth diagnosing use this. */
 void krkrsdl2_log_flush()
 {
+	std::lock_guard<std::mutex> lock(krkrsdl2_log_mutex);
+	if (krkrsdl2_log_shutdown) return;
+#ifdef KRKRNS_GAME_LOG_BATCH
+	if (krkrsdl2_game_log_buffer.Flush(krkrsdl2_log_write_locked))
+#endif
+	krkrsdl2_log_buffer.Flush(krkrsdl2_log_write_locked);
 	if (krkrsdl2_log_fd >= 0) fsync(krkrsdl2_log_fd);
+}
+
+static void krkrsdl2_log_shutdown_flush()
+{
+	std::lock_guard<std::mutex> lock(krkrsdl2_log_mutex);
+	if (krkrsdl2_log_shutdown) return;
+#ifdef KRKRNS_GAME_LOG_BATCH
+	if (krkrsdl2_game_log_buffer.Flush(krkrsdl2_log_write_locked))
+#endif
+	krkrsdl2_log_buffer.Flush(krkrsdl2_log_write_locked);
+	if (krkrsdl2_log_fd >= 0) fsync(krkrsdl2_log_fd);
+	krkrsdl2_log_shutdown = true;
+}
+
+enum class KrkrNSLogDelivery { Immediate, Deferred, Game };
+
+static void krkrsdl2_logv(const char *fmt, va_list ap, KrkrNSLogDelivery delivery)
+{
+	if (krkrsdl2_log_shutdown) return;
+	char buf[4096];
+	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	if (n < 0) return;
+	if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
+	buf[n++] = '\n';
+#ifdef KRKRNS_GAME_LOG_BATCH
+	if (delivery == KrkrNSLogDelivery::Game)
+	{
+		// Preserve this caller's report/sample ordering before its game line.
+		if (!krkrsdl2_log_buffer.Flush(krkrsdl2_log_write)) return;
+		std::lock_guard<std::mutex> lock(krkrsdl2_log_mutex);
+		if (krkrsdl2_log_shutdown) return;
+		krkrsdl2_game_log_buffer.Append(buf, n, krkrsdl2_log_write_locked);
+		return;
+	}
+#endif
+	if (delivery == KrkrNSLogDelivery::Deferred)
+		krkrsdl2_log_buffer.Append(buf, n, krkrsdl2_log_write);
+	else
+		krkrsdl2_log_buffer.Immediate(buf, n, krkrsdl2_log_write);
 }
 
 void krkrsdl2_logf_impl(const char *fmt, ...)
 {
-	if (krkrsdl2_log_shutdown) return;
-	static int &logfd = krkrsdl2_log_fd;
-	static char logname[128];
-	if (logfd < 0)
-	{
-		krkrsdl2_prune_old_logs();
-		// Unique file per boot.  The Switch's MTP server serves stale metadata
-		// for files whose content changed while the session was mounted (a
-		// post-crash pull used to return only the boot-time head of the log),
-		// but BRAND-NEW directory entries show up immediately.  A timestamped
-		// name therefore makes every session's full log - including a crash -
-		// pullable over MTP.  time() comes from the console RTC.
-		mkdir(KRKRNS_BASE_A "/log", 0777);
-		const long long ts = (long long)time(nullptr);
-		snprintf(logname, sizeof(logname), KRKRNS_BASE_A "/log/krkrsdl2_debug_%lld.log", ts);
-		logfd = open(logname, O_WRONLY | O_CREAT | O_TRUNC);
-	}
-	if (logfd < 0) return;
-	char buf[4096];
 	va_list ap;
 	va_start(ap, fmt);
-	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	krkrsdl2_logv(fmt, ap, KrkrNSLogDelivery::Immediate);
 	va_end(ap);
-	if (n < 0) return;
-	if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
-	buf[n++] = '\n';
-	write(logfd, buf, n);
 }
+
+void krkrsdl2_logf_deferred_impl(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	krkrsdl2_logv(fmt, ap, KrkrNSLogDelivery::Deferred);
+	va_end(ap);
+}
+
+#ifdef KRKRNS_GAME_LOG_BATCH
+void krkrsdl2_logf_game_impl(const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	krkrsdl2_logv(fmt, ap, KrkrNSLogDelivery::Game);
+	va_end(ap);
+}
+
+void krkrsdl2_log_poll()
+{
+	const unsigned now = SDL_GetTicks();
+	std::lock_guard<std::mutex> lock(krkrsdl2_log_mutex);
+	if (krkrsdl2_log_shutdown || now - krkrsdl2_game_log_poll_tick < 1000) return;
+	krkrsdl2_game_log_poll_tick = now;
+	krkrsdl2_game_log_buffer.Flush(krkrsdl2_log_write_locked);
+}
+#endif
 
 /* ---- Phase 0 per-frame profiler (see KrkrNSProf.h) ---- */
 static uint64_t krkrsdl2_prof_freq()
@@ -213,7 +311,11 @@ static struct {
 
 	double bitmap_work_ms[3];
 	unsigned long long bitmap_work_n[3], bitmap_work_px[3], bitmap_work_parallel[3];
-	unsigned long long blt_method[16];
+	unsigned long long blt_method[64];
+	unsigned long long blt_method_px[64];
+	double blt_method_ms[64];
+	unsigned long long copy_n, copy_px;
+	double copy_ms;
 	unsigned long long upload_bytes;
 	unsigned long long layer_count;   // NotifyBitmapCompleted calls
 	unsigned long long layer_px;      // sum of layer cliprect pixels
@@ -332,6 +434,7 @@ void krkrsdl2_prof_accum_present(double ms)
 {
 	g_krkrns_prof.present_ms += ms;
 	krkrsdl2_frame_tick();
+	krkrsdl2_perf_present();
 }
 
 void krkrsdl2_prof_emote_progress(double ms)
@@ -377,7 +480,16 @@ void krkrsdl2_prof_blt(int compose_dest, int method, double ms, unsigned px)
 	g_krkrns_prof.blt_n[d]++;
 	g_krkrns_prof.blt_px[d] += px;
 	g_krkrns_prof.blt_ms[d] += ms;
-	g_krkrns_prof.blt_method[method & 15]++;
+	if (method >= 0 && method < 64) {
+		g_krkrns_prof.blt_method[method]++;
+		g_krkrns_prof.blt_method_px[method] += px;
+		g_krkrns_prof.blt_method_ms[method] += ms;
+	}
+	else if (method == -1) {
+		g_krkrns_prof.copy_n++;
+		g_krkrns_prof.copy_px += px;
+		g_krkrns_prof.copy_ms += ms;
+	}
 }
 
 void krkrsdl2_prof_bitmap_work(int operation, double ms, unsigned px, bool parallel)
@@ -396,13 +508,14 @@ void krkrsdl2_prof_bitmap_work(int operation, double ms, unsigned px, bool paral
  * fed a single-frame delta and printed it as "ms/f". */
 void krkrsdl2_prof_emit_and_reset(double window_ms)
 {
+	KrkrNSLogBatch logBatch;
 	const unsigned n = g_krkrns_prof.update_frames ? g_krkrns_prof.update_frames : 1;
 	const unsigned loop = g_krkrns_prof.loop_frames ? g_krkrns_prof.loop_frames : 1;
 	static unsigned prevPoolB = 0, prevPoolBig = 0;
 	const unsigned poolB = krkrsdl2_pool_begins();
 	const unsigned poolBig = krkrsdl2_pool_bigbegins();
 	const double per_frame_ms = window_ms / (double)n;
-	KRKRNS_LOG("[prof] updates=%u loops=%u total=%.1fms/f fps=%.1f | seg ev=%.2f disp=%.2f tick=%.2f wait=%.2f | compose=%.2f surfcopy=%.2f upload=%.2f present=%.2f | upMB/f=%.1f layers=%.1f lpxM=%.2f poolB=%.0f bigB=%.0f", 
+	KRKRNS_LOG_DEFERRED("[prof] updates=%u loops=%u total=%.1fms/f fps=%.1f | seg ev=%.2f disp=%.2f tick=%.2f wait=%.2f | compose=%.2f surfcopy=%.2f upload=%.2f present=%.2f | upMB/f=%.1f layers=%.1f lpxM=%.2f poolB=%.0f bigB=%.0f",
 		g_krkrns_prof.update_frames, g_krkrns_prof.loop_frames, per_frame_ms,
 		per_frame_ms > 0.0 ? 1000.0 / per_frame_ms : 0.0,
 		g_krkrns_prof.seg[0] / loop, g_krkrns_prof.seg[1] / loop,
@@ -418,7 +531,7 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 	// layers each blend type contributed, in type order 0,1,2,3 (copy/alpha/
 	// additive/...) — the GPU-composite path only implements a subset, so this
 	// says whether it can take a given title's whole frame.
-	KRKRNS_LOG("[prof] frame: emote prog=%.2f draw=%.2f rb=%.2f lock=%.2f cvt=%.2f meshes=%.0f | notify=%.2f calls=%.1f | blendTypes c0=%.0f c1=%.0f c2=%.0f c3=%.0f c4=%.0f c5=%.0f c6=%.0f c7=%.0f",
+	KRKRNS_LOG_DEFERRED("[prof] frame: emote prog=%.2f draw=%.2f rb=%.2f lock=%.2f cvt=%.2f meshes=%.0f | notify=%.2f calls=%.1f | blendTypes c0=%.0f c1=%.0f c2=%.0f c3=%.0f c4=%.0f c5=%.0f c6=%.0f c7=%.0f",
 		g_krkrns_prof.emote_prog_ms / n, g_krkrns_prof.emote_draw_ms / n,
 		g_krkrns_prof.emote_rb_ms / n, g_krkrns_prof.emote_lock_ms / n,
 		g_krkrns_prof.emote_cvt_ms / n, (double)g_krkrns_prof.emote_meshes / (double)n,
@@ -434,7 +547,7 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 	// Layer-tree blends: how much CPU time and how many megapixels go into
 	// the compose buffer (what GPU compositing would take over) vs into other
 	// layer bitmaps.  methods = blt method histogram (bmCopy/bmAlpha/bmAdd…).
-	KRKRNS_LOG("[prof] blt: n=%.1f/%.1f pxM=%.2f/%.2f ms=%.2f/%.2f (layer/compose) | methods m0=%.1f m1=%.1f m2=%.1f m3=%.1f m4=%.1f m5=%.1f m6=%.1f m7=%.1f",
+	KRKRNS_LOG_DEFERRED("[prof] blt: n=%.1f/%.1f pxM=%.2f/%.2f ms=%.2f/%.2f (layer/compose) | methods m0=%.1f m1=%.1f m2=%.1f m3=%.1f m4=%.1f m5=%.1f m6=%.1f m7=%.1f",
 		(double)g_krkrns_prof.blt_n[0] / n, (double)g_krkrns_prof.blt_n[1] / n,
 		(double)g_krkrns_prof.blt_px[0] / n / 1048576.0,
 		(double)g_krkrns_prof.blt_px[1] / n / 1048576.0,
@@ -448,11 +561,25 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 		(double)g_krkrns_prof.blt_method[6] / (double)n,
 		(double)g_krkrns_prof.blt_method[7] / (double)n);
 	prevPoolB = poolB;
-	KRKRNS_LOG("[prof] layer complete: prepare=%.2f raster=%.2f finish=%.2fms/f",
+	if (g_krkrns_prof.copy_n)
+		KRKRNS_LOG_DEFERRED("[prof-copy] n=%.2f pxM=%.3f ms=%.3f calls=%llu pixels=%llu inclusive_total_ms=%.3f updates=%u",
+			(double)g_krkrns_prof.copy_n / n, (double)g_krkrns_prof.copy_px / n / 1048576.0,
+			g_krkrns_prof.copy_ms / n, (unsigned long long)g_krkrns_prof.copy_n,
+			(unsigned long long)g_krkrns_prof.copy_px, g_krkrns_prof.copy_ms, g_krkrns_prof.update_frames);
+	for (unsigned method = 0; method < 64; ++method) {
+		if (g_krkrns_prof.blt_method[method])
+			KRKRNS_LOG_DEFERRED("[prof-blend] method=%u n=%.2f pxM=%.3f ms=%.3f calls=%llu pixels=%llu inclusive_total_ms=%.3f updates=%u",
+				method, (double)g_krkrns_prof.blt_method[method] / n,
+				(double)g_krkrns_prof.blt_method_px[method] / n / 1048576.0,
+				g_krkrns_prof.blt_method_ms[method] / n, (unsigned long long)g_krkrns_prof.blt_method[method],
+				(unsigned long long)g_krkrns_prof.blt_method_px[method], g_krkrns_prof.blt_method_ms[method],
+				g_krkrns_prof.update_frames);
+	}
+	KRKRNS_LOG_DEFERRED("[prof] layer complete: prepare=%.2f raster=%.2f finish=%.2fms/f",
 		g_krkrns_prof.layer_prepare_ms / n,
 		g_krkrns_prof.layer_raster_ms / n,
 		g_krkrns_prof.layer_finish_ms / n);
-	KRKRNS_LOG("[prof] bitmap: fill=%.2fms n=%.1f pxM=%.2f | crossfade=%.2fms n=%.1f par=%.1f | universal=%.2fms n=%.1f par=%.1f",
+	KRKRNS_LOG_DEFERRED("[prof] bitmap: fill=%.2fms n=%.1f pxM=%.2f | crossfade=%.2fms n=%.1f par=%.1f | universal=%.2fms n=%.1f par=%.1f",
 		g_krkrns_prof.bitmap_work_ms[0] / n,
 		(double)g_krkrns_prof.bitmap_work_n[0] / n,
 		(double)g_krkrns_prof.bitmap_work_px[0] / n / 1048576.0,
@@ -467,7 +594,7 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 	// struct comment).  "coal" >> 0 means the game asked for updates faster
 	// than frames were presented; "gap" shows the real present cadence and
 	// whether it is quantized (e.g. every 2nd vblank) or content-bound.
-	KRKRNS_LOG("[prof] src: req n=%llu i=%llu v=%llu coal=%llu | gap=%.1f[%.1f..%.1f]ms n=%u | sdl q=%llu w=%llu k=%llu m=%llu p=%llu t=%llu g=%llu | wake=%llu | pad m=%llu b=%llu k=%llu | wev n=%llu inst=%llu ms=%.1f",
+	KRKRNS_LOG_DEFERRED("[prof] src: req n=%llu i=%llu v=%llu coal=%llu | gap=%.1f[%.1f..%.1f]ms n=%u | sdl q=%llu w=%llu k=%llu m=%llu p=%llu t=%llu g=%llu | wake=%llu | pad m=%llu b=%llu k=%llu | wev n=%llu inst=%llu ms=%.1f",
 		g_krkrns_prof.req_notify, g_krkrns_prof.req_invalidate,
 		g_krkrns_prof.req_video, g_krkrns_prof.req_coalesced,
 		g_krkrns_prof.pres_gap_n ? g_krkrns_prof.pres_gap_ms / (double)g_krkrns_prof.pres_gap_n : 0.0,
@@ -480,12 +607,12 @@ void krkrsdl2_prof_emit_and_reset(double window_ms)
 		g_krkrns_prof.gp_push_key,
 		g_krkrns_prof.wait_calls, g_krkrns_prof.wait_instant,
 		g_krkrns_prof.wait_ms);
-	KRKRNS_LOG("[prof] tjs: deliv=%llu calls=%llu lim=%llu | win post=%llu deliver=%llu | emote prog=%llu draw=%llu",
+	KRKRNS_LOG_DEFERRED("[prof] tjs: deliv=%llu calls=%llu lim=%llu | win post=%llu deliver=%llu | emote prog=%llu draw=%llu",
 		g_krkrns_prof.cont_deliveries, g_krkrns_prof.cont_calls,
 		g_krkrns_prof.limit_ticks,
 		g_krkrns_prof.win_upd_post, g_krkrns_prof.win_upd_deliver,
 		g_krkrns_prof.emote_prog_calls, g_krkrns_prof.emote_draw_calls);
-	KRKRNS_LOG("[prof] tmr: fires=%llu <20=%llu 20-40=%llu 40-80=%llu 80-160=%llu 160-320=%llu >320=%llu",
+	KRKRNS_LOG_DEFERRED("[prof] tmr: fires=%llu <20=%llu 20-40=%llu 40-80=%llu 80-160=%llu 160-320=%llu >320=%llu",
 		g_krkrns_prof.tmr_fires,
 		g_krkrns_prof.tmr_bucket[0], g_krkrns_prof.tmr_bucket[1],
 		g_krkrns_prof.tmr_bucket[2], g_krkrns_prof.tmr_bucket[3],
@@ -3109,6 +3236,7 @@ void TVPWindowWindow::TickBeat()
 			// resident texture until a CPU writer or a forced invalidation occurs.
 			bool surfaceWritten = rect.w > 0 && rect.h > 0;
 			bool fullFrameUploadMode = true;
+			SDL_Rect writtenRect = rect;
 #endif
 			if (this->renderer)
 			{
@@ -3326,18 +3454,35 @@ const int sw = this->surface->w;
 								SDL_Rect uni;
 								SDL_UnionRect(&rect, &videoDirty, &uni);
 								rect = uni;
+								SDL_UnionRect(&writtenRect, &videoDirty, &uni);
+								writtenRect = uni;
 								surfaceWritten = true;
 							}
 						}
 						(void)movieOnGpu;
+						if (!krkrsdl2_glc_enabled())
+						{
+							const SDL_Rect bounds = {0, 0, this->surface->w, this->surface->h};
+							SDL_Rect clipped;
+							if (SDL_IntersectRect(&writtenRect, &bounds, &clipped))
+								krkrsdl2_perf_bytes(KrkrNSPerfOp::SurfaceDamageBounds,
+									static_cast<std::uint64_t>(clipped.w) * clipped.h * 4);
+						}
 #endif
 						const Uint64 uploadStart = SDL_GetPerformanceCounter();
 						int uploadResult = 0;
+						std::uint64_t uploadBytes = 0;
 #ifdef __SWITCH__
 						if (!gpuPresented)
+						{
+							KrkrNSPerfScope perfUpload(KrkrNSPerfOp::TextureUpload);
 							uploadResult = this->textureUploadState.Upload(this->renderer,
 								this->texture, this->surface, rect,
 								surfaceWritten || !fullFrameUploadMode || krkrsdl2_glc_enabled());
+							if (uploadResult == 0 && rect.w > 0 && rect.h > 0)
+								uploadBytes = static_cast<std::uint64_t>(rect.w) * rect.h * 4;
+							perfUpload.Bytes(uploadBytes);
+						}
 #else
 						uploadResult = TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect);
 #endif
@@ -3365,8 +3510,8 @@ const int sw = this->surface->w;
 							const Uint64 now = SDL_GetPerformanceCounter();
 							const double freq = (double)SDL_GetPerformanceFrequency();
 							krkrsdl2_prof_accum_upload(
-								(now - uploadStart) * 1000.0 / freq,
-								(unsigned)(rect.w * rect.h * 4));
+								gpuPresented ? 0.0 : (now - uploadStart) * 1000.0 / freq,
+								(unsigned)uploadBytes);
 							static Uint32 uploadProf = 0;
 							// Window start, advanced ONLY when the line is
 							// emitted. It used to be stamped every frame, so
@@ -3607,7 +3752,10 @@ const int sw = this->surface->w;
 				// empty SDL queue again is a no-op at best and a skipped
 				// swap at worst on this driver.
 				if (!gpuPresented)
+				{
+					KrkrNSPerfScope perfPresent(KrkrNSPerfOp::Present);
 					SDL_RenderPresent(this->renderer);
+				}
 #ifdef __SWITCH__
 				krkrsdl2_prof_accum_present(
 					(SDL_GetPerformanceCounter() - presentStart) * 1000.0 /
@@ -5282,6 +5430,10 @@ void sdl_process_events()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
+#ifdef __SWITCH__
+		if (event.type == SDL_MOUSEBUTTONUP || event.type == SDL_KEYDOWN || event.type == SDL_FINGERUP)
+			krkrsdl2_perf_input();
+#endif
 		g_krkrns_prof.ev_src[(event.type >> 8) & 15]++;
 #ifdef __SWITCH__
 		if (event.type == SDL_RENDER_DEVICE_RESET || event.type == SDL_RENDER_TARGETS_RESET)
@@ -5446,6 +5598,11 @@ static bool process_events()
 		TJS_CONVERT_TO_TJS_EXCEPTION
 	}
 	TVP_CATCH_AND_SHOW_SCRIPT_EXCEPTION(TJS_W("SDL event processing"));
+
+#if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
+	// Write-only drain: explicit lifecycle flushes retain their fsync semantics.
+	krkrsdl2_log_poll();
+#endif
 
 #if !defined(__EMSCRIPTEN__) || (defined(__EMSCRIPTEN__) && defined(__EMSCRIPTEN_PTHREADS__))
 	return true;
@@ -6771,7 +6928,7 @@ void krkrsdl2_cleanup(void)
 #ifdef __SWITCH__
 	// Stop the detached diagnostic heartbeat before teardown: its log writes
 	// would otherwise race libnx thread/TLS destruction and fault.
-	krkrsdl2_log_shutdown = true;
+	krkrsdl2_log_shutdown_flush();
 	// NOTE: deliberately NO romfsExit/socketExit here.  An earlier theory
 	// blamed the chain-restart romfs double-mount on these unbalanced refs,
 	// but calling them during this teardown crashed the device instead; the
@@ -6975,7 +7132,7 @@ void *operator new(std::size_t size) noexcept
 			break;
 		else
 		{
-			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
+			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
 			has_gced = true;
 		}
 	}
@@ -7051,7 +7208,7 @@ void *operator new(std::size_t size, std::align_val_t alignment) noexcept
 		}
 		else
 		{
-			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX);
+			TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
 			has_gced = true;
 		}
 	}

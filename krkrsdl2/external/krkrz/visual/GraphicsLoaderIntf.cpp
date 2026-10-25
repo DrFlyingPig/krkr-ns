@@ -11,6 +11,7 @@
 
 #include "tjsCommHead.h"
 #include "KrkrNSSlowOperation.h"
+#include "KrkrNSPerf.h"
 
 #include <stdlib.h>
 #include "GraphicsLoaderIntf.h"
@@ -1761,6 +1762,7 @@ static bool TVPInternalLoadGraphic(tTVPBaseBitmap *dest, const ttstr &_name,
 		TVPLoadGraphic_ScanLineCallback, TVPLoadGraphic_MetaInfoPushCallback,
 		name, keyidx, mode))
 	{
+		KrkrNSPerfScope perfDecode(KrkrNSPerfOp::ImageDecode);
 		(handler->Load)(handler->FormatData, (void*)&data, TVPLoadGraphic_SizeCallback,
 			TVPLoadGraphic_ScanLineCallback, TVPLoadGraphic_MetaInfoPushCallback,
 			holder.Get(), keyidx, mode);
@@ -1878,6 +1880,7 @@ static bool TVPInternalLoadGraphic(tTVPBaseBitmap *dest, const ttstr &_name,
 	    try
 	    {
 			// load image via handler
+			KrkrNSPerfScope perfDecode(KrkrNSPerfOp::ImageDecode);
 			(handler->Load)(handler->FormatData, (void*)&data,
 				TVPLoadGraphic_SizeCallback, TVPLoadGraphic_ScanLineCallback,
 				NULL,
@@ -1914,6 +1917,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	tjs_uint desw, tjs_uint desh,
 	tTVPGraphicLoadMode mode, ttstr *provincename, iTJSDispatch2 ** metainfo, bool unpadding)
 {
+	KrkrNSPerfScope perfLoad(KrkrNSPerfOp::GraphicLoad);
 	// loading with cache management
 	ttstr nname = TVPNormalizeStorageName(name);
 	tjs_uint32 hash;
@@ -1935,6 +1939,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 		if(ptr)
 		{
 			// found in cache
+			krkrsdl2_perf_cache(true);
 			ptr->GetObjectNoAddRef()->AssignToBitmap(dest);
 			if(provincename) *provincename = ptr->GetObjectNoAddRef()->ProvinceName;
 			if(metainfo)
@@ -1973,6 +1978,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 #endif
 
 	// not found
+	krkrsdl2_perf_cache(false);
 
 	// load into dest
 	KrkrNSSlowOperation slow("image-decode", &nname);

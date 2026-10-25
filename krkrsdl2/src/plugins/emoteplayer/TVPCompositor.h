@@ -26,6 +26,20 @@ public:
     virtual void UpdateTexture(void* texture, const uint8_t* pixels,
                                int width, int height, int pitch) = 0;
     virtual void DestroyTexture(void* texture) = 0;
+    // Keep the interface identical in every translation unit. Backends may
+    // initialize resident storage directly; the default preserves the existing
+    // create/update contract, including cleanup after a partially failed upload.
+    virtual void* CreateTextureWithPixels(int width, int height,
+                                         const uint8_t* pixels, int pitch)
+    {
+        void* texture = CreateTexture(width, height);
+        if (texture)
+        {
+            try { UpdateTexture(texture, pixels, width, height, pitch); }
+            catch (...) { DestroyTexture(texture); throw; }
+        }
+        return texture;
+    }
     virtual uint8_t* LockTexture(void* texture, int& pitch) = 0;
     virtual void SetMask(void* maskTarget) = 0;
     virtual void SetBlendMode(int mode, const float* uniformColor = nullptr) = 0;

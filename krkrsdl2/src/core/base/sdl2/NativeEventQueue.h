@@ -66,6 +66,10 @@ public:
 #endif
 // KRKR-ns: drain events posted by background threads on the main thread.
 void krkrsdl2_drain_pending_native_events();
+// Internal main-pump helpers. The candidate wait returns true only when a
+// pending payload avoided sleeping; SDL notification failure stays bounded.
+bool krkrsdl2_has_pending_native_events();
+bool krkrsdl2_wait_for_native_events();
 
 class NativeEventQueueImplement : public NativeEventQueueIntarface {
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE)

@@ -10,6 +10,7 @@
 //---------------------------------------------------------------------------
 #include "tjsCommHead.h"
 #include "KrkrNSProf.h" // KRKR-ns: [prof] tjs delivery/call counters
+#include "KrkrNSPerf.h"
 
 #include <algorithm>
 #include "SysInitIntf.h"
@@ -511,6 +512,7 @@ static void _TVPDeliverEventByPrio(tjs_uint prio)
 		// event delivering
 		try
 		{
+			KrkrNSPerfScope perfEvent(KrkrNSPerfOp::ScriptEvent);
 			e->Deliver();
 		}
 		catch(...)
@@ -548,6 +550,7 @@ static bool _TVPDeliverAllEvents2()
 		// event delivering
 		try
 		{
+			KrkrNSPerfScope perfInput(KrkrNSPerfOp::InputEvent);
 			e->Deliver();
 		}
 		catch(...)
@@ -751,6 +754,7 @@ void TVPDeliverWindowUpdateEvents()
 
 	try
 	{
+		KrkrNSPerfScope perfWindow(KrkrNSPerfOp::WindowUpdate);
 		for(tjs_uint i = 0; i < TVPWinUpdateEventQueue.size(); i++)
 		{
 			if(!TVPWinUpdateEventQueue[i].IsEmpty())
@@ -927,6 +931,18 @@ static std::vector<tTVPContinuousEventCallbackIntf *> TVPContinuousEventVector;
 static std::vector<tTJSVariantClosure> TVPContinuousHandlerVector;
 static bool TVPContinuousEventProcessing = false;
 
+bool TVPHasActiveContinuousEvents()
+{
+	// Registration and removal already belong to the event-delivery thread.
+	// Tombstones do not keep idle maintenance deferred after the last owner
+	// has gone away, even before the next delivery compacts these vectors.
+	for (auto *callback : TVPContinuousEventVector)
+		if (callback) return true;
+	for (const auto &handler : TVPContinuousHandlerVector)
+		if (handler.Object) return true;
+	return false;
+}
+
 static void TVPDestroyContinuousHandlerVector()
 {
 	std::vector<tTJSVariantClosure>::iterator i;
@@ -1095,6 +1111,7 @@ void TVPDeliverContinuousEvent()
 		{
 			try
 			{
+				KrkrNSPerfScope perfContinuous(KrkrNSPerfOp::ContinuousEvent);
 				_TVPDeliverContinuousEvent();
 			}
 			catch(...)

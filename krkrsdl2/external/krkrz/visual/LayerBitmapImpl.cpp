@@ -11,6 +11,7 @@
 #define _USE_MATH_DEFINES
 #include "tjsCommHead.h"
 #include "GLCompositeBridge.h"
+#include "KrkrNSPerf.h"
 
 #include <memory>
 #include <stdlib.h>
@@ -701,6 +702,9 @@ void tTVPNativeBaseBitmap::Independ()
 {
 	// sever Bitmap's image sharing
 	if(Bitmap->IsIndependent()) return;
+	KrkrNSPerfScope perfDetach(KrkrNSPerfOp::BitmapDetach,
+		static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(Bitmap->GetPitch()))) *
+		static_cast<std::uint64_t>(std::abs(static_cast<std::int64_t>(Bitmap->GetHeight()))));
 	tTVPBitmap *newb = new tTVPBitmap(*Bitmap);
 	Bitmap->Release();
 	Bitmap = newb;

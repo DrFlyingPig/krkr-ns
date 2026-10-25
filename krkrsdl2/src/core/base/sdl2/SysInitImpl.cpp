@@ -2089,7 +2089,11 @@ static void TVPInitProgramArgumentsAndDataPath(bool stop_after_datapath_got)
 
 		// set log output directory
 		KRKRNS_LOG("[arg] before TVPSetLogLocation");
+#ifdef __SWITCH__
+		TVPSetLogLocation(TJS_W("sdmc:/switch/KRKR-ns/log/"));
+#else
 		TVPSetLogLocation(TVPNativeDataPath);
+#endif
 		KRKRNS_LOG("[arg] TVPSetLogLocation ok");
 
 		// increment TVPCommandLineArgumentGeneration
