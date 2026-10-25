@@ -3,6 +3,7 @@
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
 #include "KrkrNSPerf.h"
+#include "KrkrNSResourcePolicy.h"
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
 #include "EmoteReadbackPlan.h"
 #endif
@@ -170,6 +171,7 @@ struct EmoteGLRenderBackend::Impl
     std::vector<std::unique_ptr<Image>> images;
     SDL_Window* window = nullptr;
     SDL_GLContext context = nullptr, savedContext = nullptr;
+    KrkrNSGpuResourceLease resourcePolicy;
     SDL_Window* savedWindow = nullptr;
     bool active = false, failed = false;
     GLuint program = 0, vbo = 0, ibo = 0;
@@ -218,6 +220,7 @@ struct EmoteGLRenderBackend::Impl
         images.clear();
         target = nullptr; mask = nullptr;
         window = nullptr; context = nullptr;
+        resourcePolicy.Release();
         savedWindow = nullptr; savedContext = nullptr;
         // readTileWidth is a property of the RENDERER (the self-test-measured
         // largest full-row readback the driver performs honestly), not of the
@@ -285,6 +288,13 @@ struct EmoteGLRenderBackend::Impl
         window = currentWindow;
         if (!context)
         {
+            // FastLoad throttles the GPU. Retire the software-only mode
+            // before creating or using this real GPU render backend.
+            if (!resourcePolicy.Acquire()) {
+                SDL_SetError("Cannot retire software CPU boost for GPU rendering");
+                failed = true;
+                return false;
+            }
             // Preserve SDL's requested context attributes as well as its current
             // context. This private context never shares SDL's state cache.
             int profile = 0, major = 0, minor = 0, share = 0;
@@ -310,6 +320,7 @@ struct EmoteGLRenderBackend::Impl
             if (!context)
             {
                 SDL_GL_MakeCurrent(savedWindow ? savedWindow : window, savedContext);
+                resourcePolicy.Release();
                 failed = true;
                 return false;
             }
@@ -358,6 +369,7 @@ struct EmoteGLRenderBackend::Impl
             SDL_SetError("%s", error.what());
             end();
             SDL_GL_DeleteContext(context); context = nullptr; program = 0;
+            resourcePolicy.Release();
             failed = true;
             return false;
         }

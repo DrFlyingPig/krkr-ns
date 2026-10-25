@@ -250,18 +250,14 @@ void tTVPContinuousHandlerCallLimitThread::SetEnabled(bool enabled)
 
 
 //---------------------------------------------------------------------------
-// KRKR-ns: pace the continuous-handler mode by default.
-//
-// Upstream leaves this at 0 = "no limit": registering any continuous handler
-// (a KAG game tick, a transition's TransIdleCallback, k2compat's GFX_Motion
-// tick, ...) then makes ApplicationIdle() report "not idle" forever and the
-// main loop busy-spins at ~6 kHz, delivering events/ticks hundreds of times
-// per presented frame and pegging one core (log: updates=60 loops=37760
-// seg wait=0.00 fps=10 -- ~44 ms of every 98 ms frame was empty dispatch).
-// 60 Hz matches the win32 vsync cadence: the limit thread raises the
-// delivery flag on a timer and the loop blocks in SDL_WaitEvent between
-// ticks.  `-contfreq 0` restores the no-limit behaviour.
+#ifdef __SWITCH__
+// Match Kirikiroid2-NX: the outer frame loop supplies the default 60 Hz
+// cadence. An explicit nonzero -contfreq still selects the limiter thread.
+static tjs_int TVPContinousHandlerLimitFrequency = 0;
+#else
+// Other SDL platforms retain their independent continuous-handler cadence.
 static tjs_int TVPContinousHandlerLimitFrequency = 60;
+#endif
 //---------------------------------------------------------------------------
 void TVPBeginContinuousEvent()
 {

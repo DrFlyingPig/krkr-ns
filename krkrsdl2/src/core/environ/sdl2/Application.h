@@ -231,6 +231,9 @@ public:
 	 * 画像の非同期読込み要求
 	 */
 	void LoadImageRequest( class iTJSDispatch2 *owner, class tTJSNI_Bitmap* bmp, const ttstr &name );
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	tTVPAsyncImageLoader* GetAsyncImageLoader() const { return image_load_thread_; }
+#endif
 
 	void SyncSavedata()
 	{

@@ -703,7 +703,9 @@ void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 	// session instead; 3 idle threads are cheap on the Switch.
 	}
 //---------------------------------------------------------------------------
+#ifndef __SWITCH__
 static DrawThreadPool TVPTheadPool;
+#endif
 //---------------------------------------------------------------------------
 // KRKR-ns Phase 2: lifetime pool counters for the [prof] emitter in
 // SDLApplication.cpp (per-window task counts reveal E-mote scene layer-op
@@ -729,15 +731,26 @@ void TVPBeginThreadTask( tjs_int taskNum ) {
 			poolBegins, (double)poolTaskSum / poolBegins, poolTaskMax);
 	}
 	#endif
+#ifndef __SWITCH__
 	TVPTheadPool.BeginTask( taskNum );
+#endif
 }
 //---------------------------------------------------------------------------
 void TVPExecThreadTask( TVP_THREAD_TASK_FUNC func, TVP_THREAD_PARAM param ) {
+#ifdef __SWITCH__
+	// Kirikiroid2-NX's Switch build leaves OpenMP disabled, so its drawing
+	// partitions execute in order on the caller. Keep the same partitioning
+	// and completion semantics without creating or waking SDL draw workers.
+	func( param );
+#else
 	TVPTheadPool.ExecTask( func, param );
+#endif
 }
 //---------------------------------------------------------------------------
 void TVPEndThreadTask( void ) {
+#ifndef __SWITCH__
 	TVPTheadPool.WaitForTask();
+#endif
 }
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------

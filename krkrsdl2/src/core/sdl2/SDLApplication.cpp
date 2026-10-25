@@ -33,6 +33,7 @@
 #include "SDLBitmapCompletion.h"
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
+#include "KrkrNSResourcePolicy.h"
 #include "KrkrNSPerf.h"
 #include "ScriptMgnIntf.h"
 #include "SystemControl.h"
@@ -6261,6 +6262,7 @@ ttstr krkrsdl2_prepare_xp3_game(const ttstr &game_directory, const ttstr &select
 		throw eTJSError(TJS_W("Cannot encode the KRKR save path"));
 
 	krkrsdl2_game_mode = true;
+	krkrsdl2_resource_policy_begin_session();
 	krkrsdl2_game_had_window = false; // a window close before the game's own
 	                                  // window exists is not a quit
 	krkrsdl2_saved_project_dir = TVPProjectDir;
@@ -6428,6 +6430,9 @@ void krkrsdl2_release_leftover_windows()
 // Runs on the main loop (see Application::Run) after a quit request.
 void krkrsdl2_return_to_launcher()
 {
+	// End the software session before destroying any GPU lease: releasing
+	// E-mote during teardown must not restore FastLoad in the launcher.
+	krkrsdl2_resource_policy_end_session();
 	KRKRNS_STAGE("return to launcher");
 	KRKRNS_LOG("[launcher] ending game session, returning to launcher");
 	// From here on the engine (or the whole process) is going away.  Block
@@ -6720,6 +6725,7 @@ bool krkrsdl2_init_platform(void)
 // the same guarantee the real console gets from the chain-load restart.
 static void krkrsdl2_reinitialize_engine()
 {
+	krkrsdl2_resource_policy_end_session();
 	KRKRNS_STAGE("reinit: begin");
 	KRKRNS_LOG("[reinit] ===== restarting engine in-process =====");
 

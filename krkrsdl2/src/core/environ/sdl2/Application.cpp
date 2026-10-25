@@ -29,9 +29,6 @@
 #include "tjsDebug.h"
 
 #include "Application.h"
-#ifdef KRKRNS_NATIVE_IDLE_WAKE
-#include "NativeEventQueue.h"
-#endif
 #include "SysInitIntf.h"
 #include "SysInitImpl.h"
 #include "DebugIntf.h"
@@ -930,6 +927,28 @@ void tTVPApplication::Run() {
 		emscripten_run_script("FS.syncfs(false, function (err) { Module._" "syncfs_is_finished" "(); });");
 #endif
 	}
+#ifdef __SWITCH__
+	// Match Cocos' frame-driven main loop: all work, including a blocking
+	// present, consumes this frame's budget. Sleep only the remainder, so
+	// vsync does not gain another fixed delay and an overrun does not wait.
+	// Modal loops also call Run(); pacing each call keeps those loops bounded
+	// while their enclosing call naturally has no remaining budget on return.
+	(void)done;
+	{
+		KRKRNS_STAGE("main: frame wait");
+		krkrsdl2_heartbeat_main_progress();
+		const Uint64 waitStart = SDL_GetPerformanceCounter();
+		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
+		const double remainingSeconds = 1.0 / 60.0 -
+			static_cast<double>(waitStart - prof_t0) / frequency;
+		if (remainingSeconds > 0.0)
+		{
+			const unsigned int sleepMicroseconds =
+				static_cast<unsigned int>(remainingSeconds * 1000000.0);
+			if (sleepMicroseconds) usleep(sleepMicroseconds);
+		}
+	}
+#else
 	if (done)
 	{
 		if (SDL_WasInit(SDL_INIT_EVENTS) != 0)
@@ -937,40 +956,11 @@ void tTVPApplication::Run() {
 #ifndef __EMSCRIPTEN__
 			KRKRNS_STAGE("main: idle wait");
 			krkrsdl2_heartbeat_main_progress(); // idle wait still counts as alive
-#ifdef __SWITCH__
-			// KRKR-ns diagnosis: count the blocking waits and whether they
-			// returned instantly (an event was already queued).
-			{
-				extern void krkrsdl2_prof_wait_event(double ms);
-				const Uint64 krkrsns_w0 = SDL_GetPerformanceCounter();
-#ifdef KRKRNS_NATIVE_IDLE_WAKE
-				static bool nativeIdleCandidateLogged = false;
-				if (!nativeIdleCandidateLogged)
-				{
-					nativeIdleCandidateLogged = true;
-					KRKRNS_LOG("[scheduler] native-idle-wake candidate enabled (50ms fallback)");
-				}
-				const bool nativePendingSkip = krkrsdl2_wait_for_native_events();
-				static bool nativeIdleSkipLogged = false;
-				if (nativePendingSkip && !nativeIdleSkipLogged)
-				{
-					nativeIdleSkipLogged = true;
-					KRKRNS_LOG("[scheduler] native-idle-wake skipped wait for pending payload");
-				}
-				if (!nativePendingSkip)
-#else
-				SDL_WaitEvent(NULL);
-#endif
-				krkrsdl2_prof_wait_event(
-					(double)(SDL_GetPerformanceCounter() - krkrsns_w0) * 1000.0 /
-					(double)SDL_GetPerformanceFrequency());
-			}
-#else
 			SDL_WaitEvent(NULL);
-#endif
 #endif
 		}
 	}
+#endif
 	{
 		const Uint64 prof_t4 = SDL_GetPerformanceCounter();
 		const double prof_freq = (double)SDL_GetPerformanceFrequency();

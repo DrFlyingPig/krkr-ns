@@ -35,6 +35,10 @@
 #include <cstring>
 #include <mutex>
 #include "StorageImpl.h"
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+#include "Application.h"
+#include "GraphicsLoadThread.h"
+#endif
 #ifdef __SWITCH__
 #include "KrkrNSLog.h"
 #endif
@@ -364,6 +368,38 @@ void TVPUnregisterGraphicLoadingHandler(const ttstr & name,
 tTVPGraphicHandlerType* TVPGetGraphicLoadHandler( const ttstr& ext )
 {
 	return TVPGraphicType.Hash.Find(ext);
+}
+bool TVPResolveGraphicForAsyncTouch(const ttstr &name, ttstr &loadname,
+	tTVPGraphicHandlerType *&handler)
+{
+	// Handler registration and extension/province discovery belong to the
+	// main thread. The worker receives a copy of the selected native handler.
+	const ttstr ext = TVPExtractStorageExt(name);
+	loadname = name;
+	handler = NULL;
+	if (ext.IsEmpty()) {
+		for (auto i = TVPGraphicType.Hash.GetFirst(); !i.IsNull(); i++) {
+			const ttstr candidate = name + i.GetKey();
+			if (TVPIsExistentStorage(candidate)) {
+				loadname = candidate;
+				handler = &i.GetValue();
+				break;
+			}
+		}
+	} else {
+		handler = TVPGetGraphicLoadHandler(ext);
+	}
+	if (!handler || handler->IsPlugin) return false;
+
+	// The raw async decoder does not merge companion masks or record province
+	// names. Leave those storages to the complete synchronous loadImages path
+	// instead of publishing an incomplete cache entry under its normal key.
+	const ttstr base(name, name.length() - ext.length());
+	for (auto i = TVPGraphicType.Hash.GetFirst(); !i.IsNull(); i++) {
+		if (TVPIsExistentStorage(base + TJS_W("_m") + i.GetKey()) ||
+			TVPIsExistentStorage(base + TJS_W("_p") + i.GetKey())) return false;
+	}
+	return true;
 }
 /*
 	loading handlers return whether the image contains an alpha channel.
@@ -1479,13 +1515,9 @@ static bool TVPGraphicCacheEnabled = false;
 static tjs_uint64 TVPGraphicCacheLimit = 0;
 static tjs_uint64 TVPGraphicCacheTotalBytes = 0;
 tjs_uint64 TVPGraphicCacheSystemLimit = 0; // maximum possible value of  TVPGraphicCacheLimit
-// KRKR-ns: the cache is touched from BOTH the main thread (synchronous
-// TVPLoadGraphic / TVPCheckImageCache) and the async image loader thread
-// (GraphicsLoadThread calls TVPPushGraphicCache/TVPHasImageCache after
-// decoding).  tTJSHashTable is not thread-safe; concurrent access corrupts
-// the table and hangs the process (observed as "game freezes after opening a
-// few UI panels").  Recursive so nested helpers (CheckLimit inside Push /
-// SetLimit) do not deadlock.
+// Keep cache access serialized, including compact callbacks. The asynchronous
+// loader decodes private pixels in its worker and publishes on the main thread.
+// Recursive so nested helpers (CheckLimit inside Push/SetLimit) do not deadlock.
 static std::recursive_mutex gGraphicCacheLock;
 
 #ifdef __SWITCH__
@@ -1527,6 +1559,9 @@ static void TVPCheckGraphicCacheLimit()
 void TVPClearGraphicCache()
 {
 	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	tTVPAsyncImageLoader::InvalidateTouchRequests();
+#endif
 	TVPGraphicCache.Clear();
 	TVPGraphicCacheTotalBytes = 0;
 }
@@ -2031,22 +2066,42 @@ void TVPTouchImages(const std::vector<ttstr> & storages, tjs_int64 limit,
 	// currently this function only loads normal graphics.
 	// (univ.trans rule graphics nor province image may not work properly)
 
-	if(!TVPGraphicCacheLimit) return;
+	tjs_uint64 cachelimit;
+	{
+		std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+		if (!TVPGraphicCacheEnabled || !TVPGraphicCacheLimit) return;
+		cachelimit = TVPGraphicCacheLimit;
+	}
 
 	tjs_uint64 limitbytes;
 	if(limit >= 0)
 	{
-		if( (tjs_uint64)limit > TVPGraphicCacheLimit || limit == 0)
-			limitbytes = TVPGraphicCacheLimit;
+		if( (tjs_uint64)limit > cachelimit || limit == 0)
+			limitbytes = cachelimit;
 		else
 			limitbytes = limit;
 	}
 	else
 	{
 		// negative value of limit indicates remaining bytes after loading
-		if((tjs_uint64)-limit >= TVPGraphicCacheLimit) return;
-		limitbytes = TVPGraphicCacheLimit + limit;
+		const tjs_uint64 remaining = static_cast<tjs_uint64>(-(limit + 1)) + 1;
+		if (remaining >= cachelimit) return;
+		limitbytes = cachelimit - remaining;
 	}
+
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	if (Application && Application->GetAsyncImageLoader()) {
+		{
+			std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+			if (!TVPClearGraphicCacheCallbackInit) {
+				TVPAddCompactEventHook(&TVPClearGraphicCacheCallback);
+				TVPClearGraphicCacheCallbackInit = true;
+			}
+		}
+		Application->GetAsyncImageLoader()->TouchImages(storages, limitbytes, timeout);
+		return;
+	}
+#endif
 
 	tjs_int count = 0;
 	tjs_uint64 bytes = 0;
@@ -2142,6 +2197,9 @@ void TVPSetGraphicCacheLimit(tjs_uint64 limit)
 {
 	// set limit of graphic cache by total bytes.
 	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	tTVPAsyncImageLoader::InvalidateTouchRequests();
+#endif
 	if(limit == 0 )
 	{
 		TVPGraphicCacheLimit = limit;
@@ -2165,6 +2223,7 @@ void TVPSetGraphicCacheLimit(tjs_uint64 limit)
 //---------------------------------------------------------------------------
 tjs_uint64 TVPGetGraphicCacheLimit()
 {
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
 	return TVPGraphicCacheLimit;
 }
 //---------------------------------------------------------------------------

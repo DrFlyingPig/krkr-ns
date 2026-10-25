@@ -3,6 +3,7 @@
 
 #include "SDLApplication.h"
 #include "SysInitImpl.h"
+#include "KrkrNSResourcePolicy.h"
 #ifdef USE_SDL_MAIN
 #include <SDL_main.h>
 #endif
@@ -18,6 +19,12 @@ extern "C" int wmain(int argc, wchar_t **argv)
 extern "C" int main(int argc, char **argv)
 #endif
 {
+#ifdef __SWITCH__
+	struct RestorePerformanceMode
+	{
+		~RestorePerformanceMode() { krkrsdl2_resource_policy_end_session(); }
+	} restorePerformanceMode;
+#endif
 	try
 	{
 		krkrsdl2_pre_init_platform();

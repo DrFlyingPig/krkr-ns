@@ -169,6 +169,7 @@ set_source_files_properties(${KRKRSDL2OPUS_SRC} PROPERTIES INCLUDE_DIRECTORIES "
 list(APPEND KRKRSDL2COMMON_SRC src/support/roundevenf.c)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSPerf.cpp)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSResourcePolicy.cpp)
 
 option(KRKRNS_ALPHA_NEON "Use the native Switch alpha loops" ON)
 option(KRKRNS_GAME_LOG_BATCH "Batch ordinary Switch engine log writes" ON)
@@ -816,6 +817,11 @@ target_sources(${KRKRSDL2COMMON_NAME} PRIVATE ${KRKRSDL2COMMON_SRC})
 target_compile_definitions(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2_DEFINITIONS})
 target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<COMPILE_LANGUAGE:C>:${KRKRSDL2_CFLAGS}>)
 target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<COMPILE_LANGUAGE:CXX>:${KRKRSDL2_CXXFLAGS}>)
+if(NINTENDO_SWITCH)
+# Kirikiroid2-NX builds its software renderer/plugins with -O3. Keep debug
+# builds unchanged and retain symbols in RelWithDebInfo packages.
+target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<NOT:$<CONFIG:Debug>>:-O3>)
+endif()
 target_include_directories(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2COMMON_INCLUDES})
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.13.0")
 target_link_options(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2_LDFLAGS})

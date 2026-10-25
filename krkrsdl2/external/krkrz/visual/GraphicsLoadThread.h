@@ -4,6 +4,9 @@
 
 #include <queue>
 #include <vector>
+#include <deque>
+#include <memory>
+#include <atomic>
 #include "ThreadIntf.h"
 #include "NativeEventQueue.h"
 #include "GraphicsLoaderIntf.h"
@@ -15,6 +18,8 @@ struct tTVPTmpBitmapImage {
 	tjs_int pitch;
 	tjs_uint32* buf;
 	std::vector<tTVPGraphicMetaInfoPair> * MetaInfo;
+	bool PrivateBuffer;
+	tjs_uint64 MaxBytes;
 	tTVPTmpBitmapImage();
 	~tTVPTmpBitmapImage();
 // パレット関連は現状読まない、ファイルに従うのではなく、事前指定方式なので
@@ -24,9 +29,12 @@ struct tTVPImageLoadCommand {
 	iTJSDispatch2*			owner_;	// send to event
 	class tTJSNI_Bitmap*	bmp_;	// set bitmap image
 	ttstr					path_;
+	ttstr                    load_path_;
 	tTVPTmpBitmapImage*		dest_;
 	ttstr					result_;
-	tTVPGraphicHandlerType*	handler_;
+	std::unique_ptr<tTVPGraphicHandlerType> handler_;
+	bool touch_;
+	tjs_uint64 touch_generation_;
 	tTVPImageLoadCommand();
 	~tTVPImageLoadCommand();
 };
@@ -46,6 +54,20 @@ class tTVPAsyncImageLoader : public tTVPThread {
 	std::queue<tTVPImageLoadCommand*> CommandQueue;
 	/** 読込み完了画像キュー */
 	std::queue<tTVPImageLoadCommand*> LoadedQueue;
+	std::atomic<bool> Stopping;
+	struct tTouchBatch {
+		std::vector<ttstr> Names;
+		size_t Next = 0;
+		tjs_uint64 Bytes = 0;
+		tjs_uint64 Limit;
+		tjs_uint64 Started;
+		tjs_uint64 Timeout;
+		tjs_uint64 Generation;
+	};
+	// Main-thread state. Only one ownerless image may await dispatch, so an
+	// idle main pump cannot accumulate a queue of decoded full-size images.
+	std::deque<tTouchBatch> TouchBatches;
+	bool TouchLoading;
 
 private:
 	/**
@@ -60,7 +82,11 @@ private:
 	/**
 	 * 読込みを読込みスレッドに要求する(キューへ入れる)
 	 */
-	void PushLoadQueue( iTJSDispatch2 *owner, tTJSNI_Bitmap *bmp, const ttstr &nname );
+	bool PushLoadQueue(iTJSDispatch2 *owner, tTJSNI_Bitmap *bmp,
+		const ttstr &nname, const ttstr &loadname, tTVPGraphicHandlerType *handler,
+		bool touch = false, tjs_uint64 generation = 0, tjs_uint64 maxbytes = 0);
+	void QueueNextTouch();
+	void HandleTouchedImage(tTVPImageLoadCommand *cmd);
 	
 	/**
 	 * 読込みスレッド実体
@@ -101,6 +127,16 @@ public:
 	 * 即座に終了し、onLoaded イベントを発生させる。
 	 */
 	void LoadRequest( iTJSDispatch2 *owner, tTJSNI_Bitmap* bmp, const ttstr &name );
+	void TouchImages(const std::vector<ttstr> &names, tjs_uint64 limit,
+		tjs_uint64 timeout);
+	// Cache clear/limit changes invalidate results without touching VM objects
+	// or depending on an Application object still being alive at process exit.
+	static void InvalidateTouchRequests();
 };
+
+// Resolves handlers and companion images on the main thread, never in the
+// decoder. Cache-only loads must not cache an image lacking its mask/province.
+bool TVPResolveGraphicForAsyncTouch(const ttstr &name, ttstr &loadname,
+	tTVPGraphicHandlerType *&handler);
 
 #endif // __GRAPHICS_LOAD_THREAD_H__

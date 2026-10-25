@@ -21,6 +21,7 @@
 #include "KrkrNSPaths.h"
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
+#include "KrkrNSResourcePolicy.h"
 
 
 #include "FilePathUtil.h"
@@ -1671,10 +1672,10 @@ void TVPAfterSystemInit()
 
         // draw thread num
 #ifdef __SWITCH__
-        // Large Kirikiri layer blends are split by scanlines.  Let the
-        // existing adaptive worker pool use the Switch CPU cores; small
-        // operations remain single-threaded and avoid scheduling overhead.
-        tjs_int drawThreadNum = 0; // auto (SDL_GetCPUCount)
+        // Match the reference's auto scanline partition count. On Switch
+        // the task interface executes these partitions on the caller, like
+        // the reference build without OpenMP.
+        tjs_int drawThreadNum = 0;
 #else
         tjs_int drawThreadNum = 1;
 #endif
@@ -1731,6 +1732,7 @@ void TVPAfterSystemInit()
 //---------------------------------------------------------------------------
 void TVPBeforeSystemUninit()
 {
+	krkrsdl2_resource_policy_end_session();
 	// TVPDumpHWException(); // dump cached hw exceptoin
 }
 //---------------------------------------------------------------------------
