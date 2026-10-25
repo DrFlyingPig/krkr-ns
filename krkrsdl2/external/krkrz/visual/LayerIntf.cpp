@@ -21,6 +21,8 @@
 #ifdef __SWITCH__
 #include <SDL.h>
 #include "KrkrNSProf.h"
+#include "SDLBitmapCompletionSource.h"
+#include <cstring>
 #endif
 #include "KrkrNSPerf.h"
 #include "KrkrNSVMProf.h"
@@ -6030,6 +6032,90 @@ void tTJSNI_BaseLayer::EffectImage(tTVPBaseBitmap *dest, const tTVPRect & destre
 	}
 }
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+bool tTJSNI_BaseLayer::IsDirectGPUPrimary(const char *&reason) const
+{
+	if(Rect.left != 0 || Rect.top != 0)
+		{ reason = "primary-origin"; return false; }
+	if(DisplayType != ltOpaque || Opacity != 255)
+		{ reason = "primary-type"; return false; }
+	// The primary image must overwrite the previous frame completely. An
+	// image-less opaque layer establishes its baseline in DrawSelf instead.
+	if(MainImage && (ImageLeft > 0 || ImageTop > 0 ||
+		(tjs_int64)ImageLeft + MainImage->GetWidth() < Rect.get_width() ||
+		(tjs_int64)ImageTop + MainImage->GetHeight() < Rect.get_height()))
+		{ reason = "primary-image-bounds"; return false; }
+	reason = "supported";
+	return true;
+}
+
+bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
+	const char *&reason, tjs_uint &nodes)
+{
+	if(visiblecheck && !IsSeen()) return true;
+	tTVPRect rect;
+	if(!TVPIntersectRect(&rect, r, Rect)) return true;
+	if(InTransition) { reason = "transition"; return false; }
+	if(DisplayType != ltOpaque && DisplayType != ltAlpha &&
+		DisplayType != ltAddAlpha && DisplayType != ltBinder)
+		{ reason = "blend-mode"; return false; }
+	if(!MainImage && DisplayType == ltOpaque && Opacity != 255)
+		{ reason = "neutral-opacity"; return false; }
+	// Group opacity must be applied after composing the children. Applying it
+	// independently to each child would change overlapping translucent pixels.
+	if(Opacity != 255 && GetVisibleChildrenCount() != 0)
+		{ reason = "group-opacity"; return false; }
+	++nodes;
+	ParentRectToChildRect(rect);
+	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_BEGIN(child)
+		if(!child->CanDrawDirectGPU(rect, true, reason, nodes)) return false;
+	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_END
+	return true;
+}
+
+void tTJSNI_BaseLayer::DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
+	const tTVPRect &r, bool visiblecheck)
+{
+	// Kirikiroid2-NX LayerIntf.cpp::Draw_GPU, the full-opacity group branch:
+	// draw this layer first, then its children directly onto the same opaque
+	// window canvas. Keep CPU/cache completion and script bitmaps untouched.
+	if(visiblecheck && !IsSeen()) return;
+	tTVPRect rect;
+	if(!TVPIntersectRect(&rect, r, Rect)) return;
+	x += rect.left - r.left;
+	y += rect.top - r.top;
+	tTVPRect destination(rect);
+	destination.set_offsets(x, y);
+	ParentRectToChildRect(rect);
+	CurrentDrawTarget = target;
+	DirectTransferToParent = false;
+	try
+	{
+		tTVPRect source(rect);
+		if(!MainImage && DisplayType == ltOpaque)
+		{
+			// DrawSelf's neutral-color temporary uses local CopySelf and its
+			// old exclusion rectangle. A direct traversal has final-canvas
+			// coordinates instead; fill that canvas using its returned clip.
+			tTVPRect clip;
+			tTVPBaseBitmap *canvas = target->GetDrawTargetBitmap(destination, clip);
+			canvas->Fill(clip, NeutralColor);
+			target->DrawCompleted(destination, canvas, clip, DisplayType, 255);
+		}
+		else DrawSelf(target, destination, source);
+		TVP_LAYER_FOR_EACH_CHILD_BEGIN(child)
+			child->DrawDirectGPU(target, x, y, rect, true);
+		TVP_LAYER_FOR_EACH_CHILD_END
+	}
+	catch(...)
+	{
+		CurrentDrawTarget = NULL;
+		throw;
+	}
+	CurrentDrawTarget = NULL;
+}
+#endif
+
 void tTJSNI_BaseLayer::Draw(tTVPDrawable *target, const tTVPRect &r, bool visiblecheck)
 {
 	// process updating pipe line.
@@ -6600,7 +6686,45 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 	if(Manager) Manager->GetLayerTreeOwner()->StartBitmapCompletion(Manager);
 	try
 	{
+	#ifdef __SWITCH__
+		const char *directReason = "completion-cpu";
+		tjs_uint directNodes = 0;
+		bool direct = false;
+		if(krkrns::GPUCompletionReceiverSlot() &&
+			krkrns::GetBitmapCompositor().Renderer())
+		{
+			if(IsDirectGPUPrimary(directReason))
+				direct = CanDrawDirectGPU(Rect, false, directReason, directNodes);
+		}
+		// Preflight completes before the first GPU write. A special node keeps
+		// the whole frame on the original grouping/transition implementation.
+		if(direct)
+		{
+			if(Manager) Manager->QueryUpdateExcludeRect();
+			DrawDirectGPU(drawable, 0, 0, Rect, false);
+			Manager->GetUpdateRegionForCompletion().Clear();
+		}
+		else
+	#endif
 		InternalComplete2(Manager->GetUpdateRegionForCompletion(), drawable);
+	#ifdef __SWITCH__
+		static tjs_uint64 directFrames = 0, fallbackFrames = 0, directLayerCount = 0;
+		static const char *lastReason = NULL;
+		static bool lastDirect = false;
+		if(direct) { ++directFrames; directLayerCount += directNodes; }
+		else ++fallbackFrames;
+		if(!lastReason || direct != lastDirect ||
+			std::strcmp(lastReason, directReason) != 0 ||
+			(directFrames + fallbackFrames) % 120 == 0)
+		{
+			KRKRNS_LOG("[gpu-layer] traversal=%s reason=%s nodes=%u direct=%llu fallback=%llu layers=%llu",
+				direct ? "direct" : "legacy", directReason, (unsigned)directNodes,
+				(unsigned long long)directFrames, (unsigned long long)fallbackFrames,
+				(unsigned long long)directLayerCount);
+			lastReason = directReason;
+			lastDirect = direct;
+		}
+	#endif
 	}
 	catch(...)
 	{

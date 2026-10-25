@@ -928,6 +928,13 @@ private:
 	void EffectImage(tTVPBaseBitmap *dest, const tTVPRect & destrect);
 
 	void Draw(tTVPDrawable *target, const tTVPRect &r, bool visiblecheck = true);
+#ifdef __SWITCH__
+	bool IsDirectGPUPrimary(const char *&reason) const;
+	bool CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
+		const char *&reason, tjs_uint &nodes);
+	void DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
+		const tTVPRect &r, bool visiblecheck = true);
+#endif
 
 	// these 3 below are methods from tTVPDrawable
 	tTVPBaseBitmap * GetDrawTargetBitmap(const tTVPRect &rect,

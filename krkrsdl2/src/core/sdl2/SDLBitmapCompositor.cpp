@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "SDLBitmapCompositor.h"
 #include "KrkrNSResourcePolicy.h"
+#include "KrkrNSPerf.h"
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -34,12 +35,23 @@ public:
 struct ResidentFrameState
 {
     std::atomic<SDL_Texture*> texture{nullptr};
+    std::atomic<unsigned> snapshots{0};
     std::shared_ptr<RendererEpoch> epoch;
     int width = 0, height = 0;
     std::uint64_t bytes = 0;
     ResidentFrameState* allPrevious = nullptr;
     ResidentFrameState* allNext = nullptr;
     ResidentFrameState* retiredNext = nullptr;
+};
+
+// Copies of one immutable frame share a pin. Live window canvases retain the
+// resource lifetime but deliberately do not pin its pixels against later draws.
+struct ResidentFrameSnapshot
+{
+    std::shared_ptr<ResidentFrameState> state;
+    explicit ResidentFrameSnapshot(std::shared_ptr<ResidentFrameState> value)
+        : state(std::move(value)) { state->snapshots.fetch_add(1, std::memory_order_relaxed); }
+    ~ResidentFrameSnapshot() { state->snapshots.fetch_sub(1, std::memory_order_relaxed); }
 };
 
 namespace
@@ -179,7 +191,6 @@ public:
     bool Restore()
     {
         if (restored) return true;
-        restored = true;
         bool good = SDL_SetRenderTarget(renderer, target) == 0;
         good = SDL_RenderSetLogicalSize(renderer, logicalWidth, logicalHeight) == 0 && good;
         good = SDL_RenderSetIntegerScale(renderer, integerScale) == 0 && good;
@@ -188,8 +199,10 @@ public:
         good = SDL_RenderSetClipRect(renderer, clipped ? &clip : nullptr) == 0 && good;
         good = SDL_SetRenderDrawColor(renderer, red, green, blue, alpha) == 0 && good;
         good = SDL_SetRenderDrawBlendMode(renderer, blend) == 0 && good;
+        restored = good;
         return good;
     }
+    void Abandon() noexcept { restored = true; }
     ~RendererScope() { Restore(); }
 };
 
@@ -232,6 +245,41 @@ struct SDLBitmapCompositor::Impl
     std::vector<std::uint8_t> scratch;
     KrkrNSGpuResourceLease lease;
     std::uint64_t clock = 0;
+    unsigned batchDepth = 0;
+    std::unique_ptr<RendererScope> drawScope;
+    std::shared_ptr<ResidentFrameState> drawResource;
+    SDL_Texture* drawTarget = nullptr;
+
+    void EndTarget()
+    {
+        if (drawScope) {
+            const bool good = drawScope->Restore();
+            // Keep the original state available so teardown or a subsequent
+            // synchronization can retry a transient driver restore failure.
+            if (!good) throw SubmittedGPUFailure();
+            drawScope.reset();
+            drawTarget = nullptr;
+            drawResource.reset();
+        }
+    }
+    bool BeginTarget(const std::shared_ptr<ResidentFrameState>& resource)
+    {
+        auto* target = resource->texture.load();
+        if (drawScope && drawTarget == target) return true;
+        EndTarget();
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasTargetSwitch);
+        drawScope = std::make_unique<RendererScope>(renderer);
+        // A worker may retire the engine bitmap while this batch owns its
+        // renderer target. Keep the resource alive until the target is unbound.
+        drawResource = resource;
+        if (!drawScope->Begin(target)) {
+            EndTarget();
+            return false;
+        }
+        drawTarget = target;
+        return true;
+    }
+    void EndPrimitive() { if (!batchDepth) EndTarget(); }
 
     bool Owner() const noexcept
         { return epoch && epoch->alive.load() && SDL_ThreadID() == epoch->owner; }
@@ -303,6 +351,7 @@ struct SDLBitmapCompositor::Impl
         const std::uint64_t bytes = std::uint64_t(view.width) * view.height * 4;
         if (!Reserve(bytes, protect)) return {};
         if (!lease.Acquire()) return {};
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasCreate, bytes);
         SDL_Texture* texture = SDL_CreateTexture(renderer,
             opaque ? SDL_PIXELFORMAT_RGB888 : SDL_PIXELFORMAT_ARGB8888,
             target ? SDL_TEXTUREACCESS_TARGET : SDL_TEXTUREACCESS_STREAMING,
@@ -333,6 +382,8 @@ struct SDLBitmapCompositor::Impl
     }
     bool Upload(const std::shared_ptr<ResidentFrameState>& resource, const BitmapView& view)
     {
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasUpload,
+            std::uint64_t(view.width) * view.height * 4);
         const void* pixels = view.row0;
         int pitch = view.pitch;
         if (pitch < 0) {
@@ -349,6 +400,9 @@ struct SDLBitmapCompositor::Impl
               std::uint8_t* row0, int pitch, Uint32 format)
     {
         if (!Owner() || !resource || !resource->texture.load()) return false;
+        EndTarget();
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasReadback,
+            std::uint64_t(resource->width) * resource->height * 4);
         RendererScope scope(renderer);
         if (!scope.Begin(resource->texture.load())) return false;
         // SDL handles its own GLES framebuffer orientation and format. The
@@ -380,26 +434,31 @@ struct SDLBitmapCompositor::Impl
     bool Target(Entry& entry, bool writing)
     {
         if (!entry.opaqueTarget || entry.view.volatileCPU) return false;
-        if (!entry.target || (!entry.targetValid && entry.target.use_count() > 1))
+        if (!entry.target || (!entry.targetValid && entry.target->snapshots.load(std::memory_order_relaxed)))
             entry.target = Create(entry.view, true, false, &entry);
         if (!entry.target) return false;
         if (!entry.targetValid) {
             if (entry.cpuStale || !Upload(entry.target, entry.view)) return false;
             entry.targetValid = true;
         }
-        if (writing && entry.target.use_count() > 1) {
+        if (writing && entry.target->snapshots.load(std::memory_order_relaxed)) {
             // Completed frames own GPU resources, not engine storage. Preserve
             // a queued frame when its bitmap is written again before display.
             auto copy = Create(entry.view, true, false, &entry);
             if (!copy) return false;
+            EndTarget();
+            KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasCopy,
+                std::uint64_t(entry.view.width) * entry.view.height * 4);
             RendererScope scope(renderer);
             auto* source = entry.target->texture.load();
             if (!scope.Begin(copy->texture.load()) ||
                 SDL_SetTextureColorMod(source, 255, 255, 255) != 0 ||
                 SDL_SetTextureAlphaMod(source, 255) != 0 ||
-                SDL_SetTextureBlendMode(source, SDL_BLENDMODE_NONE) != 0 ||
-                SDL_RenderCopy(renderer, source, nullptr, nullptr) != 0 || !scope.Restore())
+                SDL_SetTextureBlendMode(source, SDL_BLENDMODE_NONE) != 0)
                 return false;
+            const bool copied = SDL_RenderCopy(renderer, source, nullptr, nullptr) == 0;
+            const bool restored = scope.Restore();
+            if (!copied || !restored) throw SubmittedGPUFailure();
             entry.target = std::move(copy);
         }
         return true;
@@ -453,23 +512,28 @@ struct SDLBitmapCompositor::Impl
         if (SDL_SetTextureBlendMode(texture, blend) != 0 ||
             SDL_SetTextureColorMod(texture, color, color, color) != 0 ||
             SDL_SetTextureAlphaMod(texture, Uint8(opacity)) != 0) return false;
-        RendererScope scope(renderer);
-        if (!scope.Begin(target.target->texture.load())) return false;
+        if (!BeginTarget(target.target)) return false;
         // Mark before executing: even a failed partially executed submission
         // must synchronize its current GPU pixels before any CPU fallback.
         target.cpuStale = true;
         target.rgbaValid = target.opaqueValid = false;
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasDraw,
+            std::uint64_t(to.w) * to.h * 4);
         const bool good = SDL_RenderCopy(renderer, texture, &from, &to) == 0;
-        const bool restored = scope.Restore();
+        if (!good) { EndTarget(); throw SubmittedGPUFailure(); }
+        EndPrimitive();
         // Once a draw was attempted, neither a driver error nor a failure to
         // restore SDL state proves that no pixels were written. Returning
         // false here would replay Alpha/AddAlpha over those pixels on CPU.
-        if (!good || !restored) throw SubmittedGPUFailure();
         return true;
     }
 };
 
-ResidentFrame::ResidentFrame(std::shared_ptr<ResidentFrameState> state) : state_(std::move(state)) {}
+ResidentFrame::ResidentFrame(std::shared_ptr<ResidentFrameState> state, bool snapshot)
+    : state_(std::move(state))
+{
+    if (snapshot) snapshot_ = std::make_shared<ResidentFrameSnapshot>(state_);
+}
 SDL_Texture* ResidentFrame::Texture() const noexcept
 {
     return state_ && state_->epoch->alive.load(std::memory_order_acquire) &&
@@ -484,6 +548,7 @@ SDLBitmapCompositor::~SDLBitmapCompositor()
     // Normal teardown calls ResetRenderer before SDL destroys its context.
     // Never issue late SDL calls from static destruction after that context.
     if (impl_ && impl_->epoch) {
+        if (impl_->drawScope) impl_->drawScope->Abandon();
         std::lock_guard<std::mutex> lock(impl_->epoch->mutex);
         impl_->epoch->alive.store(false);
         for (auto* state = impl_->epoch->resources; state; state = state->allNext)
@@ -517,6 +582,7 @@ bool SDLBitmapCompositor::ResetRenderer()
     if (!impl_->Owner()) return false;
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
+        try { impl_->EndTarget(); } catch (...) { return false; }
         for (auto& item : impl_->entries) if (!impl_->Sync(item.second)) return false;
         DrainRetired(impl_->epoch);
         {
@@ -540,6 +606,10 @@ void SDLBitmapCompositor::DiscardRenderer() noexcept
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         const bool owner = SDL_ThreadID() == impl_->epoch->owner;
+        if (owner) { try { impl_->EndTarget(); } catch (...) {} }
+        // Lost-device/foreign-thread teardown cannot restore a live renderer.
+        // Invalidate the retained scope before its destructor can call SDL.
+        if (impl_->drawScope) impl_->drawScope->Abandon();
         if (owner) DrainRetired(impl_->epoch);
         {
             std::lock_guard<std::mutex> epochLock(impl_->epoch->mutex);
@@ -599,6 +669,25 @@ bool SDLBitmapCompositor::HasGPUWrites(const BitmapView& view) const noexcept
     return entry && entry->cpuStale;
 }
 
+bool SDLBitmapCompositor::BeginBatch()
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner()) return false;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->EndTarget();
+    ++impl_->batchDepth;
+    return true;
+}
+
+void SDLBitmapCompositor::EndBatch()
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner()) return;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->batchDepth) --impl_->batchDepth;
+    impl_->EndTarget();
+}
+
 bool SDLBitmapCompositor::TryCopy(const BitmapView& target, int x, int y,
     const BitmapView& source, const SDL_Rect& rect)
 {
@@ -640,16 +729,20 @@ bool SDLBitmapCompositor::TryFill(const BitmapView& target, const SDL_Rect& rect
         if (!entry || !entry->opaqueTarget) return false;
         entry = impl_->Get(target);
         if (!entry || !impl_->Target(*entry, true)) return false;
-        RendererScope scope(impl_->renderer);
-        if (!scope.Begin(entry->target->texture.load()) ||
+        if (!impl_->BeginTarget(entry->target) ||
             SDL_SetRenderDrawBlendMode(impl_->renderer, SDL_BLENDMODE_NONE) != 0 ||
             SDL_SetRenderDrawColor(impl_->renderer, Uint8(color >> 16), Uint8(color >> 8),
-                                  Uint8(color), Uint8(color >> 24)) != 0) return false;
+                                  Uint8(color), Uint8(color >> 24)) != 0) {
+            impl_->EndTarget();
+            return false;
+        }
         entry->cpuStale = true;
         entry->rgbaValid = entry->opaqueValid = false;
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasDraw,
+            std::uint64_t(clipped.w) * clipped.h * 4);
         const bool good = SDL_RenderFillRect(impl_->renderer, &clipped) == 0;
-        const bool restored = scope.Restore();
-        if (!good || !restored) throw SubmittedGPUFailure();
+        if (!good) { impl_->EndTarget(); throw SubmittedGPUFailure(); }
+        impl_->EndPrimitive();
         return true;
     } catch (const SubmittedGPUFailure&) { throw; }
       catch (...) { return false; }
@@ -665,6 +758,7 @@ bool SDLBitmapCompositor::SyncCPU(const BitmapView& view)
         if (!entry || !entry->cpuStale) return true;
         if (!impl_->Owner() || entry->view.row0 != view.row0 ||
             entry->view.width != view.width || entry->view.height != view.height) return false;
+        impl_->EndTarget();
         return impl_->Sync(*entry);
     } catch (...) { return false; }
 }
@@ -686,6 +780,12 @@ void SDLBitmapCompositor::Forget(const void* storage, std::uint64_t serial) noex
     std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
     if (!impl_) return;
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->Owner()) {
+        auto found = impl_->entries.find(Key{storage, serial});
+        if (found != impl_->entries.end() && found->second.target &&
+            impl_->drawTarget == found->second.target->texture.load())
+            try { impl_->EndTarget(); } catch (...) {}
+    }
     impl_->entries.erase(Key{storage, serial});
 }
 
@@ -695,6 +795,7 @@ ResidentFrame SDLBitmapCompositor::GetResidentFrame(const BitmapView& view)
     if (!impl_ || !impl_->Owner()) return {};
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->EndTarget();
         auto* entry = impl_->Find(view);
         if (!entry || !entry->opaqueTarget) return {};
         entry = impl_->Get(view);
@@ -703,8 +804,24 @@ ResidentFrame SDLBitmapCompositor::GetResidentFrame(const BitmapView& view)
         if (SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE) != 0 ||
             SDL_SetTextureColorMod(texture, 255, 255, 255) != 0 ||
             SDL_SetTextureAlphaMod(texture, 255) != 0) return {};
-        return ResidentFrame(entry->target);
-    } catch (...) { return {}; }
+        return ResidentFrame(entry->target, true);
+    } catch (const SubmittedGPUFailure&) { throw; }
+      catch (...) { return {}; }
+}
+
+ResidentFrame SDLBitmapCompositor::GetResidentCanvas(const BitmapView& view)
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner()) return {};
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto* entry = impl_->Find(view);
+        if (!entry || !entry->opaqueTarget) return {};
+        entry = impl_->Get(view);
+        if (!entry || !impl_->Target(*entry, false)) return {};
+        return ResidentFrame(entry->target, false);
+    } catch (const SubmittedGPUFailure&) { throw; }
+      catch (...) { return {}; }
 }
 
 bool SDLBitmapCompositor::ReadFrame(const ResidentFrame& frame, SDL_Surface* surface)

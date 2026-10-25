@@ -33,7 +33,9 @@ const char* const names[] = {"graphic-load", "image-decode", "xp3-read", "disk-r
     "psb-read", "psb-tables", "psb-build", "surface-damage-bounds", "surface-copy",
     "script-event", "input-event", "continuous-event", "window-update",
     "idle-compact", "idle-rehash", "gpu-texture-init", "autopath-validate", "autopath-rebuild",
-    "gpu-damage-compare", "gpu-damage-map", "gpu-resident-copy"};
+    "gpu-damage-compare", "gpu-damage-map", "gpu-resident-copy",
+    "gpu-canvas-upload", "gpu-canvas-copy", "gpu-canvas-readback", "gpu-canvas-draw", "gpu-canvas-target-switch",
+    "gpu-canvas-create"};
 static_assert(sizeof(names) / sizeof(names[0]) == OpCount, "Every operation needs a report name");
 struct Record
 {

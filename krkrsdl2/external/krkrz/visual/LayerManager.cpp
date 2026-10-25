@@ -1232,7 +1232,24 @@ void TJS_INTF_METHOD tTVPLayerManager::UpdateToDrawDevice()
 #endif
 	krkrsdl2_prof_begin_compose();
 	krkrsdl2_glc_begin_frame();
+#ifdef __SWITCH__
+	// NX keeps the current render target bound until post-update. Preserve
+	// that lifetime across dirty rectangles, restoring SDL before presentation
+	// or any exception leaves this manager's completion.
+	auto& compositor = krkrns::GetBitmapCompositor();
+	compositor.BeginBatch();
+	try {
+		Primary->CompleteForWindow(this);
+	} catch (...) {
+		try { compositor.EndBatch(); } catch (...) {}
+		krkrsdl2_glc_end_frame();
+		krkrsdl2_prof_end_compose();
+		throw;
+	}
+	compositor.EndBatch();
+#else
 	Primary->CompleteForWindow(this);
+#endif
 	krkrsdl2_glc_end_frame();
 	krkrsdl2_prof_end_compose();
 }

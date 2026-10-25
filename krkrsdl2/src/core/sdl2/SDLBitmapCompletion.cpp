@@ -115,7 +115,10 @@ bool TVPSDLBitmapCompletion::NotifyGPUCompleted(iTVPLayerManager* manager,
 		bitmap.height != height || surface->w != width || surface->h != height ||
 		x != cliprect.left || y != cliprect.top || x < 0 || y < 0 ||
 		cliprect.right > width || cliprect.bottom > height || cliprect.is_empty()) return false;
-	auto frame = krkrns::GetBitmapCompositor().GetResidentFrame(bitmap);
+	// The window presents the manager's mutable canvas on this same thread,
+	// like NX's AdapterTexture2D. It does not enqueue an immutable snapshot
+	// after each dirty rectangle: that would force a full-frame COW next draw.
+	auto frame = krkrns::GetBitmapCompositor().GetResidentCanvas(bitmap);
 	if (!frame) return false;
 	residentFrame_ = std::move(frame);
 	surfaceStale_ = true;

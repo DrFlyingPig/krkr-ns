@@ -24,13 +24,15 @@ enum class BitmapBlend { Copy, Alpha, AddAlpha };
 // NX's GL methods: RGB is blended, destination alpha is retained. Ordinary
 // script-visible alpha bitmaps are never accepted as GPU write targets.
 struct ResidentFrameState;
+struct ResidentFrameSnapshot;
 
 // A frame owns its SDL texture, not its engine bitmap. Storage destruction or
 // COW cannot dangle a queued frame. ResetRenderer invalidates every frame.
 class ResidentFrame
 {
     std::shared_ptr<ResidentFrameState> state_;
-    explicit ResidentFrame(std::shared_ptr<ResidentFrameState> state);
+    std::shared_ptr<ResidentFrameSnapshot> snapshot_;
+    explicit ResidentFrame(std::shared_ptr<ResidentFrameState> state, bool snapshot);
     friend class SDLBitmapCompositor;
 public:
     ResidentFrame() = default;
@@ -64,6 +66,12 @@ public:
     bool IsOpaqueTarget(const BitmapView& target) const noexcept;
     bool HasGPUWrites(const BitmapView& bitmap) const noexcept;
 
+    // Group draws to the same canvas without rebinding SDL's framebuffer for
+    // every primitive. EndBatch restores the caller's complete renderer state.
+    // A failed restore throws; already submitted draws must never be replayed.
+    bool BeginBatch();
+    void EndBatch();
+
     bool TryCopy(const BitmapView& target, int x, int y,
                  const BitmapView& source, const SDL_Rect& sourceRect);
     // False means safe CPU fallback before submission. A post-submit driver
@@ -79,7 +87,10 @@ public:
     bool SyncCPU(const BitmapView& bitmap);
     void CPUWritten(const BitmapView& bitmap) noexcept;
     void Forget(const void* storage, std::uint64_t serial) noexcept;
+    // Immutable snapshots trigger COW. A live canvas is for same-thread window
+    // presentation and follows later writes to that texture without COW.
     ResidentFrame GetResidentFrame(const BitmapView& bitmap);
+    ResidentFrame GetResidentCanvas(const BitmapView& bitmap);
     bool ReadFrame(const ResidentFrame& frame, SDL_Surface* surface);
 };
 

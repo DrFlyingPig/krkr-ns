@@ -20,6 +20,8 @@ enum class KrkrNSPerfOp : unsigned
     GpuTextureInit,
     AutoPathValidate, AutoPathRebuild,
     GpuDamageCompare, GpuDamageMap, GpuResidentCopy,
+    GpuCanvasUpload, GpuCanvasCopy, GpuCanvasReadback, GpuCanvasDraw, GpuCanvasTargetSwitch,
+    GpuCanvasCreate,
     Count
 };
 
