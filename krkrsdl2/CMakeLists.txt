@@ -170,6 +170,7 @@ list(APPEND KRKRSDL2COMMON_SRC src/support/roundevenf.c)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSPerf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSResourcePolicy.cpp)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/SDLBitmapCompositor.cpp)
 
 option(KRKRNS_ALPHA_NEON "Use the native Switch alpha loops" ON)
 option(KRKRNS_GAME_LOG_BATCH "Batch ordinary Switch engine log writes" ON)

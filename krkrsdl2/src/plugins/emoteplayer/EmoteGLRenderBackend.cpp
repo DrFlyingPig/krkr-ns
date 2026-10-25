@@ -1126,6 +1126,36 @@ bool EmoteGLRenderBackend::IsAvailable()
     return ready;
 }
 
+bool EmoteGLRenderBackend::RetireUnusedContext() noexcept
+{
+    if (!impl->images.empty()) return false;
+    impl->end();
+    if (impl->context && SDL_WasInit(SDL_INIT_VIDEO))
+    {
+        // end() normally restores SDL's renderer context. If that restore
+        // failed, retry before deletion rather than leaving SDL bound to a
+        // dead private context. A self-saved context can only be unbound.
+        if (SDL_GL_GetCurrentContext() == impl->context)
+        {
+            const SDL_GLContext restore = impl->savedContext == impl->context
+                ? nullptr : impl->savedContext;
+            if (SDL_GL_MakeCurrent(impl->savedWindow ? impl->savedWindow : impl->window,
+                                   restore) != 0)
+            {
+                KRKRNS_LOG("[emote] cannot retire rejected GL context: %s", SDL_GetError());
+                return false;
+            }
+        }
+        SDL_GL_DeleteContext(impl->context);
+    }
+    // The private context is now deleted (or SDL video already retired it).
+    // Clear its handles, then release the lease; this is not a live-window
+    // shortcut through ResetForEngineRestart().
+    impl->resetForNewWindow();
+    impl->failed = true;
+    return true;
+}
+
 bool EmoteGLRenderBackend::selfTest()
 {
     // Draw a full-target quad through the same public API the compositor uses.

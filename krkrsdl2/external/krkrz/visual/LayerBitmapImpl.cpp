@@ -12,6 +12,10 @@
 #include "tjsCommHead.h"
 #include "GLCompositeBridge.h"
 #include "KrkrNSPerf.h"
+#ifdef __SWITCH__
+#include "SDLBitmapCompositor.h"
+#include <atomic>
+#endif
 
 #include <memory>
 #include <stdlib.h>
@@ -445,10 +449,19 @@ tTVPBitmap::tTVPBitmap(tjs_uint width, tjs_uint height, tjs_uint bpp, void* bits
 		BitmapInfo = NULL;
 		throw;
 	}
+#ifdef __SWITCH__
+	ResetGPUStorageIdentity();
+#endif
 }
 //---------------------------------------------------------------------------
 tTVPBitmap::~tTVPBitmap()
 {
+#ifdef __SWITCH__
+	// CPU-only lifetimes need not have constructed the compositor yet.
+	// Forget itself is noexcept once the process-lifetime instance exists.
+	try { krkrns::GetBitmapCompositor().Forget(this, GPUStorageSerial); }
+	catch (...) {}
+#endif
 	tTVPBitmapBitsAlloc::Free(Bits);
 	delete BitmapInfo;
 	if( Palette ) delete Palette;
@@ -464,6 +477,11 @@ tTVPBitmap::tTVPBitmap(const tTVPBitmap & r)
 #endif
 	RefCount = 1;
 
+#ifdef __SWITCH__
+	// A shared GPU destination may have newer pixels than its CPU buffer.
+	// Materialize them before allocating (allocation can fire compact hooks).
+	r.SyncForCPURead();
+#endif
 	// allocate bitmap which has the same metrics to r
 	Allocate(r.GetWidth(), r.GetHeight(), r.GetBPP());
 
@@ -484,6 +502,9 @@ tTVPBitmap::tTVPBitmap(const tTVPBitmap & r)
 //---------------------------------------------------------------------------
 void tTVPBitmap::Allocate(tjs_uint width, tjs_uint height, tjs_uint bpp, bool unpadding)
 {
+#ifdef __SWITCH__
+	ResetGPUStorageIdentity();
+#endif
 	// allocate bitmap bits
 	// bpp must be 8 or 32
 
@@ -515,15 +536,85 @@ void tTVPBitmap::Allocate(tjs_uint width, tjs_uint height, tjs_uint bpp, bool un
 	}
 }
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+void tTVPBitmap::ResetGPUStorageIdentity()
+{
+	if (GPUStorageSerial)
+		krkrns::GetBitmapCompositor().Forget(this, GPUStorageSerial);
+	static std::atomic<std::uint64_t> nextSerial{1};
+	GPUStorageSerial = nextSerial.fetch_add(1, std::memory_order_relaxed);
+	if (!GPUStorageSerial)
+		GPUStorageSerial = nextSerial.fetch_add(1, std::memory_order_relaxed);
+	CPUVersion = 1;
+	CPUBufferExposed = false;
+}
+
+krkrns::BitmapView tTVPBitmap::GetGPUView() const
+{
+	auto* row0 = static_cast<std::uint8_t*>(Bits);
+	if (row0 && Height > 0)
+		row0 += static_cast<std::size_t>(Height - 1) * PitchBytes;
+	return {this, GPUStorageSerial, CPUVersion, row0,
+		Width, Height, PitchStep, static_cast<int>(GetBPP()), CPUBufferExposed};
+}
+
+void tTVPBitmap::SyncForCPURead() const
+{
+	if (!krkrns::GetBitmapCompositor().SyncCPU(GetGPUView()))
+		TVPThrowExceptionMessage(TJS_W("Cannot synchronize GPU bitmap pixels for CPU access"));
+}
+
+void tTVPBitmap::BeforeCPUWrite(bool exposeBuffer) const
+{
+	SyncForCPURead();
+	if (exposeBuffer) CPUBufferExposed = true;
+	++CPUVersion;
+	krkrns::GetBitmapCompositor().CPUWritten(GetGPUView());
+}
+#endif
+
+void tTVPBitmap::MarkCPUBufferExposed()
+{
+#ifdef __SWITCH__
+	BeforeCPUWrite(true);
+#endif
+}
+
+void * tTVPBitmap::ScanLinePointer(tjs_uint l) const
+{
+	if (l >= static_cast<tjs_uint>(BitmapInfo->GetHeight()))
+		TVPThrowExceptionMessage(TVPScanLineRangeOver, ttstr((tjs_int)l),
+			ttstr((tjs_int)BitmapInfo->GetHeight() - 1));
+	return (BitmapInfo->GetHeight() - l - 1) * PitchBytes + (tjs_uint8*)Bits;
+}
+
+const void * tTVPBitmap::GetScanLineForRead(tjs_uint l) const
+{
+	const void* pixels = ScanLinePointer(l);
+#ifdef __SWITCH__
+	SyncForCPURead();
+#endif
+	return pixels;
+}
+//---------------------------------------------------------------------------
 void * tTVPBitmap::GetScanLine(tjs_uint l) const
 {
-	if((tjs_int)l>=BitmapInfo->GetHeight() )
-	{
-		TVPThrowExceptionMessage(TVPScanLineRangeOver, ttstr((tjs_int)l),
-			ttstr((tjs_int)BitmapInfo->GetHeight()-1));
-	}
+	void* pixels = ScanLinePointer(l);
+#ifdef __SWITCH__
+	// This legacy public method exposes a mutable pointer with no bounded
+	// lifetime. Internal writers use the explicit ephemeral write accessor.
+	BeforeCPUWrite(true);
+#endif
+	return pixels;
+}
 
-	return (BitmapInfo->GetHeight() - l -1 ) * PitchBytes + (tjs_uint8*)Bits;
+void * tTVPBitmap::GetScanLineForWrite(tjs_uint l)
+{
+	void* pixels = ScanLinePointer(l);
+#ifdef __SWITCH__
+	BeforeCPUWrite();
+#endif
+	return pixels;
 }
 //---------------------------------------------------------------------------
 void tTVPBitmap::SetPaletteCount( tjs_uint count ) {
@@ -598,7 +689,9 @@ void tTVPNativeBaseBitmap::SetSize(tjs_uint w, tjs_uint h, bool keepimage)
 	if(Bitmap->GetWidth() != w || Bitmap->GetHeight() != h)
 	{
 		// create a new bitmap and copy existing bitmap
-		tTVPBitmap *newbitmap = new tTVPBitmap(w, h, Bitmap->GetBPP());
+		// Reading the old bitmap may synchronize GPU data and throw. Keep
+		// the replacement owned until every preserved row has been copied.
+		std::unique_ptr<tTVPBitmap> newbitmap(new tTVPBitmap(w, h, Bitmap->GetBPP()));
 
 		if(keepimage)
 		{
@@ -611,8 +704,8 @@ void tTVPNativeBaseBitmap::SetSize(tjs_uint w, tjs_uint h, bool keepimage)
 			tjs_int i;
 			for(i = 0; i < lh; i++)
 			{
-				void * ds = newbitmap->GetScanLine(i);
-				void * ss = Bitmap->GetScanLine(i);
+				void * ds = newbitmap->GetScanLineForWrite(i);
+				const void * ss = Bitmap->GetScanLineForRead(i);
 
 				memcpy(ds, ss, cs);
 			}
@@ -621,7 +714,7 @@ void tTVPNativeBaseBitmap::SetSize(tjs_uint w, tjs_uint h, bool keepimage)
 		}
 
 		Bitmap->Release();
-		Bitmap = newbitmap;
+		Bitmap = newbitmap.release();
 
 		FontChanged = true;
 	}
@@ -684,13 +777,13 @@ bool tTVPNativeBaseBitmap::AssignBitmap(const tTVPNativeBaseBitmap &rhs)
 //---------------------------------------------------------------------------
 const void * tTVPNativeBaseBitmap::GetScanLine(tjs_uint l) const
 {
-	return Bitmap->GetScanLine(l);
+	return Bitmap->GetScanLineForRead(l);
 }
 //---------------------------------------------------------------------------
 void * tTVPNativeBaseBitmap::GetScanLineForWrite(tjs_uint l)
 {
 	Independ();
-	return Bitmap->GetScanLine(l);
+	return Bitmap->GetScanLineForWrite(l);
 }
 //---------------------------------------------------------------------------
 tjs_int tTVPNativeBaseBitmap::GetPitchBytes() const

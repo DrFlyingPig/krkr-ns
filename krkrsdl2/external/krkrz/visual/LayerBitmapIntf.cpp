@@ -33,6 +33,9 @@
 
 #include "DebugIntf.h"
 #include "LayerBitmapIntf.h"
+#ifdef __SWITCH__
+#include "SDLBitmapCompositor.h"
+#endif
 #include "MsgIntf.h"
 #include "DebugIntf.h"
 #include "tvpgl.h"
@@ -278,6 +281,17 @@ bool tTVPBaseBitmap::Fill(tTVPRect rect, tjs_uint32 value)
 	// passed by "value".
 	// value must be : 0xAARRGGBB (for 32bpp) or 0xII ( for 8bpp )
 	BOUND_CHECK(false);
+
+#ifdef __SWITCH__
+	if (Is32BPP() && IsGPUWindowDrawTarget()) {
+		Independ();
+		const auto view = GetBitmap()->GetGPUView();
+		if (krkrns::GetBitmapCompositor().SetOpaqueTarget(view) &&
+			krkrns::GetBitmapCompositor().TryFill(view,
+				SDL_Rect{rect.left, rect.top, rect.get_width(), rect.get_height()}, value))
+			return true;
+	}
+#endif
 
 	if(!IsIndependent())
 	{
@@ -745,6 +759,17 @@ bool tTVPBaseBitmap::CopyRect(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 	(void)copyProf;
 #endif
 	// KRKR-ns Phase 3: GPU composite interception (32bpp main copies only)
+#ifdef __SWITCH__
+	if (Is32BPP() && ref->Is32BPP() && IsGPUWindowDrawTarget() &&
+		plane == (TVP_BB_COPY_MAIN | TVP_BB_COPY_MASK)) {
+		Independ();
+		const auto view = GetBitmap()->GetGPUView();
+		if (krkrns::GetBitmapCompositor().SetOpaqueTarget(view) &&
+			krkrns::GetBitmapCompositor().TryCopy(view, x, y, ref->GetBitmap()->GetGPUView(),
+				SDL_Rect{refrect.left, refrect.top, refrect.get_width(), refrect.get_height()}))
+			return true;
+	}
+#endif
 	if(Is32BPP() && plane != TVP_BB_COPY_MASK &&
 		krkrsdl2_glc_try_copy(this, x, y, ref, &refrect))
 		return true;
@@ -1226,6 +1251,24 @@ bool tTVPBaseBitmap::Blt(tjs_int x, tjs_int y, const tTVPBaseBitmap *ref,
 #endif
 	// KRKR-ns Phase 3: GPU composite — direct-to-compose blits become
 	// textured quads; everything else keeps the proven CPU path.
+#ifdef __SWITCH__
+	if (Is32BPP() && ref->Is32BPP() && IsGPUWindowDrawTarget())
+	{
+		krkrns::BitmapBlend blend;
+		const bool supported = method == bmCopy || method == bmAlpha || method == bmAddAlpha;
+		if (supported && opa > 0 && opa <= 255) {
+			Independ();
+			const auto view = GetBitmap()->GetGPUView();
+			blend = method == bmCopy ? krkrns::BitmapBlend::Copy :
+				(method == bmAlpha ? krkrns::BitmapBlend::Alpha : krkrns::BitmapBlend::AddAlpha);
+			if (krkrns::GetBitmapCompositor().SetOpaqueTarget(view) &&
+				krkrns::GetBitmapCompositor().TryBlt(view, x, y,
+				ref->GetBitmap()->GetGPUView(),
+				SDL_Rect{refrect.left, refrect.top, refrect.get_width(), refrect.get_height()},
+				blend, opa, hda)) return true;
+		}
+	}
+#endif
 	if(krkrsdl2_glc_try_blt(this, x, y, ref, &refrect, (tjs_int)method, opa, hda))
 		return true;
 	krkrsdl2_glc_bump_version(this);

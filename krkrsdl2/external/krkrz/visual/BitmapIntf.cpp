@@ -178,7 +178,9 @@ const void * tTJSNI_Bitmap::GetPixelBuffer() const {
 //----------------------------------------------------------------------
 void * tTJSNI_Bitmap::GetPixelBufferForWrite() {
 	if(!Bitmap) return NULL;
-	return Bitmap->GetScanLineForWrite(0);
+	void* pixels = Bitmap->GetScanLineForWrite(0); // complete COW first
+	Bitmap->GetBitmap()->MarkCPUBufferExposed();
+	return pixels;
 }
 //----------------------------------------------------------------------
 tjs_int tTJSNI_Bitmap::GetPixelBufferPitch() const {

@@ -11,11 +11,16 @@ extern volatile bool krkrsdl2_engine_teardown_active;
 
 namespace krkrsdl3
 {
+namespace
+{
+iTVPRenderBackend* selectedBackend = nullptr;
+}
+
 iTVPRenderBackend* TVPGetRenderBackend()
 {
     static EmoteGLRenderBackend gpu;
     static EmoteSWRenderBackend cpu;
-    static iTVPRenderBackend* selected = nullptr;
+    iTVPRenderBackend*& selected = selectedBackend;
     if (!selected)
     {
         // During teardown, E-mote object destructors (~EmotePlayer / ~D3DAdaptor
@@ -79,6 +84,7 @@ iTVPRenderBackend* TVPGetRenderBackend()
             }
             else
             {
+                gpu.RetireUnusedContext();
                 selected = &cpu;
                 KRKRNS_LOG("[emote] GL self-test failed; CPU backend latched");
             }
@@ -104,8 +110,9 @@ iTVPRenderBackend* TVPGetRenderBackend()
 // restart.  This reset is unconditional.
 void TVPResetRenderBackendForEngineRestart()
 {
-    if (iTVPRenderBackend* backend = TVPGetRenderBackend())
-        backend->ResetForEngineRestart();
+    // Resetting an unused subsystem must not perform its first GL selection.
+    if (selectedBackend)
+        selectedBackend->ResetForEngineRestart();
 }
 } // namespace krkrsdl3
 

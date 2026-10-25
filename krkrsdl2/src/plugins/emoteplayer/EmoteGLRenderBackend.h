@@ -23,6 +23,10 @@ public:
     explicit EmoteGLRenderBackend(bool useResidentReadback = true);
     ~EmoteGLRenderBackend() override;
     bool IsAvailable();
+    // A rejected probe must not keep an unused private context (and GPU
+    // resource lease) alive after selection falls back to the CPU backend.
+    // Never retire a context while client images still exist.
+    bool RetireUnusedContext() noexcept;
     EmoteResidentReadbackStats GetResidentReadbackStats() const noexcept;
     void* CreateTarget(int width, int height) override;
     bool GetTargetSize(void* target, int& width, int& height) const override;

@@ -15,6 +15,10 @@
 #include "ComplexRect.h"
 
 #include "BitmapInfomation.h"
+#ifdef __SWITCH__
+#include <cstdint>
+namespace krkrns { struct BitmapView; }
+#endif
 
 //---------------------------------------------------------------------------
 extern void TVPSetFontCacheForLowMem();
@@ -44,6 +48,17 @@ private:
 
 	tjs_int ActualPalCount;
 	tjs_uint* Palette;
+	void * ScanLinePointer(tjs_uint l) const;
+#ifdef __SWITCH__
+	// Identity belongs to the shared pixel allocation, not a BaseBitmap
+	// wrapper. COW/reallocation gets a new serial even if an address is reused.
+	std::uint64_t GPUStorageSerial = 0;
+	mutable std::uint64_t CPUVersion = 1;
+	mutable bool CPUBufferExposed = false;
+	void ResetGPUStorageIdentity();
+	void SyncForCPURead() const;
+	void BeforeCPUWrite(bool exposeBuffer = false) const;
+#endif
 
 public:
 	tTVPBitmap(tjs_uint width, tjs_uint height, tjs_uint bpp, bool unpadding=false);
@@ -79,6 +94,14 @@ public:
 
 
 	void * GetScanLine(tjs_uint l) const;
+	const void * GetScanLineForRead(tjs_uint l) const;
+	void * GetScanLineForWrite(tjs_uint l);
+	// Exported write pointers can outlive one call. Such CPU storage must be
+	// uploaded on each GPU use instead of trusting a one-time version bump.
+	void MarkCPUBufferExposed();
+#ifdef __SWITCH__
+	krkrns::BitmapView GetGPUView() const;
+#endif
 
 	tjs_int GetPitch() const { return PitchStep; }
 
@@ -90,7 +113,13 @@ public:
 	const BITMAPINFOHEADER * GetBITMAPINFOHEADER() const { return (const BITMAPINFOHEADER*)( BitmapInfo->GetBITMAPINFO() ); }
 #endif
 
-	const void * GetBits() const { return Bits; }
+	const void * GetBits() const
+	{
+#ifdef __SWITCH__
+		SyncForCPURead();
+#endif
+		return Bits;
+	}
 	const tjs_uint* GetPalette() const { return Palette; };
 	tjs_uint* GetPalette() { return Palette; };
 	tjs_uint GetPaletteCount() const { return ActualPalCount; };
@@ -150,6 +179,22 @@ public:
 	void Recreate(tjs_uint w, tjs_uint h, tjs_uint bpp, bool unpadding=false);
 
 	bool IsIndependent() const { return Bitmap->IsIndependent(); }
+	void SetGPUWindowDrawTarget(bool enabled = true)
+	{
+#ifdef __SWITCH__
+		GPUWindowDrawTarget = enabled;
+#else
+		(void)enabled;
+#endif
+	}
+	bool IsGPUWindowDrawTarget() const
+	{
+#ifdef __SWITCH__
+		return GPUWindowDrawTarget;
+#else
+		return false;
+#endif
+	}
 
 	/* other utilities */
 	tTVPBitmap * GetBitmap() const { return Bitmap; }
@@ -159,6 +204,11 @@ public:
 
 	/* font and text functions */
 private:
+#ifdef __SWITCH__
+	// Eligibility is a property of the layer manager's wrapper. It must not
+	// follow pixels shared by AssignBitmap or be inherited by a copied wrapper.
+	bool GPUWindowDrawTarget = false;
+#endif
 	tTVPFont Font;
 	bool FontChanged;
 	tjs_int GlobalFontState;

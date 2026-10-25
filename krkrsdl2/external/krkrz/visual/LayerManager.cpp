@@ -24,6 +24,10 @@
 #include "KrkrNSProf.h"
 #include "KrkrNSLog.h"
 #include "GLCompositeBridge.h"
+#ifdef __SWITCH__
+#include "SDLBitmapCompositor.h"
+#include "SDLBitmapCompletionSource.h"
+#endif
 
 // Immediate input callbacks may close their Window, including from a nested
 // modal loop. Keep the manager alive until the suspended delivery has returned.
@@ -98,17 +102,32 @@ tTVPBaseBitmap * tTVPLayerManager::GetDrawTargetBitmap(const tTVPRect &rect,
 	// retrieve draw target bitmap
 	tjs_int w = rect.get_width();
 	tjs_int h = rect.get_height();
+#ifdef __SWITCH__
+	// The reference GL manager keeps a full primary-layer target. Global
+	// coordinates let untouched pixels stay resident across dirty regions.
+	if (Primary) { w = Primary->GetWidth(); h = Primary->GetHeight(); }
+#endif
 
 	if(!DrawBuffer)
 	{
 		// create draw buffer
 		DrawBuffer = new tTVPBaseBitmap(w, h, 32);
+#ifdef __SWITCH__
+		DrawBuffer->Fill(tTVPRect(0, 0, w, h), 0xff000000);
+#endif
 		krkrsdl2_glc_set_compose_target(DrawBuffer);
 	}
 	else
 	{
 		tjs_int bw = DrawBuffer->GetWidth();
 		tjs_int bh = DrawBuffer->GetHeight();
+#ifdef __SWITCH__
+		if (bw != w || bh != h) {
+			DrawBuffer->SetGPUWindowDrawTarget(false);
+			DrawBuffer->SetSize(w, h, false);
+			DrawBuffer->Fill(tTVPRect(0, 0, w, h), 0xff000000);
+		}
+#else
 		if(bw < w || bh  < h)
 		{
 			// insufficient size; resize the draw buffer
@@ -116,12 +135,21 @@ tTVPBaseBitmap * tTVPLayerManager::GetDrawTargetBitmap(const tTVPRect &rect,
 			neww += (neww & 1); // align to even
 			DrawBuffer->SetSize(neww, bh > h ? bh:h);
 		}
+#endif
 	}
 
+#ifdef __SWITCH__
+	cliprect = rect;
+	DrawBuffer->SetGPUWindowDrawTarget(krkrns::GPUCompletionReceiverSlot());
+	if (DrawBuffer->IsGPUWindowDrawTarget() && DrawBuffer->IsIndependent() &&
+		!krkrsdl2_glc_enabled())
+		krkrns::GetBitmapCompositor().SetOpaqueTarget(DrawBuffer->GetBitmap()->GetGPUView());
+#else
 	cliprect.left = 0;
 	cliprect.top = 0;
 	cliprect.right = w;
 	cliprect.bottom = h;
+#endif
 	return DrawBuffer;
 }
 //---------------------------------------------------------------------------
@@ -134,8 +162,38 @@ void tTVPLayerManager::DrawCompleted(const tTVPRect &destrect,
 		tTVPBaseBitmap *bmp, const tTVPRect &cliprect,
 		tTVPLayerType type, tjs_int opacity)
 {
+#ifdef __SWITCH__
+	// Match the reference manager: EVERY completion, including exposed leaf
+	// regions and CPU fallbacks, contributes to one complete persistent canvas.
+	// A full-sized scratch bitmap alone is not a valid whole-frame baseline.
+	tTVPRect canvasClip;
+	GetDrawTargetBitmap(destrect, canvasClip);
+	if (bmp != DrawBuffer || destrect.left != cliprect.left ||
+		destrect.top != cliprect.top || type != ltOpaque || opacity != 255)
+		tTJSNI_BaseLayer::BltImage(DrawBuffer, ltOpaque, destrect.left,
+			destrect.top, bmp, cliprect, type, opacity);
+	bmp = DrawBuffer;
+	const tTVPRect completedClip(destrect);
+	const auto view = bmp->GetBitmap()->GetGPUView();
+	if (krkrns::GPUCompletionReceiverSlot() &&
+		krkrns::GetBitmapCompositor().IsOpaqueTarget(view) &&
+		krkrns::GetBitmapCompositor().HasGPUWrites(view))
+	{
+		krkrns::CompletionBitmapScope source(view);
+		const auto* bits = view.row0 + (view.pitch < 0 ?
+			static_cast<std::ptrdiff_t>(view.height - 1) * view.pitch : 0);
+		LayerTreeOwner->NotifyBitmapCompleted(this, destrect.left, destrect.top,
+			bits, bmp->GetBitmap()->GetBitmapInfomation(), completedClip, ltOpaque, 255);
+		return;
+	}
+	krkrns::CompletionBitmapScope cpuCompletion(static_cast<const krkrns::BitmapView*>(nullptr));
+	LayerTreeOwner->NotifyBitmapCompleted(this, destrect.left, destrect.top,
+		bmp->GetBitmap()->GetBits(), bmp->GetBitmap()->GetBitmapInfomation(),
+		completedClip, ltOpaque, 255);
+#else
 	LayerTreeOwner->NotifyBitmapCompleted(this, destrect.left, destrect.top,
 		bmp->GetBitmap()->GetBits(), bmp->GetBitmap()->GetBitmapInfomation(), cliprect, type, opacity);
+#endif
 }
 //---------------------------------------------------------------------------
 void tTVPLayerManager::AttachPrimary(tTJSNI_BaseLayer *pri)
@@ -1126,6 +1184,14 @@ void TJS_INTF_METHOD tTVPLayerManager::UpdateToDrawDevice()
 	// drawdevice -> layer
 	if(!Primary) return;
 #ifdef __SWITCH__
+	krkrns::BitmapCompletionReceiverScope gpuCompletionReceiver;
+	if (!DrawBuffer || DrawBuffer->GetWidth() != Primary->GetWidth() ||
+		DrawBuffer->GetHeight() != Primary->GetHeight()) {
+		const tTVPRect canvas(0, 0, Primary->GetWidth(), Primary->GetHeight());
+		tTVPRect unused;
+		GetDrawTargetBitmap(canvas, unused);
+		UpdateRegion.Or(canvas);
+	}
 	// Keep this aggregate cheap enough for production builds: it tells us
 	// whether a slow scene is genuinely repainting most of the screen or is
 	// spending its time traversing the layer tree for a small dirty region.

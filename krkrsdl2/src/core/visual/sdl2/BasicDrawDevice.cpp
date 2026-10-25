@@ -15,6 +15,9 @@
 #include "EventIntf.h"
 #include "WindowImpl.h"
 #include "SDLBitmapCompletion.h"
+#ifdef __SWITCH__
+#include "SDLBitmapCompletionSource.h"
+#endif
 #include "KrkrNSLog.h"
 #include "KrkrNSProf.h"
 #include "GLCompositeBridge.h"
@@ -657,6 +660,7 @@ bool TJS_INTF_METHOD tTVPBasicDrawDevice::WaitForVBlank( tjs_int* in_vblank, tjs
 //---------------------------------------------------------------------------
 void TJS_INTF_METHOD tTVPBasicDrawDevice::StartBitmapCompletion(iTVPLayerManager * manager)
 {
+	bitmap_completion = nullptr;
 	if (Window)
 	{
 		TTVPWindowForm *form = ((tTJSNI_Window*)Window)->GetForm();
@@ -665,6 +669,9 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::StartBitmapCompletion(iTVPLayerManager
 			bitmap_completion = form->GetTVPSDLBitmapCompletion();
 		}
 	}
+#ifdef __SWITCH__
+	krkrns::GPUCompletionReceiverSlot() = bitmap_completion && Managers.size() == 1;
+#endif
 #if 0
 	EnsureDevice();
 
@@ -697,6 +704,14 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::NotifyBitmapCompleted(iTVPLayerManager
 	tjs_int x, tjs_int y, const void * bits, const class BitmapInfomation * bmpinfo,
 	const tTVPRect &cliprect, tTVPLayerType type, tjs_int opacity)
 {
+#ifdef __SWITCH__
+	if (const auto* bitmap = krkrns::CompletionBitmapSlot()) {
+		if (bitmap_completion && bitmap_completion->NotifyGPUCompleted(
+			manager, x, y, *bitmap, cliprect, type, opacity)) return;
+		if (!krkrns::GetBitmapCompositor().SyncCPU(*bitmap))
+			TVPThrowExceptionMessage(TJS_W("Cannot synchronize GPU composition"));
+	}
+#endif
 #ifdef __SWITCH__
 	// KRKR-ns profiler: this call IS the per-layer presentation (compose's
 	// blend on the CPU path, the glc quad on the GPU path).  Timed here so a
@@ -801,6 +816,9 @@ void TJS_INTF_METHOD tTVPBasicDrawDevice::NotifyBitmapCompleted(iTVPLayerManager
 //---------------------------------------------------------------------------
 void TJS_INTF_METHOD tTVPBasicDrawDevice::EndBitmapCompletion(iTVPLayerManager * manager)
 {
+#ifdef __SWITCH__
+	krkrns::GPUCompletionReceiverSlot() = false;
+#endif
 #if 0
 	if(!TargetWindow) return;
 	if(!Texture) return;

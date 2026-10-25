@@ -31,6 +31,9 @@
 #include "XP3Archive.h"
 #include "SevenZipArchive.h"
 #include "SDLBitmapCompletion.h"
+#ifdef __SWITCH__
+#include "SDLBitmapCompositor.h"
+#endif
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
 #include "KrkrNSResourcePolicy.h"
@@ -1311,6 +1314,7 @@ protected:
 #ifdef __SWITCH__
 	/* KRKR-ns patch: set by the trace marker, captured at the next present */
 	bool traceCapturePending = false;
+	bool gpuResidentPresentLogged = false;
 	/* Shadow of the last uploaded surface content. The engine's update_rect
 	   under-reports scene switches, so the upload damage is derived from
 	   actual pixel differences instead of that rect. */
@@ -1475,6 +1479,17 @@ public:
 	/* Called from tTJSNI_Window */
 	virtual void SetPosition(tjs_int l, tjs_int t) override;
 	virtual TVPSDLBitmapCompletion *GetTVPSDLBitmapCompletion() override;
+	bool EnsureCPUSurfaceCurrent() {
+		return !bitmapCompletion || bitmapCompletion->SyncSurface();
+	}
+	SDL_Texture* PresentationTexture() const {
+		SDL_Texture* resident = bitmapCompletion ? bitmapCompletion->ResidentTexture() : nullptr;
+		if (!resident) return texture;
+		SDL_SetTextureBlendMode(resident, SDL_BLENDMODE_NONE);
+		SDL_SetTextureColorMod(resident, 255, 255, 255);
+		SDL_SetTextureAlphaMod(resident, 255);
+		return resident;
+	}
 #ifdef KRKRZ_ENABLE_CANVAS
 	virtual void SetOpenGLScreen(tTVPOpenGLScreen *s) override;
 	virtual void SetSwapInterval(int interval) override;
@@ -1811,6 +1826,17 @@ else
 		// completion, texture and surface exactly like a window with its own
 		// SDL window (those are what its layer tree composits into).
 		this->bitmapCompletion = new TVPSDLBitmapCompletion();
+#ifdef __SWITCH__
+		if (this->renderer && !this->hostWindow) {
+			if (!TVPSDLBitmapCompletion::SyncAllSurfaces())
+				TVPThrowExceptionMessage(TJS_W("Cannot preserve GPU window pixels"));
+			if (!krkrns::GetBitmapCompositor().BindRenderer(this->renderer)) {
+				TVPSDLBitmapCompletion::DiscardAllDerivedFrames();
+				krkrns::GetBitmapCompositor().DiscardRenderer();
+				KRKRNS_LOG("[gpu-layer] renderer unavailable: %s; CPU composition", SDL_GetError());
+			} else KRKRNS_LOG("[gpu-layer] resident ordinary-layer compositor bound");
+		}
+#endif
 		// A hosted window must not fall back to SDL_GetWindowSurface(): that is
 		// the host's screen buffer, and drawing the dialog into it would write
 		// over the game's frame instead of on top of it.
@@ -1921,6 +1947,15 @@ TVPWindowWindow::~TVPWindowWindow()
 	}
 	if (this->renderer && !this->hostWindow)
 	{
+#ifdef __SWITCH__
+		if (krkrns::GetBitmapCompositor().Renderer() == this->renderer) {
+			if (!TVPSDLBitmapCompletion::SyncAllSurfaces() ||
+				!krkrns::GetBitmapCompositor().ResetRenderer()) {
+				TVPSDLBitmapCompletion::DiscardAllDerivedFrames();
+				krkrns::GetBitmapCompositor().DiscardRenderer();
+			}
+		}
+#endif
 		SDL_DestroyRenderer(this->renderer);
 		this->renderer = nullptr;
 	}
@@ -1963,6 +1998,7 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 #endif
 	if (this->renderer)
 	{
+		if (this->bitmapCompletion) this->bitmapCompletion->UseCPUSurface();
 		if (this->texture)
 		{
 			SDL_DestroyTexture(this->texture);
@@ -2040,6 +2076,16 @@ void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
 
 void TVPWindowWindow::ReleaseNativeForSwitch(void)
 {
+#ifdef __SWITCH__
+	if (this->renderer && !this->hostWindow &&
+		krkrns::GetBitmapCompositor().Renderer() == this->renderer) {
+		if (!TVPSDLBitmapCompletion::SyncAllSurfaces() ||
+			!krkrns::GetBitmapCompositor().ResetRenderer()) {
+			TVPSDLBitmapCompletion::DiscardAllDerivedFrames();
+			krkrns::GetBitmapCompositor().DiscardRenderer();
+		}
+	}
+#endif
 	// The TJS object outlives this: TickBeat/SetVisible/UpdateActualZoom all
 	// null-check the pointers below, and the destructor does too.
 	if (this->texture)
@@ -2781,6 +2827,7 @@ void TVPWindowWindow::SetPosition(tjs_int l, tjs_int t)
 }
 TVPSDLBitmapCompletion *TVPWindowWindow::GetTVPSDLBitmapCompletion()
 {
+	if (this->bitmapCompletion) this->bitmapCompletion->BeginCompletion();
 	g_krkrns_prof.req_notify++;
 	if (this->needsGraphicUpdate) g_krkrns_prof.req_coalesced++;
 	this->needsGraphicUpdate = true;
@@ -3063,6 +3110,8 @@ static void krkrsdl2_maybe_capture_frame(TVPWindowWindow *win, SDL_Surface *surf
 	//    the trustworthy artifact here: the emulator's GPU readback is truncated.
 	if (surface)
 	{
+		if (win && !win->EnsureCPUSurfaceCurrent())
+			TVPThrowExceptionMessage(TJS_W("Cannot capture GPU window pixels"));
 		SDL_SaveBMP(surface, KRKRNS_BASE_A "/capture-surface.bmp");
 		KRKRNS_LOG("[capture] surface %dx%d saved", surface->w, surface->h);
 	}
@@ -3159,7 +3208,11 @@ void TVPWindowWindow::TickBeat()
 			if (!krkrsdl2_trace_keep_marker)
 				remove(marker);
 			if (this->surface)
+			{
+				if (!EnsureCPUSurfaceCurrent())
+					TVPThrowExceptionMessage(TJS_W("Cannot trace GPU window pixels"));
 				SDL_SaveBMP(this->surface, KRKRNS_BASE_A "/render-surface.bmp");
+			}
 			// KRKR-ns diagnostic: sample the surface's actual pixels at dump
 			// time -- "the BMP is black" and "the surface holds no content" are
 			// different failures, and only the count separates them.
@@ -3351,7 +3404,10 @@ void TVPWindowWindow::TickBeat()
 								if (fFullFrameMode)
 									this->InvalidateFullSurface();
 							}
-							fullFrameUploadMode = fFullFrameMode;
+							// A resident GPU frame never compares stale CPU rows.
+							const bool frameFull = fFullFrameMode ||
+								(this->bitmapCompletion && this->bitmapCompletion->ResidentTexture());
+							fullFrameUploadMode = frameFull;
 const int sw = this->surface->w;
 								const int sh = this->surface->h;
 								// Periodic full refresh: guarantees any
@@ -3362,7 +3418,7 @@ const int sw = this->surface->w;
 								const bool fullRefresh =
 									(++fFullNetCounter % 60) == 1;
 								const bool shadowValid =
-									!fFullFrameMode && !fullRefresh &&
+									!frameFull && !fullRefresh &&
 									this->uploadShadowW == sw &&
 									this->uploadShadowH == sh &&
 									this->uploadShadow.size() == size_t(sw) * size_t(sh);
@@ -3391,7 +3447,7 @@ const int sw = this->surface->w;
 								// First frame / size change / forced mode:
 								// upload everything and (re)build the shadow.
 								rect = SDL_Rect{0, 0, sw, sh};
-								if (fFullFrameMode)
+								if (frameFull)
 								{
 									// Full-frame mode can skip the rows no present
 									// samples -- but only on frames that really are
@@ -3408,7 +3464,7 @@ const int sw = this->surface->w;
 									                           this->declaredClientH, vwinW, vwinH, &visH))
 										rect.h = visH;
 								}
-								if (!fFullFrameMode)
+								if (!frameFull)
 								{
 									this->uploadShadow.resize(size_t(sw) * size_t(sh));
 									this->uploadShadowW = sw;
@@ -3447,6 +3503,8 @@ const int sw = this->surface->w;
 						// path blits here.
 						if (this->surface && !gpuPresented)
 						{
+							if (krkrsdl2_video_overlay_pending() && this->bitmapCompletion)
+								this->bitmapCompletion->UseCPUSurface();
 							SDL_Rect videoDirty;
 							if (krkrsdl2_video_overlay_present(this->surface, &videoDirty) &&
 								videoDirty.w > 0 && videoDirty.h > 0)
@@ -3476,13 +3534,31 @@ const int sw = this->surface->w;
 #ifdef __SWITCH__
 						if (!gpuPresented)
 						{
-							KrkrNSPerfScope perfUpload(KrkrNSPerfOp::TextureUpload);
-							uploadResult = this->textureUploadState.Upload(this->renderer,
-								this->texture, this->surface, rect,
-								surfaceWritten || !fullFrameUploadMode || krkrsdl2_glc_enabled());
-							if (uploadResult == 0 && rect.w > 0 && rect.h > 0)
-								uploadBytes = static_cast<std::uint64_t>(rect.w) * rect.h * 4;
-							perfUpload.Bytes(uploadBytes);
+							if (this->bitmapCompletion && this->bitmapCompletion->ResidentTexture()) {
+								// The completed target is already GPU-resident. Only
+								// the final quad samples it; no readback or re-upload.
+								this->textureUploadState.Invalidate();
+								this->uploadShadow.clear();
+								if (!this->gpuResidentPresentLogged) {
+									this->gpuResidentPresentLogged = true;
+									KRKRNS_LOG("[gpu-layer] window=%p presenting resident ordinary canvas %dx%d; CPU display transfer bypassed",
+										(void*)this, this->surface->w, this->surface->h);
+								}
+							} else {
+								if (!EnsureCPUSurfaceCurrent())
+									TVPThrowExceptionMessage(TJS_W("Cannot synchronize GPU display surface"));
+								if (this->bitmapCompletion && this->bitmapCompletion->ForceCPUUpload())
+									this->textureUploadState.Invalidate();
+								KrkrNSPerfScope perfUpload(KrkrNSPerfOp::TextureUpload);
+								uploadResult = this->textureUploadState.Upload(this->renderer,
+									this->texture, this->surface, rect,
+									surfaceWritten || !fullFrameUploadMode || krkrsdl2_glc_enabled());
+								if (uploadResult == 0 && rect.w > 0 && rect.h > 0) {
+									uploadBytes = static_cast<std::uint64_t>(rect.w) * rect.h * 4;
+									if (this->bitmapCompletion) this->bitmapCompletion->DidCPUUpload();
+								}
+								perfUpload.Bytes(uploadBytes);
+							}
 						}
 #else
 						uploadResult = TVPUploadDirtySurface(this->renderer, this->texture, this->surface, rect);
@@ -3545,7 +3621,7 @@ const int sw = this->surface->w;
 					srcrect.y = 0;
 					srcrect.w = this->GetInnerWidth();
 					srcrect.h = this->GetInnerHeight();
-					SDL_RenderCopy(this->renderer, this->texture, &srcrect, &destrect);
+					SDL_RenderCopy(this->renderer, PresentationTexture(), &srcrect, &destrect);
 #elif defined(__SWITCH__)
 						// A hosted secondary window (KAG's modal dialog) has no
 						// SDL window of its own: draw the host's frame first and
@@ -3575,7 +3651,7 @@ const int sw = this->surface->w;
 							SDL_RenderClear(this->renderer);
 							if (this->hostWindow->texture && this->hostWindow->surface)
 							{
-								SDL_RenderCopy(this->renderer, this->hostWindow->texture, nullptr, nullptr);
+								SDL_RenderCopy(this->renderer, this->hostWindow->PresentationTexture(), nullptr, nullptr);
 							}
 							if (qw > 0 && qh > 0 && this->texture)
 							{
@@ -3596,7 +3672,7 @@ const int sw = this->surface->w;
 								if (dst.x < 0) dst.x = 0;
 								if (dst.y < 0) dst.y = 0;
 								this->hostDst = dst;
-								SDL_RenderCopy(this->renderer, this->texture, nullptr, &dst);
+								SDL_RenderCopy(this->renderer, PresentationTexture(), nullptr, &dst);
 							}
 							else
 							{
@@ -3671,7 +3747,7 @@ const int sw = this->surface->w;
 									src.h = visibleH;
 									SDL_RenderSetLogicalSize(this->renderer, tw, visibleH);
 									SDL_RenderClear(this->renderer);
-									SDL_RenderCopy(this->renderer, this->texture, &src, nullptr);
+									SDL_RenderCopy(this->renderer, PresentationTexture(), &src, nullptr);
 								}
 								else
 								{
@@ -3682,19 +3758,19 @@ const int sw = this->surface->w;
 									// pointing it at the fullscreen SDL window made
 									// every touch land at the wrong position.
 									SDL_RenderClear(this->renderer);
-									SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+									SDL_RenderCopy(this->renderer, PresentationTexture(), nullptr, nullptr);
 								}
 							}
 							else
 							{
 								SDL_RenderClear(this->renderer);
-								SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+								SDL_RenderCopy(this->renderer, PresentationTexture(), nullptr, nullptr);
 							}
 						}
 #elif defined(KRKRSDL2_RENDERER_FULL_UPDATES)
-						SDL_RenderCopy(this->renderer, this->texture, nullptr, nullptr);
+						SDL_RenderCopy(this->renderer, PresentationTexture(), nullptr, nullptr);
 #else
-						SDL_RenderCopy(this->renderer, this->texture, &rect, &rect);
+						SDL_RenderCopy(this->renderer, PresentationTexture(), &rect, &rect);
 #endif
 					}
 				#ifdef __SWITCH__
@@ -3772,7 +3848,7 @@ const int sw = this->surface->w;
 				}
 				if (this->texture)
 				{
-					SDL_RenderCopy(this->renderer, this->texture, &rect, &rect);
+					SDL_RenderCopy(this->renderer, PresentationTexture(), &rect, &rect);
 				}
 #endif
 				this->hasDrawn = true;
@@ -5439,6 +5515,13 @@ void sdl_process_events()
 #ifdef __SWITCH__
 		if (event.type == SDL_RENDER_DEVICE_RESET || event.type == SDL_RENDER_TARGETS_RESET)
 		{
+			// Only derived window targets are GPU-authoritative. Rebuild them
+			// from CPU-owned layers after a device loss instead of reading lost
+			// target pixels or reusing invalid cached source textures.
+			SDL_Renderer* renderer = krkrns::GetBitmapCompositor().Renderer();
+			TVPSDLBitmapCompletion::DiscardAllDerivedFrames();
+			krkrns::GetBitmapCompositor().DiscardRenderer();
+			if (renderer) krkrns::GetBitmapCompositor().BindRenderer(renderer);
 			// Reset events have no window ID. Current-window dispatch alone would
 			// leave another window's resident texture incorrectly marked valid.
 			for (TVPWindowWindow* win : krkrsdl2_live_windows)

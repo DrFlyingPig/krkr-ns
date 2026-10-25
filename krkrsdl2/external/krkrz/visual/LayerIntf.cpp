@@ -2760,7 +2760,9 @@ void * tTJSNI_BaseLayer::GetMainImagePixelBufferForWrite()
 {
 	if(!MainImage) return NULL;
 	ImageModified = true;
-	return MainImage->GetScanLineForWrite(0);
+	void* pixels = MainImage->GetScanLineForWrite(0);
+	MainImage->GetBitmap()->MarkCPUBufferExposed();
+	return pixels;
 }
 //---------------------------------------------------------------------------
 tjs_int tTJSNI_BaseLayer::GetMainImagePixelBufferPitch() const
@@ -2779,7 +2781,9 @@ void * tTJSNI_BaseLayer::GetProvinceImagePixelBufferForWrite()
 {
 	if(!ProvinceImage) AllocateProvinceImage();
 	ImageModified = true;
-	return ProvinceImage->GetScanLineForWrite(0);
+	void* pixels = ProvinceImage->GetScanLineForWrite(0);
+	ProvinceImage->GetBitmap()->MarkCPUBufferExposed();
+	return pixels;
 }
 //---------------------------------------------------------------------------
 tjs_int tTJSNI_BaseLayer::GetProvinceImagePixelBufferPitch() const

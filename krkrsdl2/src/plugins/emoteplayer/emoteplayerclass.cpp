@@ -617,7 +617,10 @@ void SeparateLayerAdaptor::assign(iTJSDispatch2* anotherAdaptor)
 void SeparateLayerAdaptor::clear()
 {
     // 渲染目标由 core/render 的 2D 渲染器统一管理
-    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    // The getter selects and self-tests GL lazily. An empty adaptor must not
+    // create a render context just because it is cleared or collected.
+    krkrsdl3::iTVPRenderBackend* renderer = (target || maskTarget)
+        ? krkrsdl3::TVPGetRenderBackend() : nullptr;
     if (renderer)
     {
         if (target)
@@ -740,7 +743,8 @@ D3DAdaptor::D3DAdaptor(
 }
 D3DAdaptor::~D3DAdaptor()
 {
-    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    krkrsdl3::iTVPRenderBackend* renderer = (_target || _maskTarget)
+        ? krkrsdl3::TVPGetRenderBackend() : nullptr;
     if (renderer)
     {
         if (_target)
@@ -1060,7 +1064,8 @@ tjs_uint32 TmpMotionObj::ClassID = (tjs_uint32)-1;
 EmotePlayer::~EmotePlayer()
 {
     // 渲染目标由 core/render 的 2D 渲染器统一管理
-    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    krkrsdl3::iTVPRenderBackend* renderer = (_target || _maskTarget)
+        ? krkrsdl3::TVPGetRenderBackend() : nullptr;
     if (renderer)
     {
         if (_target)
@@ -1266,17 +1271,16 @@ void EmotePlayer::clear(iTJSDispatch2* layer, tjs_uint32 neutralColor)
     if (ths == NULL)
         return;
 
+    void* target = withoutAdaptor ? _target : (self ? self->target : nullptr);
+    if (!target) return;
+
     // 清屏统一走 2D 渲染器（GL 后端清 FBO，软渲染后端清 CPU 缓冲）
     krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
     if (renderer)
     {
-        void* target = withoutAdaptor ? _target : (self ? self->target : nullptr);
-        if (target)
-        {
-            renderer->SetTarget(target);
-            renderer->ClearTarget(true);
-            renderer->UnlockTarget(target);
-        }
+        renderer->SetTarget(target);
+        renderer->ClearTarget(true);
+        renderer->UnlockTarget(target);
     }
 }
 void EmotePlayer::progress(tjs_real mstime)

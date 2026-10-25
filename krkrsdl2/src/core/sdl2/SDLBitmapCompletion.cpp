@@ -8,18 +8,129 @@
 #include "KrkrNSProf.h"
 #include "KrkrNSPerf.h"
 #include "GLCompositeBridge.h"
+#include "MsgIntf.h"
+#include "drawable.h"
 #include <SDL.h>
+
+#ifdef __SWITCH__
+TVPSDLBitmapCompletion* TVPSDLBitmapCompletion::first_ = nullptr;
+#endif
 
 TVPSDLBitmapCompletion::TVPSDLBitmapCompletion()
 {
 	surface = nullptr;
 	update_rect.clear();
+#ifdef __SWITCH__
+	next_ = first_;
+	if (next_) next_->previous_ = this;
+	first_ = this;
+#endif
 }
+
+void TVPSDLBitmapCompletion::BeginCompletion()
+{
+#ifdef __SWITCH__
+	gpuCycleAllowed_ = true;
+#endif
+}
+
+bool TVPSDLBitmapCompletion::SyncSurface()
+{
+#ifdef __SWITCH__
+	if (surfaceStale_) {
+		if (!surface || !residentFrame_ ||
+			!krkrns::GetBitmapCompositor().ReadFrame(residentFrame_, surface)) return false;
+		surfaceStale_ = false;
+	}
+#endif
+	return true;
+}
+
+void TVPSDLBitmapCompletion::UseCPUSurface()
+{
+	if (!SyncSurface()) TVPThrowExceptionMessage(TJS_W("Cannot synchronize GPU layer pixels"));
+#ifdef __SWITCH__
+	if (residentFrame_) forceCPUUpload_ = true;
+	residentFrame_ = {};
+	gpuCycleAllowed_ = false;
+#endif
+}
+
+SDL_Texture* TVPSDLBitmapCompletion::ResidentTexture() const
+{
+#ifdef __SWITCH__
+	return residentFrame_.Texture();
+#else
+	return nullptr;
+#endif
+}
+
+bool TVPSDLBitmapCompletion::ForceCPUUpload() const
+{
+#ifdef __SWITCH__
+	return forceCPUUpload_;
+#else
+	return false;
+#endif
+}
+
+void TVPSDLBitmapCompletion::DidCPUUpload()
+{
+#ifdef __SWITCH__
+	forceCPUUpload_ = false;
+#endif
+}
+
+bool TVPSDLBitmapCompletion::SyncAllSurfaces()
+{
+#ifdef __SWITCH__
+	for (auto* completion = first_; completion; completion = completion->next_)
+		if (!completion->SyncSurface()) return false;
+#endif
+	return true;
+}
+
+void TVPSDLBitmapCompletion::DiscardAllDerivedFrames()
+{
+#ifdef __SWITCH__
+	// Only for lost/destroyed renderers. The window must request a full
+	// primary-layer redraw; none of these derived pixels are TJS image data.
+	for (auto* completion = first_; completion; completion = completion->next_) {
+		completion->residentFrame_ = {};
+		completion->surfaceStale_ = false;
+		completion->gpuCycleAllowed_ = false;
+		completion->forceCPUUpload_ = true;
+	}
+#endif
+}
+
+#ifdef __SWITCH__
+bool TVPSDLBitmapCompletion::NotifyGPUCompleted(iTVPLayerManager* manager,
+	tjs_int x, tjs_int y, const krkrns::BitmapView& bitmap,
+	const tTVPRect& cliprect, tTVPLayerType type, tjs_int opacity)
+{
+	tjs_int width = 0, height = 0;
+	if (!gpuCycleAllowed_ || !surface || !manager || type != ltOpaque || opacity != 255 ||
+		!manager->GetPrimaryLayerSize(width, height) || bitmap.width != width ||
+		bitmap.height != height || surface->w != width || surface->h != height ||
+		x != cliprect.left || y != cliprect.top || x < 0 || y < 0 ||
+		cliprect.right > width || cliprect.bottom > height || cliprect.is_empty()) return false;
+	auto frame = krkrns::GetBitmapCompositor().GetResidentFrame(bitmap);
+	if (!frame) return false;
+	residentFrame_ = std::move(frame);
+	surfaceStale_ = true;
+	forceCPUUpload_ = true;
+	tTVPRect dirty = cliprect;
+	update_rect.do_union(dirty);
+	return true;
+}
+#endif
 
 void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 	tjs_int x, tjs_int y, const void * bits, const class BitmapInfomation * bmpinfo,
 	const tTVPRect &cliprect, tTVPLayerType type, tjs_int opacity)
 {
+	UseCPUSurface();
 	if (!surface || !manager || !bits || !bmpinfo)
 	{
 		static void* lastNullSurface = (void*)-1;
@@ -138,4 +249,9 @@ void TVPSDLBitmapCompletion::NotifyBitmapCompleted(iTVPLayerManager * manager,
 
 TVPSDLBitmapCompletion::~TVPSDLBitmapCompletion()
 {
+#ifdef __SWITCH__
+	if (previous_) previous_->next_ = next_;
+	else first_ = next_;
+	if (next_) next_->previous_ = previous_;
+#endif
 }
