@@ -690,6 +690,28 @@ std::uint64_t SDLBitmapCompositor::LogicalTextureBytes() const noexcept
     return impl_ ? impl_->epoch->bytes.load(std::memory_order_relaxed) : 0;
 }
 
+bool SDLBitmapCompositor::PrepareSource(const BitmapView& view)
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner() || view.volatileCPU ||
+        krkrsdl2_force_software_composition()) return false;
+    try {
+        // Count eligible attempts, including cache hits and safe failures.
+        // Nested gpu-canvas-upload records distinguish actual source uploads.
+        KrkrNSPerfScope perfPrepare(KrkrNSPerfOp::GpuSourcePrepare);
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto* entry = impl_->Get(view);
+        if (!entry) return false;
+        // Source() can normally materialize GPU-only pixels. Preparation must
+        // instead reuse an already valid authoritative texture or do nothing.
+        // CPU-current sources need only the normal versioned RGBA upload.
+        if (entry->cpuStale && !(entry->opaqueTarget && entry->targetValid && entry->target))
+            return false;
+        return bool(impl_->Source(*entry, false));
+    } catch (const SubmittedGPUFailure&) { throw; }
+      catch (...) { return false; }
+}
+
 bool SDLBitmapCompositor::SetOpaqueTarget(const BitmapView& view)
 {
     std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);

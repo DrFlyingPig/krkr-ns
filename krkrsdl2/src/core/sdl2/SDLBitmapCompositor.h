@@ -87,6 +87,10 @@ public:
     void DiscardRenderer() noexcept;
     SDL_Renderer* Renderer() const noexcept;
     std::uint64_t LogicalTextureBytes() const noexcept;
+    // Best-effort read-only RGBA preparation on the OpenGL renderer owner.
+    // Volatile CPU buffers are skipped. This never registers GPU-write
+    // authority, writes engine pixels, or reads GPU pixels back to the CPU.
+    bool PrepareSource(const BitmapView& source);
     bool SetOpaqueTarget(const BitmapView& target);
     bool IsOpaqueTarget(const BitmapView& target) const noexcept;
     bool HasGPUWrites(const BitmapView& bitmap) const noexcept;

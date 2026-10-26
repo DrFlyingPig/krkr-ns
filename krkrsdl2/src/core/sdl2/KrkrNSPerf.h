@@ -24,6 +24,7 @@ enum class KrkrNSPerfOp : unsigned
     GpuCanvasCreate,
     GpuDisplayRepeat,
     GpuGroupRender, GpuGroupBlit,
+    GpuSourcePrepare,
     Count
 };
 
