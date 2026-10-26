@@ -41,6 +41,9 @@ struct SceneGroup
     int width = 0, height = 0;
     bool opaque = false;
     std::vector<SceneDraw> draws;
+    // Retain the engine's original target semantics after conversion to a
+    // private premultiplied texture (ltAlpha and ltAddAlpha differ for Copy).
+    bool additiveAlpha = false;
 };
 // On the opaque internal target, Alpha/AddAlpha and translucent Copy follow
 // NX's GL methods: RGB is blended, destination alpha is retained. Ordinary

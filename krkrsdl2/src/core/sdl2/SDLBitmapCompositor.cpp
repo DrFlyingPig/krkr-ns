@@ -822,7 +822,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
         const auto validate = [&](auto&& self, std::size_t index, std::size_t depth) -> bool {
             if (index >= groups.size() || depth >= MaxDepth || active[index] || ++visits > MaxDraws) return false;
             const auto& group = groups[index];
-            if (group.width <= 0 || group.height <= 0 ||
+            if ((group.opaque && group.additiveAlpha) || group.width <= 0 || group.height <= 0 ||
                 group.width > (impl_->info.max_texture_width ? impl_->info.max_texture_width : 4096) ||
                 group.height > (impl_->info.max_texture_height ? impl_->info.max_texture_height : 4096)) return false;
             if (sizes.size() <= depth) sizes.resize(depth + 1);
@@ -1032,10 +1032,11 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
         };
         std::vector<Command> commands;
         commands.reserve(drawCount * 2 + visits);
-        const auto blendMode = [](BitmapBlend method, int opacity, bool transparent) {
+        const auto blendMode = [](BitmapBlend method, int opacity, bool transparent, bool additiveTarget) {
             if (method == BitmapBlend::Copy && opacity == 255) return SDL_BLENDMODE_NONE;
             return SDL_ComposeCustomBlendMode(
-                method == BitmapBlend::AddAlpha ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_SRC_ALPHA,
+                method == BitmapBlend::AddAlpha || (method == BitmapBlend::Copy && additiveTarget)
+                    ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_SRC_ALPHA,
                 SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
                 transparent ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_ZERO,
                 transparent ? SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_BLENDFACTOR_ONE,
@@ -1083,12 +1084,14 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                     command.alphaMod = Uint8(draw.opacity);
                     command.colorMod = method == BitmapBlend::AddAlpha ? Uint8(draw.opacity) : 255;
                 }
-                command.blend = blendMode(method, draw.opacity, depth && !group.opaque);
+                command.blend = blendMode(method, draw.opacity, depth && !group.opaque, group.additiveAlpha);
                 const bool constantCopy = draw.kind == SceneDrawKind::Bitmap &&
                     draw.blend == BitmapBlend::Copy && draw.opacity < 255;
                 if (constantCopy) {
                     // ConstAlphaBlend ignores source A. First attenuate D with
                     // constant coverage, then add S.rgb*coverage using ONE/ONE.
+                    // Reference ConstAlphaBlend_a on an AddAlpha target instead
+                    // adds unscaled S.rgb; preserve that original target type.
                     // This avoids another full-size RGB888 input allocation.
                     Command attenuate;
                     attenuate.target = target;
@@ -1101,7 +1104,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                         depth && !group.opaque ? SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_BLENDFACTOR_ONE,
                         SDL_BLENDOPERATION_ADD);
                     commands.push_back(std::move(attenuate));
-                    command.colorMod = Uint8(draw.opacity);
+                    command.colorMod = group.additiveAlpha ? 255 : Uint8(draw.opacity);
                     command.alphaMod = 255;
                     command.blend = SDL_ComposeCustomBlendMode(
                         SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,

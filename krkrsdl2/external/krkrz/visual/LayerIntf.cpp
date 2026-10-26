@@ -6122,6 +6122,7 @@ bool tTJSNI_BaseLayer::BuildDirectGPUScene(std::vector<krkrns::SceneGroup> &grou
 		subtree.width = Rect.get_width();
 		subtree.height = Rect.get_height();
 		subtree.opaque = DisplayType == ltOpaque;
+		subtree.additiveAlpha = DisplayType == ltAddAlpha;
 		const std::size_t index = groups.size();
 		groups.push_back(std::move(subtree));
 		krkrns::SceneDraw completed{};
