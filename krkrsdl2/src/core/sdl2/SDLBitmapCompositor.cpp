@@ -13,16 +13,27 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#if defined(__SWITCH__) && !defined(KRKRNS_BITMAP_GPU_TEST_BUDGET)
+#include <switch.h>
+#endif
 
 namespace krkrns
 {
 namespace
 {
+std::uint64_t TextureBudget() noexcept
+{
 #ifdef KRKRNS_BITMAP_GPU_TEST_BUDGET
-constexpr std::uint64_t TextureBudget = KRKRNS_BITMAP_GPU_TEST_BUDGET;
+    return KRKRNS_BITMAP_GPU_TEST_BUDGET;
+#elif defined(__SWITCH__)
+    // Application/title takeover has the memory needed for the observed
+    // ~132 MiB scene working set. Restricted applets retain the prior cap.
+    const auto type = appletGetAppletType();
+    return (type == AppletType_Application || type == AppletType_SystemApplication ? 160ull : 128ull) * 1024 * 1024;
 #else
-constexpr std::uint64_t TextureBudget = 128ull * 1024 * 1024;
+    return 128ull * 1024 * 1024;
 #endif
+}
 constexpr int ReadTile = 512;
 struct RendererEpoch;
 class SubmittedGPUFailure final : public std::exception
@@ -320,9 +331,10 @@ struct SDLBitmapCompositor::Impl
     }
     bool Reserve(std::uint64_t bytes, const Entry* protectedEntry)
     {
-        if (bytes > TextureBudget) return false;
+        const auto budget = TextureBudget();
+        if (bytes > budget) return false;
         DrainRetired(epoch);
-        while (epoch->bytes.load() > TextureBudget - bytes) {
+        while (epoch->bytes.load() > budget - bytes) {
             Entry* victim = nullptr;
             for (auto& item : entries) {
                 auto& entry = item.second;
@@ -899,6 +911,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
         };
         std::vector<Eviction> optional;
         std::uint64_t additional = 0, mandatoryFreed = 0, optionalFreed = 0;
+        std::uint64_t sourceAdditional = 0, outputAdditional = 0, poolAdditional = 0;
         const auto releasedBytes = [](const auto& resource) -> std::uint64_t {
             return resource && resource.use_count() == 1 ? resource->bytes : 0;
         };
@@ -909,8 +922,10 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             }
         };
         const bool outputResized = resized(output, destination);
-        if (outputResized || !destination->target || destination->target->snapshots.load())
-            additional += std::uint64_t(output.width) * output.height * 4;
+        if (outputResized || !destination->target || destination->target->snapshots.load()) {
+            outputAdditional = std::uint64_t(output.width) * output.height * 4;
+            additional += outputAdditional;
+        }
         for (auto& item : impl_->entries) {
             auto& entry = item.second;
             auto needed = sourceNeeds.find(item.first);
@@ -936,12 +951,14 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             const bool direct = sameSize && entry->opaqueTarget && entry->targetValid;
             const auto bytes = std::uint64_t(view.width) * view.height * 4;
             if ((flags & 1) && !direct && (!sameSize || !entry->rgba ||
-                ((!entry->rgbaValid || view.volatileCPU || entry->rgbaVersion != view.version) && entry->rgba.use_count() > 1)))
-                additional += bytes;
+                ((!entry->rgbaValid || view.volatileCPU || entry->rgbaVersion != view.version) && entry->rgba.use_count() > 1))) {
+                additional += bytes; sourceAdditional += bytes;
+            }
             if (flags & 2) {
                 if (!sameSize || (entry->cpuStale ? !entry->sceneOpaque : (!entry->opaque ||
-                    ((!entry->opaqueValid || view.volatileCPU || entry->opaqueVersion != view.version) && entry->opaque.use_count() > 1))))
-                    additional += bytes;
+                    ((!entry->opaqueValid || view.volatileCPU || entry->opaqueVersion != view.version) && entry->opaque.use_count() > 1)))) {
+                    additional += bytes; sourceAdditional += bytes;
+                }
             }
         }
         // Keep inactive slots while memory is plentiful. A slot that must grow
@@ -955,26 +972,29 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                     if (target) disposable(*target, nullptr, impl_->scenePoolUsed[depth][opaque], false);
                 } else if (!target || !*target || (*target)->width < size.x || (*target)->height < size.y) {
                     if (target) mandatoryFreed += releasedBytes(*target);
-                    additional += std::uint64_t(size.x) * size.y * 4;
+                    const auto bytes = std::uint64_t(size.x) * size.y * 4;
+                    additional += bytes; poolAdditional += bytes;
                 }
             }
         }
         DrainRetired(impl_->epoch);
         const auto allocated = impl_->epoch->bytes.load();
         const auto minimumRetained = allocated - mandatoryFreed - optionalFreed;
-        if (additional > TextureBudget || minimumRetained > TextureBudget - additional) {
-            SDL_SetError("GPU scene: texture budget required=%llu bytes (retained=%llu, additional=%llu, reclaimable=%llu), limit=%llu",
+        const auto budget = TextureBudget();
+        if (additional > budget || minimumRetained > budget - additional) {
+            SDL_SetError("GPU scene: texture budget required=%llu limit=%llu retained=%llu source=%llu output=%llu pool=%llu reclaimable=%llu",
                 static_cast<unsigned long long>(minimumRetained + additional),
-                static_cast<unsigned long long>(minimumRetained), static_cast<unsigned long long>(additional),
-                static_cast<unsigned long long>(mandatoryFreed + optionalFreed),
-                static_cast<unsigned long long>(TextureBudget));
+                static_cast<unsigned long long>(budget), static_cast<unsigned long long>(minimumRetained),
+                static_cast<unsigned long long>(sourceAdditional), static_cast<unsigned long long>(outputAdditional),
+                static_cast<unsigned long long>(poolAdditional),
+                static_cast<unsigned long long>(mandatoryFreed + optionalFreed));
             return false;
         }
         // Commit only enough LRU eviction to fit the planned peak. Required
         // source representations and externally pinned resources never enter
         // this list, so individual Create() calls cannot evict a later input.
         const auto retained = allocated - mandatoryFreed;
-        const auto requiredFree = retained + additional > TextureBudget ? retained + additional - TextureBudget : 0;
+        const auto requiredFree = retained + additional > budget ? retained + additional - budget : 0;
         if (requiredFree) {
             std::sort(optional.begin(), optional.end(), [](const Eviction& a, const Eviction& b) { return a.used < b.used; });
             std::uint64_t freed = 0;

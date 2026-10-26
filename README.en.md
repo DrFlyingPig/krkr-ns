@@ -87,6 +87,7 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 **Performance and stability**
 
 - Caches displayed text, images, and game resources to reduce repeated reads and drawing during library and menu use.
+- Continuously preloads the game's requested image lists in the background, bounds pending images by the cache budget, and cancels stale requests when the cache is cleared or the game exits.
 - Reduces repeated work for large E-mote animations and follows the reference's frame cadence and calling-thread order for Switch software drawing.
 - Requests system CPU boost during software-rendered game sessions and normal performance mode for OpenGL sessions. Internal maintenance timers advance on the main loop, with the complete frame budgeted before waiting for the configured frame rate.
 - Skips GPU synchronization locks for CPU-only bitmap access and uses libpng with native ARM NEON support on Switch. Bilinear additive-alpha stretch and constant-opacity affine blending also use native NEON.
