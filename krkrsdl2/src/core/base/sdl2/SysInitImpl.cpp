@@ -980,6 +980,46 @@ static int CALLBACK TVPBrowseCallbackProc(HWND hwnd,UINT uMsg,LPARAM lParam,LPAR
 }
 #endif
 static tjs_uint64 TVPTotalPhysMemory = 0;
+#ifdef __SWITCH__
+struct TVPSwitchMemoryBudgetInfo
+{
+	AppletType Applet = AppletType_None;
+	int SDLMegabytes = 0;
+	bool Queried = false;
+	Result QueryResult = 0;
+	u64 KernelTotal = 0;
+	tjs_uint64 Total = 0, Assumed = 0;
+	const char *Source = "uninitialized";
+};
+static TVPSwitchMemoryBudgetInfo TVPSwitchMemoryBudget;
+static TVPSwitchMemoryBudgetInfo TVPQuerySwitchMemoryBudget()
+{
+	TVPSwitchMemoryBudgetInfo info;
+	const tjs_uint64 mib = 1024ULL * 1024;
+	info.Applet = appletGetAppletType();
+	const bool application = info.Applet == AppletType_Application || info.Applet == AppletType_SystemApplication;
+	info.SDLMegabytes = SDL_GetSystemRAM();
+	// Preserve the previous conservative SDL/launcher fallback whenever the
+	// process query is unavailable, and never query a restricted applet.
+	info.Total = info.SDLMegabytes > 0 ? tjs_uint64(info.SDLMegabytes) * mib : (application ? 512ULL : 128ULL) * mib;
+	info.Assumed = info.Total;
+	info.Source = info.SDLMegabytes > 0 ? "sdl" : (application ? "fallback-application" : "fallback-applet");
+	if (application)
+	{
+		info.Queried = true;
+		info.QueryResult = svcGetInfo(&info.KernelTotal, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+		if (R_SUCCEEDED(info.QueryResult) && info.KernelTotal != 0)
+		{
+			info.Total = info.KernelTotal;
+			// Kirikiroid2-NX SysInitImpl: reserve once from the raw process
+			// budget, then let the existing automatic cache calculation use it.
+			info.Assumed = info.Total > 768 * mib ? info.Total - 512 * mib : info.Total / 2;
+			info.Source = "kernel-process";
+		}
+	}
+	return info;
+}
+#endif
 static void TVPInitProgramArgumentsAndDataPath(bool stop_after_datapath_got);
 void TVPBeforeSystemInit()
 {
@@ -1062,20 +1102,8 @@ void TVPBeforeSystemInit()
 #elif defined(__vita__)
 		TVPTotalPhysMemory = _newlib_heap_size_user;
 #elif defined(__SWITCH__)
-		// SDL's Switch backend currently reports 0 MB.  Kirikiri interprets
-		// that as an extremely low-memory machine: it disables the script
-		// segment cache, frees reusable layer buffers, and sets the graphics
-		// cache to zero.  Options screens then reopen/decode the same PSB
-		// pieces on every state change.  Application/title-override mode can
-		// safely retain the 40 MiB cache.  Album is a constrained LibraryApplet,
-		// so keep only 8 MiB for the launcher and refuse large game startup.
-		TVPTotalPhysMemory = static_cast<tjs_uint64>(SDL_GetSystemRAM()) * 1024 * 1024;
-		if (TVPTotalPhysMemory == 0)
-		{
-			const AppletType type = appletGetAppletType();
-			const bool application = type == AppletType_Application || type == AppletType_SystemApplication;
-			TVPTotalPhysMemory = (application ? 512ULL : 128ULL) * 1024 * 1024;
-		}
+		TVPSwitchMemoryBudget = TVPQuerySwitchMemoryBudget();
+		TVPTotalPhysMemory = TVPSwitchMemoryBudget.Assumed;
 #else
 		TVPTotalPhysMemory = SDL_GetSystemRAM() * 1024 * 1024;
 #endif
@@ -1573,6 +1601,7 @@ void TVPAfterSystemInit()
 		// cache on, a previously opened UI opens instantly.
 		// Marker sdmc:/switch/KRKR-ns/no-imagecache.txt disables it (A/B test).
 		FILE* noImageCache = fopen(KRKRNS_BASE_A "/no-imagecache.txt", "rb");
+		const bool cacheDisabledByMarker = noImageCache != nullptr;
 		if (noImageCache) { fclose(noImageCache); }
 		else if (TVPGetGraphicCacheLimit() == 0 && TVPGraphicCacheSystemLimit > 0)
 		{
@@ -1580,6 +1609,12 @@ void TVPAfterSystemInit()
 			KRKRNS_LOG("[ns] graphic cache enabled: %lluMB",
 				(unsigned long long)(TVPGraphicCacheSystemLimit / (1024 * 1024)));
 		}
+		KRKRNS_LOG("[memory-budget] source=%s applet=%d queried=%d rc=%08x sdl-mb=%d kernel=%llu total=%llu assumed=%llu cache=%llu enabled=%llu explicit=%d marker=%d",
+			TVPSwitchMemoryBudget.Source, int(TVPSwitchMemoryBudget.Applet), int(TVPSwitchMemoryBudget.Queried),
+			unsigned(TVPSwitchMemoryBudget.QueryResult), TVPSwitchMemoryBudget.SDLMegabytes,
+			(unsigned long long)TVPSwitchMemoryBudget.KernelTotal, (unsigned long long)TVPSwitchMemoryBudget.Total,
+			(unsigned long long)TVPTotalPhysMemory, (unsigned long long)TVPGraphicCacheSystemLimit,
+			(unsigned long long)TVPGetGraphicCacheLimit(), int(limitmb != -1), int(cacheDisabledByMarker));
 #endif
 
 

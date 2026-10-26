@@ -613,6 +613,28 @@ tTJSBinaryStream * tTVPXP3Archive::CreateStreamByIndex(tjs_uint idx)
 				return memory;
 			}
 		}
+#ifdef __SWITCH__
+		// Match Kirikiroid2-NX: decoders may issue many small reads, each of
+		// which invokes the extraction filter. Materialize this opened item
+		// through the original filtered stream once; large items stay streamed.
+		if(TVPXP3ArchiveExtractionFilter && item.OrgSize > 0 &&
+			item.OrgSize <= 8 * 1024 * 1024)
+		{
+			tTVPMemoryStream *memory = new tTVPMemoryStream();
+			try
+			{
+				memory->SetSize((tjs_uint)item.OrgSize);
+				out->ReadBuffer(memory->GetInternalBuffer(), (tjs_uint)item.OrgSize);
+			}
+			catch(...)
+			{
+				delete memory;
+				throw;
+			}
+			delete out;
+			return memory;
+		}
+#endif
 	}
 	catch(...)
 	{
