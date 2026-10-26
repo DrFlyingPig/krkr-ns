@@ -867,8 +867,9 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                     prior.height != draw.bitmap.height || prior.pitch != draw.bitmap.pitch ||
                     prior.version != draw.bitmap.version || prior.volatileCPU != draw.bitmap.volatileCPU)
                     return false;
-                const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (!groups[i].opaque || draw.opacity < 255);
-                sourceNeeds[key] |= ignoreAlpha ? 2u : 1u;
+                // Copy's constant coverage is applied by scene commands, so
+                // every bitmap representation can reuse its RGBA source.
+                sourceNeeds[key] |= 1u;
             }
         }
         // Budget planning must not disturb the legacy fallback's warm caches.
@@ -1030,7 +1031,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             bool output = false, groupBlit = false;
         };
         std::vector<Command> commands;
-        commands.reserve(drawCount + visits);
+        commands.reserve(drawCount * 2 + visits);
         const auto blendMode = [](BitmapBlend method, int opacity, bool transparent) {
             if (method == BitmapBlend::Copy && opacity == 255) return SDL_BLENDMODE_NONE;
             return SDL_ComposeCustomBlendMode(
@@ -1074,8 +1075,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                         command.groupBlit = true;
                     } else {
                         source = draw.bitmap;
-                        const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (!group.opaque || draw.opacity < 255);
-                        command.source = sources.at(Identity(draw.bitmap))[ignoreAlpha ? 1 : 0];
+                        command.source = sources.at(Identity(draw.bitmap))[0];
                     }
                     if (!ClipCopy(bounds, draw.destination.x, draw.destination.y, source,
                                   draw.source, command.from, command.to)) continue;
@@ -1084,7 +1084,45 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                     command.colorMod = method == BitmapBlend::AddAlpha ? Uint8(draw.opacity) : 255;
                 }
                 command.blend = blendMode(method, draw.opacity, depth && !group.opaque);
+                const bool constantCopy = draw.kind == SceneDrawKind::Bitmap &&
+                    draw.blend == BitmapBlend::Copy && draw.opacity < 255;
+                if (constantCopy) {
+                    // ConstAlphaBlend ignores source A. First attenuate D with
+                    // constant coverage, then add S.rgb*coverage using ONE/ONE.
+                    // This avoids another full-size RGB888 input allocation.
+                    Command attenuate;
+                    attenuate.target = target;
+                    attenuate.to = command.to;
+                    attenuate.output = command.output;
+                    attenuate.color = std::uint32_t(draw.opacity) << 24;
+                    attenuate.blend = SDL_ComposeCustomBlendMode(
+                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                        depth && !group.opaque ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_ZERO,
+                        depth && !group.opaque ? SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_BLENDFACTOR_ONE,
+                        SDL_BLENDOPERATION_ADD);
+                    commands.push_back(std::move(attenuate));
+                    command.colorMod = Uint8(draw.opacity);
+                    command.alphaMod = 255;
+                    command.blend = SDL_ComposeCustomBlendMode(
+                        SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD);
+                }
+                const bool copyOpaqueAlpha = depth && !group.opaque &&
+                    draw.kind == SceneDrawKind::Bitmap && draw.blend == BitmapBlend::Copy && draw.opacity == 255;
+                Command opaqueAlpha;
+                if (copyOpaqueAlpha) {
+                    // Reference CopyOpaqueImage copies RGB and emits A=1. Use
+                    // the existing RGBA input, then replace just destination A
+                    // instead of retaining another full RGB888 source texture.
+                    opaqueAlpha.target = target;
+                    opaqueAlpha.to = command.to;
+                    opaqueAlpha.color = 0xff000000u;
+                    opaqueAlpha.blend = SDL_ComposeCustomBlendMode(
+                        SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE, SDL_BLENDOPERATION_ADD,
+                        SDL_BLENDFACTOR_ONE, SDL_BLENDFACTOR_ZERO, SDL_BLENDOPERATION_ADD);
+                }
                 commands.push_back(std::move(command));
+                if (copyOpaqueAlpha) commands.push_back(std::move(opaqueAlpha));
             }
         };
         build(build, 0, 0);
