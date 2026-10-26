@@ -247,6 +247,7 @@ struct SDLBitmapCompositor::Impl
     // Private group targets are reused by recursion depth, not script storage.
     // A child completes before a sibling can reuse its depth/format slot.
     std::vector<std::array<std::shared_ptr<ResidentFrameState>, 2>> scenePool;
+    std::vector<std::array<std::uint64_t, 2>> scenePoolUsed;
     KrkrNSGpuResourceLease lease;
     std::uint64_t clock = 0;
     unsigned batchDepth = 0;
@@ -866,64 +867,139 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                     prior.height != draw.bitmap.height || prior.pitch != draw.bitmap.pitch ||
                     prior.version != draw.bitmap.version || prior.volatileCPU != draw.bitmap.volatileCPU)
                     return false;
-                if (!impl_->Get(draw.bitmap)) return false;
-                const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (i != 0 || draw.opacity < 255);
+                const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (!groups[i].opaque || draw.opacity < 255);
                 sourceNeeds[key] |= ignoreAlpha ? 2u : 1u;
             }
         }
-        destination = impl_->Get(output);
-        if (!destination) return false;
-        // Drop inactive depth/format slots before checking the next scene's
-        // working set. Growth keeps the previous high-water dimensions.
-        impl_->scenePool.resize(sizes.size());
-        std::uint64_t additional = (!destination->target || destination->target->snapshots.load())
-            ? std::uint64_t(output.width) * output.height * 4 : 0;
-        for (std::size_t depth = 1; depth < sizes.size(); ++depth) {
-            for (unsigned opaque = 0; opaque != 2; ++opaque) {
-                auto& target = impl_->scenePool[depth][opaque];
-                auto& size = sizes[depth][opaque];
-                if (!size.x) { target.reset(); continue; }
-                if (target && (target->width < size.x || target->height < size.y)) {
-                    size.x = (std::max)(target->width, size.x);
-                    size.y = (std::max)(target->height, size.y);
-                    target.reset();
-                }
-                if (!target) additional += std::uint64_t(size.x) * size.y * 4;
+        // Budget planning must not disturb the legacy fallback's warm caches.
+        // In particular, Get() can discard resized entries, so it belongs to
+        // the commit below rather than this read-only working-set calculation.
+        const auto compatible = [&](const BitmapView& view, const Impl::Entry* entry) {
+            if (!impl_->Fits(view)) return false;
+            if (entry && entry->cpuStale &&
+                (entry->view.width != view.width || entry->view.height != view.height ||
+                 entry->view.row0 != view.row0 || entry->view.version != view.version)) {
+                SDL_SetError("GPU bitmap changed without CPU synchronization");
+                return false;
             }
-        }
-        // Derived sources not used by this scene are disposable, unlike live
-        // authoritative targets and immutable snapshots. Keep all needed cache
-        // formats so the aggregate reservation cannot evict a later input.
+            return true;
+        };
+        const auto resized = [](const BitmapView& view, const Impl::Entry* entry) {
+            return entry && (entry->view.width != view.width || entry->view.height != view.height);
+        };
+        if (!compatible(output, destination)) return false;
+        for (const auto& item : sourceViews)
+            if (!compatible(item.second, impl_->Find(item.second))) return false;
+
+        struct Eviction {
+            std::shared_ptr<ResidentFrameState>* resource;
+            bool* valid;
+            std::uint64_t used;
+        };
+        std::vector<Eviction> optional;
+        std::uint64_t additional = 0, mandatoryFreed = 0, optionalFreed = 0;
+        const auto releasedBytes = [](const auto& resource) -> std::uint64_t {
+            return resource && resource.use_count() == 1 ? resource->bytes : 0;
+        };
+        const auto disposable = [&](auto& resource, bool* valid, std::uint64_t used, bool keep) {
+            if (!keep && resource && resource.use_count() == 1) {
+                optional.push_back({&resource, valid, used});
+                optionalFreed += resource->bytes;
+            }
+        };
+        const bool outputResized = resized(output, destination);
+        if (outputResized || !destination->target || destination->target->snapshots.load())
+            additional += std::uint64_t(output.width) * output.height * 4;
         for (auto& item : impl_->entries) {
             auto& entry = item.second;
             auto needed = sourceNeeds.find(item.first);
             const unsigned flags = needed == sourceNeeds.end() ? 0 : needed->second;
-            const bool direct = entry.opaqueTarget && entry.targetValid;
-            const auto trim = [](auto& resource, bool& valid, bool keep) {
-                if (!keep && resource && resource.use_count() == 1) { resource.reset(); valid = false; }
-            };
-            trim(entry.rgba, entry.rgbaValid, (flags & 1) && !direct);
-            trim(entry.opaque, entry.opaqueValid, (flags & 2) && !entry.cpuStale);
-            trim(entry.sceneOpaque, entry.sceneOpaqueValid, (flags & 2) && entry.cpuStale);
-            if (!flags) continue;
-            const auto bytes = std::uint64_t(entry.view.width) * entry.view.height * 4;
-            if ((flags & 1) && !direct && (!entry.rgba ||
-                ((!entry.rgbaValid || entry.view.volatileCPU || entry.rgbaVersion != entry.view.version) && entry.rgba.use_count() > 1)))
+            auto source = sourceViews.find(item.first);
+            const bool changedSize = &entry == destination ? outputResized :
+                source != sourceViews.end() && resized(source->second, &entry);
+            if (changedSize) {
+                mandatoryFreed += releasedBytes(entry.target) + releasedBytes(entry.rgba) +
+                    releasedBytes(entry.opaque) + releasedBytes(entry.sceneOpaque);
+            } else {
+                const bool direct = entry.opaqueTarget && entry.targetValid;
+                disposable(entry.rgba, &entry.rgbaValid, entry.used, (flags & 1) && !direct);
+                disposable(entry.opaque, &entry.opaqueValid, entry.used, (flags & 2) && !entry.cpuStale);
+                disposable(entry.sceneOpaque, &entry.sceneOpaqueValid, entry.used, (flags & 2) && entry.cpuStale);
+            }
+        }
+        for (const auto& item : sourceViews) {
+            const auto& view = item.second;
+            const auto* entry = impl_->Find(view);
+            const unsigned flags = sourceNeeds.at(item.first);
+            const bool sameSize = entry && !resized(view, entry);
+            const bool direct = sameSize && entry->opaqueTarget && entry->targetValid;
+            const auto bytes = std::uint64_t(view.width) * view.height * 4;
+            if ((flags & 1) && !direct && (!sameSize || !entry->rgba ||
+                ((!entry->rgbaValid || view.volatileCPU || entry->rgbaVersion != view.version) && entry->rgba.use_count() > 1)))
                 additional += bytes;
             if (flags & 2) {
-                if (entry.cpuStale ? !entry.sceneOpaque : (!entry.opaque ||
-                    ((!entry.opaqueValid || entry.view.volatileCPU || entry.opaqueVersion != entry.view.version) && entry.opaque.use_count() > 1)))
+                if (!sameSize || (entry->cpuStale ? !entry->sceneOpaque : (!entry->opaque ||
+                    ((!entry->opaqueValid || view.volatileCPU || entry->opaqueVersion != view.version) && entry->opaque.use_count() > 1))))
                     additional += bytes;
+            }
+        }
+        // Keep inactive slots while memory is plentiful. A slot that must grow
+        // is replaced only after feasibility is known; use this scene's actual
+        // dimensions rather than multiplying unrelated width/height maxima.
+        for (std::size_t depth = 1; depth < (std::max)(sizes.size(), impl_->scenePool.size()); ++depth) {
+            for (unsigned opaque = 0; opaque != 2; ++opaque) {
+                const auto size = depth < sizes.size() ? sizes[depth][opaque] : SDL_Point{};
+                auto* target = depth < impl_->scenePool.size() ? &impl_->scenePool[depth][opaque] : nullptr;
+                if (!size.x) {
+                    if (target) disposable(*target, nullptr, impl_->scenePoolUsed[depth][opaque], false);
+                } else if (!target || !*target || (*target)->width < size.x || (*target)->height < size.y) {
+                    if (target) mandatoryFreed += releasedBytes(*target);
+                    additional += std::uint64_t(size.x) * size.y * 4;
+                }
             }
         }
         DrainRetired(impl_->epoch);
         const auto allocated = impl_->epoch->bytes.load();
-        if (additional > TextureBudget || allocated > TextureBudget - additional) {
-            SDL_SetError("GPU scene: texture budget required=%llu bytes (retained=%llu, additional=%llu), limit=%llu",
-                static_cast<unsigned long long>(allocated + additional),
-                static_cast<unsigned long long>(allocated), static_cast<unsigned long long>(additional),
+        const auto minimumRetained = allocated - mandatoryFreed - optionalFreed;
+        if (additional > TextureBudget || minimumRetained > TextureBudget - additional) {
+            SDL_SetError("GPU scene: texture budget required=%llu bytes (retained=%llu, additional=%llu, reclaimable=%llu), limit=%llu",
+                static_cast<unsigned long long>(minimumRetained + additional),
+                static_cast<unsigned long long>(minimumRetained), static_cast<unsigned long long>(additional),
+                static_cast<unsigned long long>(mandatoryFreed + optionalFreed),
                 static_cast<unsigned long long>(TextureBudget));
             return false;
+        }
+        // Commit only enough LRU eviction to fit the planned peak. Required
+        // source representations and externally pinned resources never enter
+        // this list, so individual Create() calls cannot evict a later input.
+        const auto retained = allocated - mandatoryFreed;
+        const auto requiredFree = retained + additional > TextureBudget ? retained + additional - TextureBudget : 0;
+        if (requiredFree) {
+            std::sort(optional.begin(), optional.end(), [](const Eviction& a, const Eviction& b) { return a.used < b.used; });
+            std::uint64_t freed = 0;
+            for (const auto& victim : optional) {
+                freed += (*victim.resource)->bytes;
+                victim.resource->reset();
+                if (victim.valid) *victim.valid = false;
+                if (freed >= requiredFree) break;
+            }
+        }
+        for (const auto& item : sourceViews)
+            if (!impl_->Get(item.second)) return false;
+        destination = impl_->Get(output);
+        if (!destination) return false;
+        if (impl_->scenePool.size() < sizes.size()) {
+            // Grow timestamps first: if either allocation fails, every
+            // existing pool slot still has a valid timestamp on the retry.
+            impl_->scenePoolUsed.resize(sizes.size());
+            impl_->scenePool.resize(sizes.size());
+        }
+        for (std::size_t depth = 1; depth < sizes.size(); ++depth) for (unsigned opaque = 0; opaque != 2; ++opaque) {
+            auto& target = impl_->scenePool[depth][opaque];
+            const auto size = sizes[depth][opaque];
+            if (!size.x) continue;
+            if (target && (target->width < size.x || target->height < size.y)) target.reset();
+            impl_->scenePoolUsed[depth][opaque] = ++impl_->clock;
         }
         // Allocation failures are still safe fallback, but an oversized scene
         // cannot churn through its CPU uploads before discovering the budget.
@@ -998,7 +1074,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                         command.groupBlit = true;
                     } else {
                         source = draw.bitmap;
-                        const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (index != 0 || draw.opacity < 255);
+                        const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (!group.opaque || draw.opacity < 255);
                         command.source = sources.at(Identity(draw.bitmap))[ignoreAlpha ? 1 : 0];
                     }
                     if (!ClipCopy(bounds, draw.destination.x, draw.destination.y, source,

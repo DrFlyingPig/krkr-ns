@@ -6053,7 +6053,7 @@ bool tTJSNI_BaseLayer::IsDirectGPUPrimary(const char *&reason) const
 
 bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 	const char *&reason, tjs_uint &nodes, tjs_uint *groups,
-	const tTJSNI_BaseLayer **failedLayer)
+	const tTJSNI_BaseLayer **failedLayer, bool underStraightGroup)
 {
 	if(visiblecheck && !IsSeen()) return true;
 	tTVPRect rect;
@@ -6069,6 +6069,11 @@ bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 		return reject("blend-mode");
 	if(DisplayType == ltBinder && Opacity != 255)
 		return reject("binder-opacity");
+	// An additive-alpha image may contain RGB greater than its alpha. Keeping
+	// that energy in a private premultiplied target is not equivalent to the
+	// original straight-alpha group's normalization. Preserve its CPU path.
+	if(underStraightGroup && DisplayType == ltAddAlpha)
+		return reject("group-straight-addalpha");
 	const bool group = Opacity != 255 && GetVisibleChildrenCount() != 0;
 	if(group)
 	{
@@ -6083,10 +6088,15 @@ bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 	}
 	else if(!MainImage && DisplayType == ltOpaque && Opacity != 255)
 		return reject("neutral-opacity"); // Preserve the existing leaf path.
+	// Only a private group with a verified complete opaque baseline isolates
+	// its descendants. Ordinary/binder nodes retain the surrounding context.
+	const bool childrenUnderStraightGroup = group && DisplayType == ltOpaque ? false :
+		(underStraightGroup || (group && DisplayType == ltAlpha));
 	++nodes;
 	ParentRectToChildRect(rect);
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_BEGIN(child)
-		if(!child->CanDrawDirectGPU(rect, true, reason, nodes, groups, failedLayer)) return false;
+		if(!child->CanDrawDirectGPU(rect, true, reason, nodes, groups, failedLayer,
+			childrenUnderStraightGroup)) return false;
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_END
 	return true;
 }
