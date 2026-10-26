@@ -23,6 +23,8 @@
 #include "KrkrNSProf.h"
 #include "SDLBitmapCompletionSource.h"
 #include <cstring>
+#include <new>
+#include <utility>
 #endif
 #include "KrkrNSPerf.h"
 #include "KrkrNSVMProf.h"
@@ -6050,26 +6052,156 @@ bool tTJSNI_BaseLayer::IsDirectGPUPrimary(const char *&reason) const
 }
 
 bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
-	const char *&reason, tjs_uint &nodes)
+	const char *&reason, tjs_uint &nodes, tjs_uint *groups,
+	const tTJSNI_BaseLayer **failedLayer)
 {
 	if(visiblecheck && !IsSeen()) return true;
 	tTVPRect rect;
 	if(!TVPIntersectRect(&rect, r, Rect)) return true;
-	if(InTransition) { reason = "transition"; return false; }
+	auto reject = [&](const char *why) {
+		reason = why;
+		if(failedLayer) *failedLayer = this;
+		return false;
+	};
+	if(InTransition) return reject("transition");
 	if(DisplayType != ltOpaque && DisplayType != ltAlpha &&
 		DisplayType != ltAddAlpha && DisplayType != ltBinder)
-		{ reason = "blend-mode"; return false; }
-	if(!MainImage && DisplayType == ltOpaque && Opacity != 255)
-		{ reason = "neutral-opacity"; return false; }
-	// Group opacity must be applied after composing the children. Applying it
-	// independently to each child would change overlapping translucent pixels.
-	if(Opacity != 255 && GetVisibleChildrenCount() != 0)
-		{ reason = "group-opacity"; return false; }
+		return reject("blend-mode");
+	if(DisplayType == ltBinder && Opacity != 255)
+		return reject("binder-opacity");
+	const bool group = Opacity != 255 && GetVisibleChildrenCount() != 0;
+	if(group)
+	{
+		// An opaque group's complete image must establish every pixel of its
+		// private target. Do not invent a background outside a partial image.
+		if(DisplayType == ltOpaque && MainImage &&
+			(ImageLeft > 0 || ImageTop > 0 ||
+			(tjs_int64)ImageLeft + MainImage->GetWidth() < Rect.get_width() ||
+			(tjs_int64)ImageTop + MainImage->GetHeight() < Rect.get_height()))
+			return reject("group-image-bounds");
+		if(groups) ++*groups;
+	}
+	else if(!MainImage && DisplayType == ltOpaque && Opacity != 255)
+		return reject("neutral-opacity"); // Preserve the existing leaf path.
 	++nodes;
 	ParentRectToChildRect(rect);
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_BEGIN(child)
-		if(!child->CanDrawDirectGPU(rect, true, reason, nodes)) return false;
+		if(!child->CanDrawDirectGPU(rect, true, reason, nodes, groups, failedLayer)) return false;
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_END
+	return true;
+}
+
+bool tTJSNI_BaseLayer::BuildDirectGPUScene(std::vector<krkrns::SceneGroup> &groups,
+	std::size_t target, tjs_int x, tjs_int y, const tTVPRect &r,
+	bool visiblecheck, const char *&reason, const tTJSNI_BaseLayer **failedLayer)
+{
+	if(visiblecheck && !IsSeen()) return true;
+	tTVPRect rect;
+	if(!TVPIntersectRect(&rect, r, Rect)) return true;
+	x += rect.left - r.left;
+	y += rect.top - r.top;
+	tTVPRect destination(rect);
+	destination.set_offsets(x, y);
+	ParentRectToChildRect(rect);
+	const bool group = Opacity != 255 && GetVisibleChildrenCount() != 0;
+	const krkrns::BitmapBlend blend = DisplayType == ltOpaque ? krkrns::BitmapBlend::Copy :
+		(DisplayType == ltAddAlpha ? krkrns::BitmapBlend::AddAlpha : krkrns::BitmapBlend::Alpha);
+	if(group)
+	{
+		krkrns::SceneGroup subtree{};
+		subtree.width = Rect.get_width();
+		subtree.height = Rect.get_height();
+		subtree.opaque = DisplayType == ltOpaque;
+		const std::size_t index = groups.size();
+		groups.push_back(std::move(subtree));
+		krkrns::SceneDraw completed{};
+		completed.kind = krkrns::SceneDrawKind::Group;
+		completed.source = SDL_Rect{rect.left, rect.top, rect.get_width(), rect.get_height()};
+		completed.destination = SDL_Rect{destination.left, destination.top,
+			destination.get_width(), destination.get_height()};
+		completed.blend = blend;
+		completed.opacity = Opacity;
+		completed.group = index;
+		groups[target].draws.push_back(std::move(completed));
+		target = index;
+		// The temporary uses this layer's local coordinates. Its opacity is
+		// applied once by the parent Group command, after all children overlap.
+		x = rect.left;
+		y = rect.top;
+		destination = rect;
+	}
+	if(DisplayType != ltBinder)
+	{
+		krkrns::SceneDraw draw{};
+		draw.blend = blend;
+		draw.opacity = group ? 255 : Opacity;
+		draw.destination = SDL_Rect{destination.left, destination.top,
+			destination.get_width(), destination.get_height()};
+		if(MainImage)
+		{
+			if(!MainImage->Is32BPP())
+			{
+				reason = "scene-bitmap-format";
+				if(failedLayer) *failedLayer = this;
+				return false;
+			}
+			// Raw allocation metadata does not invoke GetBits/scanline access,
+			// synchronize a GPU bitmap, or change any script/cache image.
+			draw.bitmap = MainImage->GetBitmap()->GetGPUView();
+			tTVPRect source(rect);
+			source.add_offsets(-ImageLeft, -ImageTop);
+			tTVPRect clipped;
+			if(TVPIntersectRect(&clipped, source,
+				tTVPRect(0, 0, draw.bitmap.width, draw.bitmap.height)))
+			{
+				draw.kind = krkrns::SceneDrawKind::Bitmap;
+				draw.destination.x += clipped.left - source.left;
+				draw.destination.y += clipped.top - source.top;
+				draw.destination.w = clipped.get_width();
+				draw.destination.h = clipped.get_height();
+				draw.source = SDL_Rect{clipped.left, clipped.top,
+					clipped.get_width(), clipped.get_height()};
+				groups[target].draws.push_back(std::move(draw));
+			}
+		}
+		else if(DisplayType == ltOpaque)
+		{
+			draw.kind = krkrns::SceneDrawKind::Fill;
+			draw.color = NeutralColor;
+			groups[target].draws.push_back(std::move(draw));
+		}
+	}
+	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_BEGIN(child)
+		if(!child->BuildDirectGPUScene(groups, target, x, y, rect, true, reason, failedLayer))
+			return false;
+	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_END
+	return true;
+}
+
+bool tTJSNI_BaseLayer::RenderDirectGPUScene(tTVPDrawable *target,
+	const std::vector<krkrns::SceneGroup> &groups, const char *&reason)
+{
+	tTVPRect clip;
+	tTVPBaseBitmap *canvas = target->GetDrawTargetBitmap(Rect, clip);
+	if(!canvas || !canvas->Is32BPP() || !canvas->IsGPUWindowDrawTarget() ||
+		canvas->GetWidth() != Rect.get_width() || canvas->GetHeight() != Rect.get_height() ||
+		clip.left != Rect.left || clip.top != Rect.top ||
+		clip.right != Rect.right || clip.bottom != Rect.bottom)
+	{
+		reason = "scene-output";
+		return false;
+	}
+	canvas->Independ();
+	const auto view = canvas->GetBitmap()->GetGPUView();
+	auto &compositor = krkrns::GetBitmapCompositor();
+	if(!compositor.SetOpaqueTarget(view) || !compositor.TryRenderScene(view, groups))
+	{
+		reason = "scene-prepare";
+		return false;
+	}
+	// TryRenderScene returns false only before writing the output. Submitted
+	// errors throw and must not replay the legacy alpha blends over this frame.
+	target->DrawCompleted(Rect, canvas, clip, ltOpaque, 255);
 	return true;
 }
 
@@ -6688,23 +6820,56 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 	{
 	#ifdef __SWITCH__
 		const char *directReason = "completion-cpu";
-		tjs_uint directNodes = 0;
+		tjs_uint directNodes = 0, directGroups = 0;
+		const tTJSNI_BaseLayer *failedLayer = NULL;
 		bool direct = false;
 		if(krkrns::GPUCompletionReceiverSlot() &&
 			krkrns::GetBitmapCompositor().Renderer())
 		{
 			if(IsDirectGPUPrimary(directReason))
-				direct = CanDrawDirectGPU(Rect, false, directReason, directNodes);
+				direct = CanDrawDirectGPU(Rect, false, directReason, directNodes,
+					&directGroups, &failedLayer);
+			else failedLayer = this;
 		}
-		// Preflight completes before the first GPU write. A special node keeps
-		// the whole frame on the original grouping/transition implementation.
+		// Keep the known ordinary traversal unchanged. Only subtrees requiring
+		// whole-group opacity use private GPU scene targets.
 		if(direct)
 		{
-			if(Manager) Manager->QueryUpdateExcludeRect();
-			DrawDirectGPU(drawable, 0, 0, Rect, false);
-			Manager->GetUpdateRegionForCompletion().Clear();
+			if(directGroups)
+			{
+				std::vector<krkrns::SceneGroup> scene;
+				// Allocation/graph construction is read-only and precedes all
+				// compositor submissions. Only these allocation failures may
+				// safely return to the original CPU/cache completion.
+				try
+				{
+					krkrns::SceneGroup root{};
+					root.width = Rect.get_width();
+					root.height = Rect.get_height();
+					root.opaque = true;
+					scene.push_back(std::move(root));
+					direct = BuildDirectGPUScene(scene, 0, 0, 0, Rect, false,
+						directReason, &failedLayer);
+				}
+				catch(const std::bad_alloc &)
+				{
+					direct = false;
+					directReason = "scene-allocation";
+				}
+				if(direct)
+				{
+					direct = RenderDirectGPUScene(drawable, scene, directReason);
+					if(!direct && !failedLayer) failedLayer = this;
+				}
+			}
+			else
+			{
+				if(Manager) Manager->QueryUpdateExcludeRect();
+				DrawDirectGPU(drawable, 0, 0, Rect, false);
+			}
+			if(direct) Manager->GetUpdateRegionForCompletion().Clear();
 		}
-		else
+		if(!direct)
 	#endif
 		InternalComplete2(Manager->GetUpdateRegionForCompletion(), drawable);
 	#ifdef __SWITCH__
@@ -6717,10 +6882,14 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 			std::strcmp(lastReason, directReason) != 0 ||
 			(directFrames + fallbackFrames) % 120 == 0)
 		{
-			KRKRNS_LOG("[gpu-layer] traversal=%s reason=%s nodes=%u direct=%llu fallback=%llu layers=%llu",
+			const std::string failedName = failedLayer ? failedLayer->Name.AsNarrowStdString() : std::string();
+			KRKRNS_LOG("[gpu-layer] traversal=%s reason=%s nodes=%u direct=%llu fallback=%llu layers=%llu groups=%u failed-type=%d failed-name=%.80s",
 				direct ? "direct" : "legacy", directReason, (unsigned)directNodes,
 				(unsigned long long)directFrames, (unsigned long long)fallbackFrames,
-				(unsigned long long)directLayerCount);
+				(unsigned long long)directLayerCount, (unsigned)directGroups,
+				failedLayer ? (int)failedLayer->DisplayType : -1, failedName.c_str());
+			if(std::strcmp(directReason, "scene-prepare") == 0)
+				KRKRNS_LOG("[gpu-layer] scene-prepare-error=%.160s", SDL_GetError());
 			lastReason = directReason;
 			lastDirect = direct;
 		}

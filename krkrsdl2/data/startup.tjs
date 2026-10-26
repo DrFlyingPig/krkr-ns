@@ -13,13 +13,15 @@
 // `Member "loadPlugin" does not exist`.
 if (typeof(global.Krkr2CompatUtils) == "undefined"
     || typeof(global.Krkr2CompatUtils.loadPlugin) == "undefined") {
-    function Krkr2CompatUtils() {}
-    global.Krkr2CompatUtils = Krkr2CompatUtils;
+    // TJS registers named function declarations before evaluating this guard.
+    // Assign an expression here so an existing game's namespace stays intact.
+    global.Krkr2CompatUtils = function() {};
     Krkr2CompatUtils.scriptBase = "";
     Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
     Krkr2CompatUtils.getWindowRect = function() { return null; };
-    Krkr2CompatUtils.loadPlugin = function(name) { return null; };
-    Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+    // Loading must install the native API before a game first uses the plugin.
+    Krkr2CompatUtils.loadPlugin = function(name) { return Plugins.link(name); };
+    Krkr2CompatUtils.unloadPlugin = function(name) { return Plugins.unlink(name); };
     Krkr2CompatUtils.isLoaded = function(name) { return true; };
     Krkr2CompatUtils.autoLoad = function() { return null; };
     Krkr2CompatUtils.Window = function() { return null; };

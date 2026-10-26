@@ -2328,12 +2328,14 @@ protected:
 	}
 	template <typename T>
 	static inline void RegistItem(iTJSDispatch2 *dsp, NameT name, T *mobj) {
+		// Keep GetDispatch's reference scoped even if installing the member throws.
+		tTJSVariant dispatch(dsp);
+		dsp->Release();
 		if (mobj) {
 			tTJSVariant val(mobj);
 			mobj->Release();
 			dsp->PropSet(TJS_MEMBERENSURE, name, 0, &val, dsp);
 		}
-		dsp->Release();
 	}
 
 	static void UnregistFunction(NameT name, NameT attach) {

@@ -23,6 +23,7 @@ enum class KrkrNSPerfOp : unsigned
     GpuCanvasUpload, GpuCanvasCopy, GpuCanvasReadback, GpuCanvasDraw, GpuCanvasTargetSwitch,
     GpuCanvasCreate,
     GpuDisplayRepeat,
+    GpuGroupRender, GpuGroupBlit,
     Count
 };
 

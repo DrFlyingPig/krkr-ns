@@ -1555,7 +1555,8 @@ void TVPGL_SSE2_Init() {
 #endif
 #if defined(__SWITCH__) && defined(KRKRNS_INTERPOLATION_NEON)
 		TVPInterpStretchCopy = TVPInterpStretchCopyNEON;
-		KRKRNS_LOG("[render] native AArch64 NEON bilinear StretchCopy/LinTransCopy active");
+		TVPInterpStretchAdditiveAlphaBlend = TVPInterpStretchAdditiveAlphaBlendNEON;
+		KRKRNS_LOG("[render] native AArch64 NEON bilinear copy/additive/constant-alpha active");
 #endif
 		// TVPFastLinearInterpH2F	// 使われなくなっているので未実装
 		// TVPFastLinearInterpH2B	// 使われなくなっているので未実装
@@ -1588,6 +1589,7 @@ void TVPGL_SSE2_Init() {
 #endif
 #if defined(__SWITCH__) && defined(KRKRNS_INTERPOLATION_NEON)
 		TVPInterpLinTransCopy = TVPInterpLinTransCopyNEON;
+		TVPInterpLinTransConstAlphaBlend = TVPInterpLinTransConstAlphaBlendNEON;
 #endif
 
 		// Box Blur ( TODO 実環境で要テスト)

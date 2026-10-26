@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace krkrns
 {
@@ -24,6 +25,23 @@ struct BitmapView
 };
 
 enum class BitmapBlend { Copy, Alpha, AddAlpha };
+enum class SceneDrawKind { Bitmap, Fill, Group };
+struct SceneDraw
+{
+    SceneDrawKind kind = SceneDrawKind::Bitmap;
+    BitmapView bitmap{};
+    SDL_Rect source{}, destination{};
+    BitmapBlend blend = BitmapBlend::Copy;
+    int opacity = 255;
+    std::uint32_t color = 0;
+    std::size_t group = 0;
+};
+struct SceneGroup
+{
+    int width = 0, height = 0;
+    bool opaque = false;
+    std::vector<SceneDraw> draws;
+};
 // On the opaque internal target, Alpha/AddAlpha and translucent Copy follow
 // NX's GL methods: RGB is blended, destination alpha is retained. Ordinary
 // script-visible alpha bitmaps are never accepted as GPU write targets.
@@ -85,6 +103,12 @@ public:
                 BitmapBlend blend, int opacity, bool holdDestinationAlpha);
     bool TryFill(const BitmapView& target, const SDL_Rect& rect,
                  std::uint32_t bgra);
+    // groups[0] renders to an already registered opaque engine canvas.
+    // Other groups are private RGB/premultiplied RGBA targets; they never
+    // become authoritative script bitmaps. Rectangles are one-to-one copies.
+    // A false result precedes scene submission; later failures throw.
+    bool TryRenderScene(const BitmapView& opaqueOutput,
+                        const std::vector<SceneGroup>& groups);
 
     // SyncCPU never invalidates a correct GPU texture. Before any CPU writer
     // the engine must SyncCPU, increment its version, then call CPUWritten.

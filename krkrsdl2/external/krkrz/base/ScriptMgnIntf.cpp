@@ -402,6 +402,13 @@ void TVPInitScriptEngine()
 	// Add Extension Classes
 	TVPCauseAtInstallExtensionClass( global );
 
+#ifdef __SWITCH__
+	// Built-in member extensions need the classes from this engine, including
+	// on return to the launcher after the previous engine was unregistered.
+	extern void TVPInitBuiltinLayerExtensions();
+	TVPInitBuiltinLayerExtensions();
+#endif
+
 	// Garbage Collection Hook
 	TVPAddCompactEventHook(&TVPTJSGCCallback);
 }

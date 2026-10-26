@@ -82,14 +82,15 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 - Video can seek by time or frame and loop a selected segment while retaining its playing or paused state.
 - Variable-speed playback and multi-track switching are not currently supported; an audio codec that works in video does not necessarily work as a standalone audio file.
 - Includes common text rendering, script parsing, save, and font plugins; some plugins and formats are still unsupported.
+- Enables the built-in shrink plugin with each engine, providing `Layer.shrinkCopy` and `Layer.shrinkCopyFast` for thumbnails and font resizing. Compatibility plugin loaders call the native built-in registry.
 
 **Performance and stability**
 
 - Caches displayed text, images, and game resources to reduce repeated reads and drawing during library and menu use.
 - Reduces repeated work for large E-mote animations and follows the reference's frame cadence and calling-thread order for Switch software drawing.
 - Requests system CPU boost during software-rendered game sessions and normal performance mode for OpenGL sessions. Internal maintenance timers advance on the main loop, with the complete frame budgeted before waiting for the configured frame rate.
-- Skips GPU synchronization locks for CPU-only bitmap access and uses libpng with native ARM NEON support on Switch.
-- In OpenGL mode, supported ordinary layers compose directly into a persistent GPU canvas with texture reuse and batched submission. Group opacity, transitions, and special blends retain their existing handling. Both modes continue presenting the cached texture when the image has not changed.
+- Skips GPU synchronization locks for CPU-only bitmap access and uses libpng with native ARM NEON support on Switch. Bilinear additive-alpha stretch and constant-opacity affine blending also use native NEON.
+- In OpenGL mode, supported ordinary layers compose directly into a persistent GPU canvas. Groups compose their children before applying opacity once, with temporary GPU textures reused between updates. Transitions and special blends retain their existing handling. Both modes continue presenting the cached texture when the image has not changed.
 - E-mote in OpenGL mode reuses GPU textures and reads back changed regions, retaining the existing readback fallback when driver checks fail.
 - Reports image loading and decoding errors, with a custom-artwork alternative for images that cannot be previewed.
 - Fixes audio underruns in some video playback cases and improves end-of-video audio handling and resource cleanup.

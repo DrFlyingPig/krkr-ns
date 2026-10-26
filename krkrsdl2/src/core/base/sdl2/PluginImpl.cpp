@@ -788,6 +788,16 @@ void TVPLoadPlugin(const ttstr & name)
 #endif
 }
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+void TVPInitBuiltinLayerExtensions()
+{
+	// Kirikiroid2's Android bootstrap enables shrinkCopy as a default Layer
+	// capability. Register it into each fresh engine after Layer is available;
+	// the normal module registry keeps later explicit Plugins.link idempotent.
+	TVPLoadPlugin(TJS_W("shrinkCopy.dll"));
+}
+#endif
+//---------------------------------------------------------------------------
 bool TVPUnloadPlugin(const ttstr & name)
 {
 	// unload plugin

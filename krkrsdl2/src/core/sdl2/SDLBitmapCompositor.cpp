@@ -3,6 +3,7 @@
 #include "KrkrNSResourcePolicy.h"
 #include "KrkrNSPerf.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <exception>
@@ -233,9 +234,9 @@ struct SDLBitmapCompositor::Impl
     {
         BitmapView view;
         bool opaqueTarget = false, targetValid = false, cpuStale = false;
-        bool rgbaValid = false, opaqueValid = false;
+        bool rgbaValid = false, opaqueValid = false, sceneOpaqueValid = false;
         std::uint64_t rgbaVersion = 0, opaqueVersion = 0, used = 0;
-        std::shared_ptr<ResidentFrameState> target, rgba, opaque;
+        std::shared_ptr<ResidentFrameState> target, rgba, opaque, sceneOpaque;
     };
     mutable std::mutex mutex;
     SDL_Renderer* renderer = nullptr;
@@ -243,6 +244,9 @@ struct SDLBitmapCompositor::Impl
     std::shared_ptr<RendererEpoch> epoch;
     std::unordered_map<Key, Entry, KeyHash> entries;
     std::vector<std::uint8_t> scratch;
+    // Private group targets are reused by recursion depth, not script storage.
+    // A child completes before a sibling can reuse its depth/format slot.
+    std::vector<std::array<std::shared_ptr<ResidentFrameState>, 2>> scenePool;
     KrkrNSGpuResourceLease lease;
     std::uint64_t clock = 0;
     unsigned batchDepth = 0;
@@ -306,8 +310,8 @@ struct SDLBitmapCompositor::Impl
             return nullptr;
         }
         if (entry.view.width != view.width || entry.view.height != view.height) {
-            entry.target.reset(); entry.rgba.reset(); entry.opaque.reset();
-            entry.targetValid = entry.rgbaValid = entry.opaqueValid = false;
+            entry.target.reset(); entry.rgba.reset(); entry.opaque.reset(); entry.sceneOpaque.reset();
+            entry.targetValid = entry.rgbaValid = entry.opaqueValid = entry.sceneOpaqueValid = false;
         }
         entry.view = view;
         entry.used = ++clock;
@@ -323,7 +327,8 @@ struct SDLBitmapCompositor::Impl
                 auto& entry = item.second;
                 if (&entry == protectedEntry) continue;
                 const bool disposable = (entry.rgba && entry.rgba.use_count() == 1) ||
-                    (entry.opaque && entry.opaque.use_count() == 1);
+                    (entry.opaque && entry.opaque.use_count() == 1) ||
+                    (entry.sceneOpaque && entry.sceneOpaque.use_count() == 1);
                 if (disposable && (!victim || entry.used < victim->used)) victim = &entry;
             }
             if (!victim) return false;
@@ -332,6 +337,9 @@ struct SDLBitmapCompositor::Impl
             }
             if (victim->opaque && victim->opaque.use_count() == 1) {
                 victim->opaque.reset(); victim->opaqueValid = false;
+            }
+            if (victim->sceneOpaque && victim->sceneOpaque.use_count() == 1) {
+                victim->sceneOpaque.reset(); victim->sceneOpaqueValid = false;
             }
         }
         return true;
@@ -480,6 +488,37 @@ struct SDLBitmapCompositor::Impl
         }
         return resource;
     }
+    std::shared_ptr<ResidentFrameState> SceneSource(Entry& entry, bool opaque)
+    {
+        if (!opaque || !entry.cpuStale) return Source(entry, opaque);
+        // Copy inside a private group ignores source alpha. Derive its RGB888
+        // view on GPU when the source is already authoritative there; never
+        // force a synchronous CPU mirror just to discard that alpha channel.
+        if (!entry.opaqueTarget || !entry.targetValid || !entry.target) return {};
+        if (!entry.sceneOpaque)
+            entry.sceneOpaque = Create(entry.view, true, true, &entry);
+        if (!entry.sceneOpaque) return {};
+        if (!entry.sceneOpaqueValid) {
+            EndTarget();
+            RendererScope scope(renderer);
+            auto* texture = entry.target->texture.load();
+            bool good = scope.Begin(entry.sceneOpaque->texture.load()) &&
+                SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_NONE) == 0 &&
+                SDL_SetTextureColorMod(texture, 255, 255, 255) == 0 &&
+                SDL_SetTextureAlphaMod(texture, 255) == 0;
+            if (!good) {
+                if (!scope.Restore()) throw SubmittedGPUFailure();
+                return {};
+            }
+            KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasCopy,
+                std::uint64_t(entry.view.width) * entry.view.height * 4);
+            good = SDL_RenderCopy(renderer, texture, nullptr, nullptr) == 0;
+            const bool restored = scope.Restore();
+            if (!good || !restored) throw SubmittedGPUFailure();
+            entry.sceneOpaqueValid = true;
+        }
+        return entry.sceneOpaque;
+    }
     bool Draw(Entry& target, const std::shared_ptr<ResidentFrameState>& source,
               const SDL_Rect& from, const SDL_Rect& to, BitmapBlend method,
               int opacity, bool holdAlpha)
@@ -516,7 +555,7 @@ struct SDLBitmapCompositor::Impl
         // Mark before executing: even a failed partially executed submission
         // must synchronize its current GPU pixels before any CPU fallback.
         target.cpuStale = true;
-        target.rgbaValid = target.opaqueValid = false;
+        target.rgbaValid = target.opaqueValid = target.sceneOpaqueValid = false;
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasDraw,
             std::uint64_t(to.w) * to.h * 4);
         const bool good = SDL_RenderCopy(renderer, texture, &from, &to) == 0;
@@ -739,7 +778,7 @@ bool SDLBitmapCompositor::TryFill(const BitmapView& target, const SDL_Rect& rect
             return false;
         }
         entry->cpuStale = true;
-        entry->rgbaValid = entry->opaqueValid = false;
+        entry->rgbaValid = entry->opaqueValid = entry->sceneOpaqueValid = false;
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasDraw,
             std::uint64_t(clipped.w) * clipped.h * 4);
         const bool good = SDL_RenderFillRect(impl_->renderer, &clipped) == 0;
@@ -748,6 +787,299 @@ bool SDLBitmapCompositor::TryFill(const BitmapView& target, const SDL_Rect& rect
         return true;
     } catch (const SubmittedGPUFailure&) { throw; }
       catch (...) { return false; }
+}
+
+bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
+    const std::vector<SceneGroup>& groups)
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner() || !ValidView(output) || output.volatileCPU ||
+        groups.empty() || groups.size() > 4096 || !groups[0].opaque ||
+        groups[0].width != output.width || groups[0].height != output.height) {
+        SDL_SetError("GPU scene: invalid owner, opaque output or root dimensions");
+        return false;
+    }
+    bool submitted = false;
+    try {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto* destination = impl_->Find(output);
+        if (!destination || !destination->opaqueTarget) {
+            SDL_SetError("GPU scene: output is not a registered opaque canvas");
+            return false;
+        }
+        impl_->EndTarget();
+        constexpr std::size_t MaxDepth = 64, MaxDraws = 65536;
+        std::vector<std::array<SDL_Point, 2>> sizes;
+        std::vector<bool> active(groups.size()), reached(groups.size());
+        std::size_t visits = 0, drawCount = 0;
+        const auto rectValid = [](const SDL_Rect& r) {
+            const auto right = std::int64_t(r.x) + r.w, bottom = std::int64_t(r.y) + r.h;
+            return r.w >= 0 && r.h >= 0 && right <= (std::numeric_limits<int>::max)() &&
+                right >= (std::numeric_limits<int>::min)() && bottom <= (std::numeric_limits<int>::max)() &&
+                bottom >= (std::numeric_limits<int>::min)();
+        };
+        const auto validate = [&](auto&& self, std::size_t index, std::size_t depth) -> bool {
+            if (index >= groups.size() || depth >= MaxDepth || active[index] || ++visits > MaxDraws) return false;
+            const auto& group = groups[index];
+            if (group.width <= 0 || group.height <= 0 ||
+                group.width > (impl_->info.max_texture_width ? impl_->info.max_texture_width : 4096) ||
+                group.height > (impl_->info.max_texture_height ? impl_->info.max_texture_height : 4096)) return false;
+            if (sizes.size() <= depth) sizes.resize(depth + 1);
+            auto& size = sizes[depth][group.opaque ? 1 : 0];
+            size.x = (std::max)(size.x, group.width); size.y = (std::max)(size.y, group.height);
+            active[index] = reached[index] = true;
+            for (const auto& draw : group.draws) {
+                if (++drawCount > MaxDraws || draw.opacity < 0 || draw.opacity > 255 ||
+                    !rectValid(draw.destination) ||
+                    (draw.blend != BitmapBlend::Copy && draw.blend != BitmapBlend::Alpha &&
+                     draw.blend != BitmapBlend::AddAlpha)) return false;
+                if (draw.kind == SceneDrawKind::Fill) continue;
+                if (!rectValid(draw.source) || draw.source.w != draw.destination.w ||
+                    draw.source.h != draw.destination.h) return false;
+                if (draw.kind == SceneDrawKind::Group) {
+                    if (!self(self, draw.group, depth + 1)) return false;
+                } else if (draw.kind != SceneDrawKind::Bitmap || !impl_->Fits(draw.bitmap) ||
+                           Identity(draw.bitmap) == Identity(output)) return false;
+            }
+            active[index] = false;
+            return true;
+        };
+        if (!validate(validate, 0, 0) ||
+            std::find(reached.begin(), reached.end(), false) != reached.end()) {
+            SDL_SetError("GPU scene: invalid graph, depth, size, opacity, source or one-to-one rectangle");
+            return false;
+        }
+
+        // Plan unique representations before any upload. A volatile CPU source
+        // is captured once per scene, not once per occurrence in its tree.
+        std::unordered_map<Key, unsigned, KeyHash> sourceNeeds;
+        std::unordered_map<Key, BitmapView, KeyHash> sourceViews;
+        for (std::size_t i = 0; i < groups.size(); ++i) {
+            for (std::size_t j = 0; j < groups[i].draws.size(); ++j) {
+                const auto& draw = groups[i].draws[j];
+                if (draw.kind != SceneDrawKind::Bitmap || !draw.opacity ||
+                    !draw.destination.w || !draw.destination.h) continue;
+                const auto key = Identity(draw.bitmap);
+                auto inserted = sourceViews.emplace(key, draw.bitmap);
+                const auto& prior = inserted.first->second;
+                if (prior.row0 != draw.bitmap.row0 || prior.width != draw.bitmap.width ||
+                    prior.height != draw.bitmap.height || prior.pitch != draw.bitmap.pitch ||
+                    prior.version != draw.bitmap.version || prior.volatileCPU != draw.bitmap.volatileCPU)
+                    return false;
+                if (!impl_->Get(draw.bitmap)) return false;
+                const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (i != 0 || draw.opacity < 255);
+                sourceNeeds[key] |= ignoreAlpha ? 2u : 1u;
+            }
+        }
+        destination = impl_->Get(output);
+        if (!destination) return false;
+        // Drop inactive depth/format slots before checking the next scene's
+        // working set. Growth keeps the previous high-water dimensions.
+        impl_->scenePool.resize(sizes.size());
+        std::uint64_t additional = (!destination->target || destination->target->snapshots.load())
+            ? std::uint64_t(output.width) * output.height * 4 : 0;
+        for (std::size_t depth = 1; depth < sizes.size(); ++depth) {
+            for (unsigned opaque = 0; opaque != 2; ++opaque) {
+                auto& target = impl_->scenePool[depth][opaque];
+                auto& size = sizes[depth][opaque];
+                if (!size.x) { target.reset(); continue; }
+                if (target && (target->width < size.x || target->height < size.y)) {
+                    size.x = (std::max)(target->width, size.x);
+                    size.y = (std::max)(target->height, size.y);
+                    target.reset();
+                }
+                if (!target) additional += std::uint64_t(size.x) * size.y * 4;
+            }
+        }
+        // Derived sources not used by this scene are disposable, unlike live
+        // authoritative targets and immutable snapshots. Keep all needed cache
+        // formats so the aggregate reservation cannot evict a later input.
+        for (auto& item : impl_->entries) {
+            auto& entry = item.second;
+            auto needed = sourceNeeds.find(item.first);
+            const unsigned flags = needed == sourceNeeds.end() ? 0 : needed->second;
+            const bool direct = entry.opaqueTarget && entry.targetValid;
+            const auto trim = [](auto& resource, bool& valid, bool keep) {
+                if (!keep && resource && resource.use_count() == 1) { resource.reset(); valid = false; }
+            };
+            trim(entry.rgba, entry.rgbaValid, (flags & 1) && !direct);
+            trim(entry.opaque, entry.opaqueValid, (flags & 2) && !entry.cpuStale);
+            trim(entry.sceneOpaque, entry.sceneOpaqueValid, (flags & 2) && entry.cpuStale);
+            if (!flags) continue;
+            const auto bytes = std::uint64_t(entry.view.width) * entry.view.height * 4;
+            if ((flags & 1) && !direct && (!entry.rgba ||
+                ((!entry.rgbaValid || entry.view.volatileCPU || entry.rgbaVersion != entry.view.version) && entry.rgba.use_count() > 1)))
+                additional += bytes;
+            if (flags & 2) {
+                if (entry.cpuStale ? !entry.sceneOpaque : (!entry.opaque ||
+                    ((!entry.opaqueValid || entry.view.volatileCPU || entry.opaqueVersion != entry.view.version) && entry.opaque.use_count() > 1)))
+                    additional += bytes;
+            }
+        }
+        DrainRetired(impl_->epoch);
+        const auto allocated = impl_->epoch->bytes.load();
+        if (additional > TextureBudget || allocated > TextureBudget - additional) {
+            SDL_SetError("GPU scene: texture budget required=%llu bytes (retained=%llu, additional=%llu), limit=%llu",
+                static_cast<unsigned long long>(allocated + additional),
+                static_cast<unsigned long long>(allocated), static_cast<unsigned long long>(additional),
+                static_cast<unsigned long long>(TextureBudget));
+            return false;
+        }
+        // Allocation failures are still safe fallback, but an oversized scene
+        // cannot churn through its CPU uploads before discovering the budget.
+        std::unordered_map<Key, std::array<std::shared_ptr<ResidentFrameState>, 2>, KeyHash> sources;
+        for (const auto& item : sourceNeeds) {
+            auto* entry = impl_->Find(sourceViews.at(item.first));
+            auto& textures = sources[item.first];
+            for (unsigned opaque = 0; opaque != 2; ++opaque) if (item.second & (1u << opaque)) {
+                textures[opaque] = impl_->SceneSource(*entry, opaque != 0);
+                if (!textures[opaque]) return false;
+            }
+        }
+        if (!impl_->Target(*destination, true)) return false;
+        for (std::size_t depth = 1; depth < sizes.size(); ++depth) for (unsigned opaque = 0; opaque != 2; ++opaque) {
+            const auto size = sizes[depth][opaque]; auto& target = impl_->scenePool[depth][opaque];
+            if (size.x && !target) {
+                BitmapView view{}; view.width = size.x; view.height = size.y;
+                target = impl_->Create(view, true, opaque != 0, destination);
+                if (!target) return false;
+            }
+        }
+        struct Command {
+            std::shared_ptr<ResidentFrameState> target, source;
+            SDL_Rect from{}, to{};
+            SDL_BlendMode blend = SDL_BLENDMODE_NONE;
+            Uint8 colorMod = 255, alphaMod = 255;
+            std::uint32_t color = 0;
+            bool output = false, groupBlit = false;
+        };
+        std::vector<Command> commands;
+        commands.reserve(drawCount + visits);
+        const auto blendMode = [](BitmapBlend method, int opacity, bool transparent) {
+            if (method == BitmapBlend::Copy && opacity == 255) return SDL_BLENDMODE_NONE;
+            return SDL_ComposeCustomBlendMode(
+                method == BitmapBlend::AddAlpha ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_SRC_ALPHA,
+                SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, SDL_BLENDOPERATION_ADD,
+                transparent ? SDL_BLENDFACTOR_ONE : SDL_BLENDFACTOR_ZERO,
+                transparent ? SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA : SDL_BLENDFACTOR_ONE,
+                SDL_BLENDOPERATION_ADD);
+        };
+        const auto build = [&](auto&& self, std::size_t index, std::size_t depth) -> void {
+            const auto& group = groups[index];
+            auto target = depth ? impl_->scenePool[depth][group.opaque ? 1 : 0] : destination->target;
+            if (depth) {
+                Command clear; clear.target = target; clear.to = {0, 0, group.width, group.height};
+                commands.push_back(std::move(clear)); // transparent black (RGB888 ignores A).
+            }
+            BitmapView bounds{}; bounds.width = group.width; bounds.height = group.height;
+            for (std::size_t j = 0; j < group.draws.size(); ++j) {
+                const auto& draw = group.draws[j];
+                if (!draw.opacity || !draw.destination.w || !draw.destination.h) continue;
+                Command command; command.target = target; command.output = depth == 0;
+                BitmapBlend method = draw.blend;
+                if (draw.kind == SceneDrawKind::Fill) {
+                    SDL_Rect area{0, 0, group.width, group.height};
+                    if (!SDL_IntersectRect(&draw.destination, &area, &command.to)) continue;
+                    const auto scaled = [op = draw.opacity](unsigned c) { return (c * op + 127) / 255; };
+                    const unsigned a = method == BitmapBlend::Copy && (depth || draw.opacity < 255)
+                        ? 255 : (draw.color >> 24);
+                    const unsigned r = (draw.color >> 16) & 255, g = (draw.color >> 8) & 255, b = draw.color & 255;
+                    command.color = scaled(a) << 24 |
+                        (method == BitmapBlend::AddAlpha ? scaled(r) : r) << 16 |
+                        (method == BitmapBlend::AddAlpha ? scaled(g) : g) << 8 |
+                        (method == BitmapBlend::AddAlpha ? scaled(b) : b);
+                } else {
+                    BitmapView source{};
+                    if (draw.kind == SceneDrawKind::Group) {
+                        const auto& child = groups[draw.group];
+                        source.width = child.width; source.height = child.height;
+                        method = child.opaque ? BitmapBlend::Copy : BitmapBlend::AddAlpha;
+                        command.source = impl_->scenePool[depth + 1][child.opaque ? 1 : 0];
+                        command.groupBlit = true;
+                    } else {
+                        source = draw.bitmap;
+                        const bool ignoreAlpha = draw.blend == BitmapBlend::Copy && (index != 0 || draw.opacity < 255);
+                        command.source = sources.at(Identity(draw.bitmap))[ignoreAlpha ? 1 : 0];
+                    }
+                    if (!ClipCopy(bounds, draw.destination.x, draw.destination.y, source,
+                                  draw.source, command.from, command.to)) continue;
+                    if (draw.kind == SceneDrawKind::Group) self(self, draw.group, depth + 1);
+                    command.alphaMod = Uint8(draw.opacity);
+                    command.colorMod = method == BitmapBlend::AddAlpha ? Uint8(draw.opacity) : 255;
+                }
+                command.blend = blendMode(method, draw.opacity, depth && !group.opaque);
+                commands.push_back(std::move(command));
+            }
+        };
+        build(build, 0, 0);
+
+        // Probe every target and every blend/modulation combination before
+        // the first scene pixel write. The command array also removes all
+        // application-side allocation from the submission loop.
+        RendererScope scope(impl_->renderer);
+        for (const auto& command : commands) {
+            bool good = scope.Begin(command.target->texture.load());
+            if (command.source) {
+                auto* texture = command.source->texture.load();
+                good = SDL_SetTextureBlendMode(texture, command.blend) == 0 && good;
+                good = SDL_SetTextureColorMod(texture, command.colorMod, command.colorMod, command.colorMod) == 0 && good;
+                good = SDL_SetTextureAlphaMod(texture, command.alphaMod) == 0 && good;
+            } else {
+                good = SDL_SetRenderDrawBlendMode(impl_->renderer, command.blend) == 0 && good;
+                good = SDL_SetRenderDrawColor(impl_->renderer, Uint8(command.color >> 16), Uint8(command.color >> 8),
+                    Uint8(command.color), Uint8(command.color >> 24)) == 0 && good;
+            }
+            if (!good) {
+                char reason[256]; SDL_strlcpy(reason, SDL_GetError(), sizeof(reason));
+                if (!scope.Restore()) throw SubmittedGPUFailure();
+                SDL_SetError("GPU scene: target/blend/modulation preflight failed: %s", reason);
+                return false;
+            }
+        }
+        if (!scope.Restore()) throw SubmittedGPUFailure();
+        RendererScope submissionScope(impl_->renderer);
+        KrkrNSPerfScope scenePerf(KrkrNSPerfOp::GpuGroupRender);
+        SDL_Texture* bound = nullptr;
+        for (const auto& command : commands) {
+            auto* target = command.target->texture.load();
+            if (bound != target) {
+                KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasTargetSwitch);
+                if (!submissionScope.Begin(target)) {
+                    if (!submissionScope.Restore() || submitted) throw SubmittedGPUFailure();
+                    return false;
+                }
+                bound = target;
+            }
+            bool good;
+            if (command.source) {
+                auto* texture = command.source->texture.load();
+                good = SDL_SetTextureBlendMode(texture, command.blend) == 0 &&
+                    SDL_SetTextureColorMod(texture, command.colorMod, command.colorMod, command.colorMod) == 0 &&
+                    SDL_SetTextureAlphaMod(texture, command.alphaMod) == 0;
+            } else good = SDL_SetRenderDrawBlendMode(impl_->renderer, command.blend) == 0 &&
+                SDL_SetRenderDrawColor(impl_->renderer, Uint8(command.color >> 16), Uint8(command.color >> 8),
+                    Uint8(command.color), Uint8(command.color >> 24)) == 0;
+            if (!good) {
+                if (!submissionScope.Restore() || submitted) throw SubmittedGPUFailure();
+                return false;
+            }
+            submitted = true;
+            if (command.output) {
+                destination->cpuStale = true;
+                destination->rgbaValid = destination->opaqueValid = destination->sceneOpaqueValid = false;
+            }
+            {
+                KrkrNSPerfScope perf(command.groupBlit ? KrkrNSPerfOp::GpuGroupBlit : KrkrNSPerfOp::GpuCanvasDraw,
+                    std::uint64_t(command.to.w) * command.to.h * 4);
+                good = command.source ? SDL_RenderCopy(impl_->renderer, command.source->texture.load(),
+                    &command.from, &command.to) == 0 : SDL_RenderFillRect(impl_->renderer, &command.to) == 0;
+            }
+            if (!good) { submissionScope.Restore(); throw SubmittedGPUFailure(); }
+        }
+        if (!submissionScope.Restore()) throw SubmittedGPUFailure();
+        return true;
+    } catch (const SubmittedGPUFailure&) { throw; }
+      catch (...) { if (submitted) throw SubmittedGPUFailure(); return false; }
 }
 
 bool SDLBitmapCompositor::SyncCPU(const BitmapView& view)
@@ -773,7 +1105,7 @@ void SDLBitmapCompositor::CPUWritten(const BitmapView& view) noexcept
     if (auto* entry = impl_->Find(view)) {
         entry->view = view;
         entry->cpuStale = false;
-        entry->targetValid = entry->rgbaValid = entry->opaqueValid = false;
+        entry->targetValid = entry->rgbaValid = entry->opaqueValid = entry->sceneOpaqueValid = false;
     }
 }
 

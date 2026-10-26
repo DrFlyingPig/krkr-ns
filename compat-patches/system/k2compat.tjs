@@ -933,10 +933,12 @@ if (typeof(global.gpButtonDpadUp) == "undefined") {
     global.gpTouchDown           = 1;
 }
 
+// Forward to the native registry so loading a built-in also installs its API.
+// Keep native return values and exceptions, and preserve game-provided loaders.
 if (typeof(Krkr2CompatUtils.loadPlugin) == "undefined")
-	Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+	Krkr2CompatUtils.loadPlugin = function(name) { return Plugins.link(name); };
 if (typeof(Krkr2CompatUtils.unloadPlugin) == "undefined")
-	Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+	Krkr2CompatUtils.unloadPlugin = function(name) { return Plugins.unlink(name); };
 if (typeof(Krkr2CompatUtils.isLoaded) == "undefined")
 	Krkr2CompatUtils.isLoaded = function(name) { return true; };
 if (typeof(Krkr2CompatUtils.autoLoad) == "undefined")

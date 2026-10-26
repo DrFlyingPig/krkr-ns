@@ -33,10 +33,11 @@ if (typeof(Krkr2CompatUtils.getMouseCursorPos) == "undefined")
 	Krkr2CompatUtils.getMouseCursorPos = function() { return null; };
 if (typeof(Krkr2CompatUtils.getWindowRect) == "undefined")
 	Krkr2CompatUtils.getWindowRect = function() { return null; };
+// Use the same native loader bridge when restoring a missing compatibility API.
 if (typeof(Krkr2CompatUtils.loadPlugin) == "undefined")
-	Krkr2CompatUtils.loadPlugin = function(name) { return null; };
+	Krkr2CompatUtils.loadPlugin = function(name) { return Plugins.link(name); };
 if (typeof(Krkr2CompatUtils.unloadPlugin) == "undefined")
-	Krkr2CompatUtils.unloadPlugin = function(name) { return null; };
+	Krkr2CompatUtils.unloadPlugin = function(name) { return Plugins.unlink(name); };
 if (typeof(Krkr2CompatUtils.isLoaded) == "undefined")
 	Krkr2CompatUtils.isLoaded = function(name) { return true; };
 if (typeof(Krkr2CompatUtils.autoLoad) == "undefined")

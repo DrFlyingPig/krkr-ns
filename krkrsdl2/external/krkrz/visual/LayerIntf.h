@@ -20,6 +20,10 @@
 #include "TransIntf.h"
 #include "EventIntf.h"
 #include "ObjectList.h"
+#ifdef __SWITCH__
+#include <vector>
+namespace krkrns { struct SceneGroup; }
+#endif
 
 
 
@@ -931,7 +935,14 @@ private:
 #ifdef __SWITCH__
 	bool IsDirectGPUPrimary(const char *&reason) const;
 	bool CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
-		const char *&reason, tjs_uint &nodes);
+		const char *&reason, tjs_uint &nodes, tjs_uint *groups = NULL,
+		const tTJSNI_BaseLayer **failedLayer = NULL);
+	bool BuildDirectGPUScene(std::vector<krkrns::SceneGroup> &groups,
+		std::size_t target, tjs_int x, tjs_int y, const tTVPRect &r,
+		bool visiblecheck, const char *&reason,
+		const tTJSNI_BaseLayer **failedLayer = NULL);
+	bool RenderDirectGPUScene(tTVPDrawable *target,
+		const std::vector<krkrns::SceneGroup> &groups, const char *&reason);
 	void DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
 		const tTVPRect &r, bool visiblecheck = true);
 #endif
