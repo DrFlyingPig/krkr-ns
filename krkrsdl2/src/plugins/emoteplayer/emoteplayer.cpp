@@ -160,7 +160,11 @@ NCB_REGISTER_SUBCLASS(Player)
     PROPERTY(chara);
     PROPERTY(variableKeys);
     PROPERTY(tags);
-    PROPERTY(useD3D); // 脚本侧判断 D3D emote 可用性（见 AffineSourceMotion）
+    // Games set this on Motion.Player before constructing players.  It is
+    // a class default copied to each instance, not a native instance property:
+    // an instance-only setter rejects the class assignment and aborts the
+    // rest of the game's startup patch (including its resolution options).
+    Variant("useD3D", static_cast<tjs_int>(0), 0);
 }
 
 NCB_REGISTER_CLASS(Motion)
