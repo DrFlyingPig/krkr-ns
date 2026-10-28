@@ -94,7 +94,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
     int sourcePitch = 0;
     uint8_t* source = renderer->LockTarget(target, sourcePitch);
     uint8_t* destination =
-        static_cast<uint8_t*>(layer->GetMainImagePixelBufferForWrite());
+        static_cast<uint8_t*>(layer->GetMainImagePixelBufferForTransientWrite());
     const int destinationPitch = layer->GetMainImagePixelBufferPitch();
     const int copyWidth = std::min(sourceWidth, static_cast<int>(layer->GetImageWidth()));
     const int copyHeight = std::min(sourceHeight, static_cast<int>(layer->GetImageHeight()));
@@ -782,7 +782,7 @@ void D3DAdaptor::captureCanvas(iTJSDispatch2* targetLayer)
         int sourcePitch = 0;
         uint8_t* source = renderer->LockTarget(_target, sourcePitch);
         uint8_t* destination =
-            static_cast<uint8_t*>(ths->GetMainImagePixelBufferForWrite());
+            static_cast<uint8_t*>(ths->GetMainImagePixelBufferForTransientWrite());
         const int destinationPitch = ths->GetMainImagePixelBufferPitch();
         if (source && destination)
         {

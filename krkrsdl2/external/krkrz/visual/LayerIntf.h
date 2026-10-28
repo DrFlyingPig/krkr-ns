@@ -486,6 +486,9 @@ public:
 
 	const void * GetMainImagePixelBuffer() const;
 	void * GetMainImagePixelBufferForWrite();
+	// Native callers must finish writing synchronously and never retain this
+	// pointer. Script/exported pointers must use the persistent-write accessor.
+	void * GetMainImagePixelBufferForTransientWrite();
 	tjs_int GetMainImagePixelBufferPitch() const;
 	const void * GetProvinceImagePixelBuffer() const;
 	void * GetProvinceImagePixelBufferForWrite();

@@ -2769,11 +2769,17 @@ const void * tTJSNI_BaseLayer::GetMainImagePixelBuffer() const
 //---------------------------------------------------------------------------
 void * tTJSNI_BaseLayer::GetMainImagePixelBufferForWrite()
 {
-	if(!MainImage) return NULL;
-	ImageModified = true;
-	void* pixels = MainImage->GetScanLineForWrite(0);
+	void* pixels = GetMainImagePixelBufferForTransientWrite();
+	if(!pixels) return NULL;
 	MainImage->GetBitmap()->MarkCPUBufferExposed();
 	return pixels;
+}
+//---------------------------------------------------------------------------
+void * tTJSNI_BaseLayer::GetMainImagePixelBufferForTransientWrite()
+{
+	if(!MainImage) return NULL;
+	ImageModified = true;
+	return MainImage->GetScanLineForWrite(0);
 }
 //---------------------------------------------------------------------------
 tjs_int tTJSNI_BaseLayer::GetMainImagePixelBufferPitch() const
