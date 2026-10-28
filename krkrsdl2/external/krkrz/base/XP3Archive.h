@@ -94,6 +94,8 @@ extern bool TVPHasXP3ArchiveFilters();
 extern bool TVPIsXP3Archive(const ttstr &name); // check XP3 archive
 extern void TVPClearXP3SegmentCache(); // clear XP3 segment cache
 #ifdef __SWITCH__
+extern tjs_uint TVPGetXP3SegmentCacheOneLimit();
+extern void TVPSetXP3SegmentCacheOneLimit(tjs_uint limit);
 extern tjs_uint TVPGetXP3SegmentCacheLimit();
 extern void TVPSetXP3SegmentCacheLimit(tjs_uint limit);
 #endif

@@ -714,6 +714,11 @@ tjs_int64 tTVPXP3Archive::ReadI64FromMem(const tjs_uint8 *mem)
 #define TVP_SEGCACHE_ONE_LIMIT (8*1024*1024)    // max size limit for each segment
 #define TVP_SEGCACHE_TOTAL_LIMIT (16*1024*1024) // total segment cache size
 tjs_uint TVPSegmentCacheLimit = TVP_SEGCACHE_TOTAL_LIMIT;
+#ifdef __SWITCH__
+// Game sessions select the reference's one-megabyte threshold while the
+// launcher keeps its own budget. Readers may run on the image worker.
+static std::atomic<tjs_uint> TVPSegmentCacheOneLimit{TVP_SEGCACHE_ONE_LIMIT};
+#endif
 //---------------------------------------------------------------------------
 struct tTVPSegmentCacheSearchData
 {
@@ -823,6 +828,14 @@ static void TVPCheckSegmentCacheLimitLocked()
 	}
 }
 #ifdef __SWITCH__
+tjs_uint TVPGetXP3SegmentCacheOneLimit()
+{
+	return TVPSegmentCacheOneLimit.load(std::memory_order_relaxed);
+}
+void TVPSetXP3SegmentCacheOneLimit(tjs_uint limit)
+{
+	TVPSegmentCacheOneLimit.store(limit, std::memory_order_relaxed);
+}
 tjs_uint TVPGetXP3SegmentCacheLimit()
 {
 	tTJSCriticalSectionHolder lock(TVPSegmentCacheCS);
@@ -953,7 +966,11 @@ void tTVPXP3ArchiveStream::EnsureSegment()
 	{
 		// a compressed segment
 
+#ifdef __SWITCH__
+		if(CurSegment->OrgSize >= TVPGetXP3SegmentCacheOneLimit())
+#else
 		if(CurSegment->OrgSize >= TVP_SEGCACHE_ONE_LIMIT)
+#endif
 		{
 			// too large to cache
 			Stream->SetPosition(CurSegment->Start);

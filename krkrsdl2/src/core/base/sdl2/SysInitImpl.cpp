@@ -1017,7 +1017,7 @@ struct TVPSwitchMemorySessionSnapshot
 {
 	bool active = false;
 	tjs_uint64 total = 0, graphicSystem = 0, graphicLimit = 0;
-	tjs_uint segmentLimit = 0, fontLimit = 0;
+	tjs_uint segmentLimit = 0, segmentOneLimit = 0, fontLimit = 0;
 	tjs_int hashBits = 0;
 	bool freeUnusedLayers = false;
 };
@@ -1033,6 +1033,7 @@ void krkrsdl2_restore_reference_memory_settings() noexcept
 		TVPGraphicCacheSystemLimit = saved.graphicSystem;
 		TVPSetGraphicCacheLimit(saved.graphicLimit);
 		TVPSetXP3SegmentCacheLimit(saved.segmentLimit);
+		TVPSetXP3SegmentCacheOneLimit(saved.segmentOneLimit);
 		TVPSetFontCacheLimit(saved.fontLimit);
 		TJSObjectHashBitsLimit = saved.hashBits;
 		TVPFreeUnusedLayerCache = saved.freeUnusedLayers;
@@ -1055,7 +1056,7 @@ void krkrsdl2_apply_reference_memory_settings(const char* usage, const char* sou
 			cache = (mb < 0 || mb > 512) ? 512ULL * 1024 * 1024 : tjs_uint64(mb) * 1024 * 1024;
 	}
 	TVPSwitchMemorySession = {true, TVPTotalPhysMemory, TVPGraphicCacheSystemLimit,
-		TVPGetGraphicCacheLimit(), TVPGetXP3SegmentCacheLimit(), TVPGetFontCacheLimit(),
+		TVPGetGraphicCacheLimit(), TVPGetXP3SegmentCacheLimit(), TVPGetXP3SegmentCacheOneLimit(), TVPGetFontCacheLimit(),
 		TJSObjectHashBitsLimit, TVPFreeUnusedLayerCache};
 	// A reference game starts in a fresh process with the image cache off.
 	// Restore the launcher's prior setting when this session ends.
@@ -1064,17 +1065,20 @@ void krkrsdl2_apply_reference_memory_settings(const char* usage, const char* sou
 	TVPGraphicCacheSystemLimit = cache;
 	if (TJSObjectHashBitsLimit > policy.hashBitsCeiling)
 		TJSObjectHashBitsLimit = policy.hashBitsCeiling;
+	// Reference XP3 caches only segments smaller than 1 MiB, up to 1 MiB
+	// total. Its low-memory policy disables the segment cache altogether.
+	TVPSetXP3SegmentCacheOneLimit(1024 * 1024);
+	TVPSetXP3SegmentCacheLimit(policy.lowMemory ? 0 : 1024 * 1024);
 	if (policy.lowMemory)
 	{
-		TVPSetXP3SegmentCacheLimit(0);
 		TVPFreeUnusedLayerCache = true;
 		TVPSetFontCacheForLowMem();
 	}
-	KRKRNS_LOG("[memory-policy] usage=%s source=%s total=%llu assumed=%llu cache=%llu hash=%d segment=%u font=%u",
+	KRKRNS_LOG("[memory-policy] usage=%s source=%s total=%llu assumed=%llu cache=%llu hash=%d segment=%u segment-one=%u font=%u",
 		usage ? usage : "unlimited", source ? source : "default",
 		(unsigned long long)TVPSwitchMemoryBudget.Total, (unsigned long long)policy.assumedBytes,
 		(unsigned long long)cache, int(TJSObjectHashBitsLimit),
-		unsigned(TVPGetXP3SegmentCacheLimit()), unsigned(TVPGetFontCacheLimit()));
+		unsigned(TVPGetXP3SegmentCacheLimit()), unsigned(TVPGetXP3SegmentCacheOneLimit()), unsigned(TVPGetFontCacheLimit()));
 }
 #endif
 static void TVPInitProgramArgumentsAndDataPath(bool stop_after_datapath_got);
