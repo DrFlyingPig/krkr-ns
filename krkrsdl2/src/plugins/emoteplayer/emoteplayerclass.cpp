@@ -440,6 +440,13 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
             auto identity = EmoteLayerIdentityForView(afterView, copyWidth, copyHeight);
             if (afterView.row0 != destination || afterView.pitch != destinationPitch)
                 identity = {};
+            if (identity && previousIdentity)
+            {
+                const SDL_Rect changed = dirtyLeft < dirtyRight && dirtyTop < dirtyBottom
+                    ? SDL_Rect{dirtyLeft, dirtyTop, dirtyRight - dirtyLeft, dirtyBottom - dirtyTop}
+                    : SDL_Rect{0, 0, 0, 0};
+                krkrns::GetBitmapCompositor().CPUWrittenRegion(beforeView, afterView, changed);
+            }
             damageBackend->CommitLayerDamage(target, identity);
         }
 #endif

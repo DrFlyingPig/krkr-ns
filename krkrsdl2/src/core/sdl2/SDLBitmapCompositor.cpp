@@ -2,6 +2,7 @@
 #include "SDLBitmapCompositor.h"
 #include "KrkrNSResourcePolicy.h"
 #include "KrkrNSPerf.h"
+#include "KrkrNSLog.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -359,6 +360,9 @@ struct SDLBitmapCompositor::Impl
         bool opaqueTarget = false, targetValid = false, cpuStale = false;
         bool rgbaValid = false, opaqueValid = false, sceneOpaqueValid = false;
         std::uint64_t rgbaVersion = 0, opaqueVersion = 0, used = 0;
+        bool regionValid = false;
+        std::uint64_t regionFrom = 0, regionTo = 0;
+        SDL_Rect region{};
         std::shared_ptr<ResidentFrameState> target, rgba, opaque, sceneOpaque;
         std::weak_ptr<LoadedBitmapSourceState> loaded;
     };
@@ -374,6 +378,7 @@ struct SDLBitmapCompositor::Impl
     std::vector<std::array<std::uint64_t, 2>> scenePoolUsed;
     KrkrNSGpuResourceLease lease;
     std::uint64_t clock = 0;
+    std::uint64_t partialUploads = 0, partialBytes = 0, partialFullBytes = 0;
     unsigned batchDepth = 0;
     std::unique_ptr<RendererScope> drawScope;
     std::shared_ptr<ResidentFrameState> drawResource;
@@ -443,6 +448,7 @@ struct SDLBitmapCompositor::Impl
         if (entry.view.width != view.width || entry.view.height != view.height) {
             entry.target.reset(); DropSource(entry, entry.rgba); entry.opaque.reset(); entry.sceneOpaque.reset();
             entry.targetValid = entry.rgbaValid = entry.opaqueValid = entry.sceneOpaqueValid = false;
+            entry.regionValid = false;
         }
         entry.view = view;
         entry.loaded = view.sourceHandle.state_;
@@ -541,21 +547,25 @@ struct SDLBitmapCompositor::Impl
         failure.succeeded = true;
         return result;
     }
-    bool Upload(const std::shared_ptr<ResidentFrameState>& resource, const BitmapView& view)
+    bool Upload(const std::shared_ptr<ResidentFrameState>& resource, const BitmapView& view,
+                const SDL_Rect* region = nullptr)
     {
+        const int width = region ? region->w : view.width;
+        const int height = region ? region->h : view.height;
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasUpload,
-            std::uint64_t(view.width) * view.height * 4);
-        const void* pixels = view.row0;
+            std::uint64_t(width) * height * 4);
+        const auto* first = view.row0 + (region ? std::ptrdiff_t(region->y) * view.pitch + region->x * 4 : 0);
+        const void* pixels = first;
         int pitch = view.pitch;
         if (pitch < 0) {
-            const std::size_t rowBytes = std::size_t(view.width) * 4;
-            scratch.resize(rowBytes * view.height);
-            for (int y = 0; y < view.height; ++y)
+            const std::size_t rowBytes = std::size_t(width) * 4;
+            scratch.resize(rowBytes * height);
+            for (int y = 0; y < height; ++y)
                 std::memcpy(scratch.data() + std::size_t(y) * rowBytes,
-                    view.row0 + std::ptrdiff_t(y) * view.pitch, rowBytes);
+                    first + std::ptrdiff_t(y) * view.pitch, rowBytes);
             pixels = scratch.data(); pitch = int(rowBytes);
         }
-        return SDL_UpdateTexture(resource->texture.load(), nullptr, pixels, pitch) == 0;
+        return SDL_UpdateTexture(resource->texture.load(), region, pixels, pitch) == 0;
     }
     bool Read(const std::shared_ptr<ResidentFrameState>& resource,
               std::uint8_t* row0, int pitch, Uint32 format)
@@ -655,13 +665,28 @@ struct SDLBitmapCompositor::Impl
         auto& valid = opaque ? entry.opaqueValid : entry.rgbaValid;
         auto& version = opaque ? entry.opaqueVersion : entry.rgbaVersion;
         const bool upload = !valid || entry.view.volatileCPU || version != entry.view.version;
+        const bool partial = upload && valid && resource && resource.use_count() == 1 &&
+            !entry.view.volatileCPU && entry.regionValid && version == entry.regionFrom &&
+            entry.view.version == entry.regionTo;
         if (!resource || (upload && resource.use_count() > 1))
             resource = Create(entry.view, false, opaque, &entry);
         if (!resource) return {};
         if (upload) {
-            if (!Upload(resource, entry.view)) { valid = false; return {}; }
+            if (partial) {
+                if (entry.region.w > 0 && entry.region.h > 0 &&
+                    !Upload(resource, entry.view, &entry.region)) { valid = false; return {}; }
+                ++partialUploads;
+                partialBytes += std::uint64_t(entry.region.w) * entry.region.h * 4;
+                partialFullBytes += std::uint64_t(entry.view.width) * entry.view.height * 4;
+                if (partialUploads == 1 || partialUploads % 120 == 0)
+                    KRKRNS_LOG("[gpu-partial-upload] count=%llu bytes=%llu fullBytes=%llu",
+                        (unsigned long long)partialUploads, (unsigned long long)partialBytes,
+                        (unsigned long long)partialFullBytes);
+            } else if (!Upload(resource, entry.view)) { valid = false; return {}; }
             valid = true; version = entry.view.version;
         }
+        if (entry.regionValid && entry.regionTo == entry.view.version)
+            entry.regionValid = false;
         return resource;
     }
     std::shared_ptr<ResidentFrameState> SceneSource(Entry& entry, bool opaque)
@@ -1494,7 +1519,51 @@ void SDLBitmapCompositor::CPUWritten(const BitmapView& view) noexcept
         entry->view.sourceHandle = {};
         entry->cpuStale = false;
         entry->targetValid = entry->rgbaValid = entry->opaqueValid = entry->sceneOpaqueValid = false;
+        entry->regionValid = false;
     }
+}
+
+void SDLBitmapCompositor::CPUWrittenRegion(const BitmapView& before, const BitmapView& after,
+                                           const SDL_Rect& changed) noexcept
+{
+    // The writer promises that all pixels outside changed are unchanged.
+    // A shared allocation detach, exported pointer, GPU target or an unknown
+    // intervening version cannot make this promise.
+    if (!ValidView(before) || !ValidView(after) || !(Identity(before) == Identity(after)) ||
+        before.row0 != after.row0 || before.width != after.width ||
+        before.height != after.height || before.pitch != after.pitch ||
+        before.volatileCPU || after.volatileCPU || before.sourceHandle || after.sourceHandle ||
+        before.version == (std::numeric_limits<std::uint64_t>::max)() ||
+        after.version != before.version + 1 ||
+        (after.gpuWriteTracked && after.gpuWriteTracked->load(std::memory_order_acquire)) ||
+        changed.x < 0 || changed.y < 0 || changed.w < 0 || changed.h < 0 ||
+        std::int64_t(changed.x) + changed.w > after.width ||
+        std::int64_t(changed.y) + changed.h > after.height)
+        return;
+    try {
+        std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+        if (!impl_ || !impl_->Owner()) return;
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto* entry = impl_->Find(before);
+        if (!entry || entry->cpuStale || entry->opaqueTarget ||
+            entry->view.row0 != before.row0 || entry->view.width != before.width ||
+            entry->view.height != before.height || entry->view.pitch != before.pitch) return;
+        if (entry->regionValid && entry->regionTo == before.version) {
+            if (changed.w > 0 && changed.h > 0) {
+                if (entry->region.w <= 0 || entry->region.h <= 0) entry->region = changed;
+                else {
+                    SDL_Rect combined{};
+                    SDL_UnionRect(&entry->region, &changed, &combined);
+                    entry->region = combined;
+                }
+            }
+        } else {
+            entry->regionFrom = before.version;
+            entry->region = changed;
+        }
+        entry->regionTo = after.version;
+        entry->regionValid = true;
+    } catch (...) { /* A full upload remains correct. */ }
 }
 
 void SDLBitmapCompositor::Forget(const void* storage, std::uint64_t serial) noexcept

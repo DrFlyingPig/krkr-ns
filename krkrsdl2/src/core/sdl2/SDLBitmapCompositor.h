@@ -128,6 +128,10 @@ public:
     // the engine must SyncCPU, increment its version, then call CPUWritten.
     bool SyncCPU(const BitmapView& bitmap);
     void CPUWritten(const BitmapView& bitmap) noexcept;
+    // Native synchronous writers may identify the complete changed region
+    // between consecutive versions of the same CPU-owned allocation.
+    void CPUWrittenRegion(const BitmapView& before, const BitmapView& after,
+                          const SDL_Rect& changed) noexcept;
     void Forget(const void* storage, std::uint64_t serial) noexcept;
     // Immutable snapshots trigger COW. A live canvas is for same-thread window
     // presentation and follows later writes to that texture without COW.
