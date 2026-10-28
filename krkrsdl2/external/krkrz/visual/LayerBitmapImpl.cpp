@@ -274,6 +274,10 @@ void TVPSetFontCacheForLowMem()
 	// set character cache limit
 	TVPFontCache.SetMaxCount(TVP_CH_MAX_CACHE_COUNT_LOW);
 }
+#ifdef __SWITCH__
+tjs_uint TVPGetFontCacheLimit() { return TVPFontCache.GetMaxCount(); }
+void TVPSetFontCacheLimit(tjs_uint limit) { TVPFontCache.SetMaxCount(limit); }
+#endif
 //---------------------------------------------------------------------------
 void TVPClearFontCache()
 {

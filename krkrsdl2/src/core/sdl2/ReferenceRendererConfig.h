@@ -6,8 +6,10 @@
 struct RendererSettings
 {
     std::string renderer = "software";
+    std::string memoryUsage = "unlimited";
     int fpsLimit = 60;
     std::string rendererSource = "default";
+    std::string memorySource = "default";
     std::string fpsSource = "default";
 };
 

@@ -77,6 +77,7 @@ void krkrsdl2_resource_policy_select_renderer(const char* native_game_dir) noexc
     frameRate.store(60, std::memory_order_release);
     try {
         const auto settings = ReadReferenceRendererSettings(native_game_dir);
+        krkrsdl2_apply_reference_memory_settings(settings.memoryUsage.c_str(), settings.memorySource.c_str());
         const unsigned selectedRate = settings.fpsLimit > 0
             ? static_cast<unsigned>(settings.fpsLimit) : 60;
         frameRate.store(selectedRate, std::memory_order_release);
@@ -92,6 +93,7 @@ void krkrsdl2_resource_policy_select_renderer(const char* native_game_dir) noexc
                 settings.renderer.c_str(), settings.rendererSource.c_str());
         }
     } catch (...) {
+		krkrsdl2_restore_reference_memory_settings();
         KRKRNS_LOG("[renderer] cannot read reference renderer settings; using software fallback");
     }
 }
@@ -108,6 +110,7 @@ void krkrsdl2_resource_policy_begin_session() noexcept
 
 void krkrsdl2_resource_policy_end_session() noexcept
 {
+    krkrsdl2_restore_reference_memory_settings();
     if (auto* state = State()) {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->session = false;

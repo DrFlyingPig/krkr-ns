@@ -822,6 +822,19 @@ static void TVPCheckSegmentCacheLimitLocked()
 		}
 	}
 }
+#ifdef __SWITCH__
+tjs_uint TVPGetXP3SegmentCacheLimit()
+{
+	tTJSCriticalSectionHolder lock(TVPSegmentCacheCS);
+	return TVPSegmentCacheLimit;
+}
+void TVPSetXP3SegmentCacheLimit(tjs_uint limit)
+{
+	tTJSCriticalSectionHolder lock(TVPSegmentCacheCS);
+	TVPSegmentCacheLimit = limit;
+	TVPCheckSegmentCacheLimitLocked();
+}
+#endif
 //---------------------------------------------------------------------------
 void TVPClearXP3SegmentCache()
 {

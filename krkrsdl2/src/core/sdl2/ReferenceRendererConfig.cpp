@@ -30,6 +30,11 @@ void ReadFile(const std::string& path, RendererSettings& settings)
             settings.renderer = value;
             settings.rendererSource = path;
         }
+        else if (std::strcmp(key, "memusage") == 0)
+        {
+            settings.memoryUsage = value;
+            settings.memorySource = path;
+        }
         else if (std::strcmp(key, "fps_limit") == 0)
         {
             // The reference's integer preference conversion is atoi. Retain

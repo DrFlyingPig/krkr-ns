@@ -24,6 +24,10 @@ namespace krkrns { struct BitmapView; }
 
 //---------------------------------------------------------------------------
 extern void TVPSetFontCacheForLowMem();
+#ifdef __SWITCH__
+extern tjs_uint TVPGetFontCacheLimit();
+extern void TVPSetFontCacheLimit(tjs_uint limit);
+#endif
 // Drop process-global font rasterizer state at an in-process engine restart.
 extern void TVPResetFontRasterizersForEngineRestart();
 //---------------------------------------------------------------------------

@@ -87,7 +87,7 @@ To build locally, prepare devkitPro / devkitA64, the Switch dependencies, CMake/
 **Performance and stability**
 
 - Caches displayed text, images, and game resources to reduce repeated reads and drawing during library and menu use.
-- Uses system-reported memory to budget resource caches in Switch application mode and buffers small extraction-filtered XP3 files before decoding.
+- Uses process memory and the reference's `memusage` setting to budget resource caches on Switch, and buffers small extraction-filtered XP3 files before decoding.
 - The image cache is off by default. When a game enables it, its requested image lists preload in order on the same queue as ordinary asynchronous requests; unfinished requests are released on exit.
 - In OpenGL mode, synchronously loaded images share texture resources across bitmaps, layers, and the image cache, including hidden layers prepared ahead by the game. Pixel edits and unsupported driver paths retain CPU handling.
 - Displays actual script and resource-loading messages during startup, then reveals the game after its entry script and first update complete. The game's scripts determine which resources load.

@@ -55,6 +55,8 @@
 #ifdef __SWITCH__
 // TVP_CPU_HAS_* flags for the simde-kernel activation below (Phase 1).
 #include "tvpgl_ia32_intf.h"
+#include "ReferenceMemoryPolicy.h"
+#include "LayerBitmapImpl.h"
 #endif
 
 #include "BinaryStream.h"
@@ -995,29 +997,84 @@ static TVPSwitchMemoryBudgetInfo TVPSwitchMemoryBudget;
 static TVPSwitchMemoryBudgetInfo TVPQuerySwitchMemoryBudget()
 {
 	TVPSwitchMemoryBudgetInfo info;
-	const tjs_uint64 mib = 1024ULL * 1024;
 	info.Applet = appletGetAppletType();
-	const bool application = info.Applet == AppletType_Application || info.Applet == AppletType_SystemApplication;
 	info.SDLMegabytes = SDL_GetSystemRAM();
-	// Preserve the previous conservative SDL/launcher fallback whenever the
-	// process query is unavailable, and never query a restricted applet.
-	info.Total = info.SDLMegabytes > 0 ? tjs_uint64(info.SDLMegabytes) * mib : (application ? 512ULL : 128ULL) * mib;
-	info.Assumed = info.Total;
-	info.Source = info.SDLMegabytes > 0 ? "sdl" : (application ? "fallback-application" : "fallback-applet");
-	if (application)
+	// The reference queries the process budget in both application and applet
+	// mode. A failed query leaves its reported total at zero.
+	info.Queried = true;
+	info.QueryResult = svcGetInfo(&info.KernelTotal, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+	if (R_SUCCEEDED(info.QueryResult) && info.KernelTotal != 0)
 	{
-		info.Queried = true;
-		info.QueryResult = svcGetInfo(&info.KernelTotal, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
-		if (R_SUCCEEDED(info.QueryResult) && info.KernelTotal != 0)
-		{
-			info.Total = info.KernelTotal;
-			// Kirikiroid2-NX SysInitImpl: reserve once from the raw process
-			// budget, then let the existing automatic cache calculation use it.
-			info.Assumed = info.Total > 768 * mib ? info.Total - 512 * mib : info.Total / 2;
-			info.Source = "kernel-process";
-		}
+		info.Total = info.KernelTotal;
+		info.Source = "kernel-process";
 	}
+	else info.Source = "kernel-unavailable";
+	info.Assumed = krkrns::MakeReferenceMemoryPolicy(info.Total, "unlimited").assumedBytes;
 	return info;
+}
+
+struct TVPSwitchMemorySessionSnapshot
+{
+	bool active = false;
+	tjs_uint64 total = 0, graphicSystem = 0, graphicLimit = 0;
+	tjs_uint segmentLimit = 0, fontLimit = 0;
+	tjs_int hashBits = 0;
+	bool freeUnusedLayers = false;
+};
+static TVPSwitchMemorySessionSnapshot TVPSwitchMemorySession;
+
+void krkrsdl2_restore_reference_memory_settings() noexcept
+{
+	if (!TVPSwitchMemorySession.active) return;
+	const auto saved = TVPSwitchMemorySession;
+	TVPSwitchMemorySession.active = false;
+	try {
+		TVPTotalPhysMemory = saved.total;
+		TVPGraphicCacheSystemLimit = saved.graphicSystem;
+		TVPSetGraphicCacheLimit(saved.graphicLimit);
+		TVPSetXP3SegmentCacheLimit(saved.segmentLimit);
+		TVPSetFontCacheLimit(saved.fontLimit);
+		TJSObjectHashBitsLimit = saved.hashBits;
+		TVPFreeUnusedLayerCache = saved.freeUnusedLayers;
+	} catch (...) {
+		KRKRNS_LOG("[memory-policy] failed to restore launcher limits");
+	}
+}
+
+void krkrsdl2_apply_reference_memory_settings(const char* usage, const char* source)
+{
+	if (TVPSwitchMemorySession.active)
+		krkrsdl2_restore_reference_memory_settings();
+	const auto policy = krkrns::MakeReferenceMemoryPolicy(TVPSwitchMemoryBudget.Total, usage);
+	tjs_uint64 cache = policy.graphicCacheBytes;
+	tTJSVariant option;
+	if (TVPGetCommandLine(TJS_W("-gclim"), &option) && ttstr(option) != TJS_W("auto"))
+	{
+		const tjs_int64 mb = option.AsInteger();
+		if (mb != -1)
+			cache = (mb < 0 || mb > 512) ? 512ULL * 1024 * 1024 : tjs_uint64(mb) * 1024 * 1024;
+	}
+	TVPSwitchMemorySession = {true, TVPTotalPhysMemory, TVPGraphicCacheSystemLimit,
+		TVPGetGraphicCacheLimit(), TVPGetXP3SegmentCacheLimit(), TVPGetFontCacheLimit(),
+		TJSObjectHashBitsLimit, TVPFreeUnusedLayerCache};
+	// A reference game starts in a fresh process with the image cache off.
+	// Restore the launcher's prior setting when this session ends.
+	TVPSetGraphicCacheLimit(0);
+	TVPTotalPhysMemory = policy.assumedBytes;
+	TVPGraphicCacheSystemLimit = cache;
+	if (TJSObjectHashBitsLimit > policy.hashBitsCeiling)
+		TJSObjectHashBitsLimit = policy.hashBitsCeiling;
+	if (policy.lowMemory)
+	{
+		TVPSetXP3SegmentCacheLimit(0);
+		TVPFreeUnusedLayerCache = true;
+		TVPSetFontCacheForLowMem();
+	}
+	KRKRNS_LOG("[memory-policy] usage=%s source=%s total=%llu assumed=%llu cache=%llu hash=%d segment=%u font=%u",
+		usage ? usage : "unlimited", source ? source : "default",
+		(unsigned long long)TVPSwitchMemoryBudget.Total, (unsigned long long)policy.assumedBytes,
+		(unsigned long long)cache, int(TJSObjectHashBitsLimit),
+		unsigned(TVPGetXP3SegmentCacheLimit()), unsigned(TVPGetFontCacheLimit()));
 }
 #endif
 static void TVPInitProgramArgumentsAndDataPath(bool stop_after_datapath_got);
@@ -1122,6 +1179,17 @@ void TVPBeforeSystemInit()
 				TVPTotalPhysMemory = 0; // assumes zero
 		}
 
+#ifdef __SWITCH__
+		if(TVPTotalPhysMemory < 128*1024*1024ULL)
+		{
+			TVPTotalPhysMemory = 0;
+			if(TJSObjectHashBitsLimit > 0) TJSObjectHashBitsLimit = 0;
+			TVPSegmentCacheLimit = 0;
+			TVPFreeUnusedLayerCache = true;
+		}
+		else if(TVPTotalPhysMemory < 256*1024*1024ULL && TJSObjectHashBitsLimit > 4)
+			TJSObjectHashBitsLimit = 4;
+#else
 		if(TVPTotalPhysMemory <= 36*1024*1024)
 		{
 			// very very low memory, forcing to assume zero memory
@@ -1142,6 +1210,7 @@ void TVPBeforeSystemInit()
 			if(TJSObjectHashBitsLimit > 4)
 				TJSObjectHashBitsLimit = 4;
 		}
+#endif
 	}
 #if 0
 
@@ -1569,12 +1638,16 @@ void TVPAfterSystemInit()
 		else if(totalMemory <= 256*1024*1024)
 			TVPGraphicCacheSystemLimit = 20;
 		else if(totalMemory <= 512*1024*1024)
+		#ifdef __SWITCH__
+			TVPGraphicCacheSystemLimit = 40;
+		#else
 			// KRKR-ns: was 40.  E-mote titles decode hundreds of psb chips, and a
 			// cache that cannot hold the working set makes every frame re-decode
 			// them: [slow] image-decode measures ~26ms per chip, and a burst of
 			// them inside one frame shows up as a ~1s stall with draw=0.2ms --
 			// i.e. all of it in the script layer, none of it in rendering.
 			TVPGraphicCacheSystemLimit = 96;
+		#endif
 		else
 			TVPGraphicCacheSystemLimit = tjs_uint64(totalMemory / (1024*1024*10));	// cachemem = physmem / 10
 		TVPGraphicCacheSystemLimit *= 1024*1024;
