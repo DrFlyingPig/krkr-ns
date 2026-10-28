@@ -254,7 +254,8 @@ if(KRKRNS_EMOTE_ATOMIC_TEXTURE)
         PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_ATOMIC_TEXTURE)
 endif()
 if(NINTENDO_SWITCH AND KRKRNS_EMOTE_RESIDENT_READBACK)
-    set_property(SOURCE src/plugins/emoteplayer/EmoteGLRenderBackend.cpp APPEND
+    set_property(SOURCE src/plugins/emoteplayer/EmoteGLRenderBackend.cpp
+        src/plugins/emoteplayer/emoteplayerclass.cpp APPEND
         PROPERTY COMPILE_DEFINITIONS KRKRNS_EMOTE_RESIDENT_READBACK)
 endif()
 if(KRKRNS_EMOTE_REUSE_READBACK)

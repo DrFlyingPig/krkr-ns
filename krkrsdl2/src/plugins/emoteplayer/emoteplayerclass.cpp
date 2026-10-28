@@ -21,6 +21,10 @@
 #include "KrkrNSProf.h"
 #include "KrkrNSPerf.h"
 #include <SDL.h>
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+#include "EmoteGLRenderBackend.h"
+#include "SDLBitmapCompositor.h"
+#endif
 
 namespace emoteplayer
 {
@@ -57,6 +61,36 @@ static ttstr EmoteFromUtf8(const std::string& value)
     return ttstr(result);
 }
 
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+static krkrsdl3::EmoteLayerIdentity EmoteLayerIdentityForView(
+    const krkrns::BitmapView& view, int width, int height)
+{
+    if (!view.storage || !view.row0 || !view.serial || !view.version ||
+        view.volatileCPU || view.sourceHandle || view.bpp != 32 ||
+        width <= 0 || height <= 0 || width > view.width || height > view.height ||
+        (view.gpuWriteTracked && view.gpuWriteTracked->load(std::memory_order_acquire)))
+        return {};
+    return {view.storage, view.row0, view.serial, view.version, width, height, view.pitch};
+}
+
+static void RecordEmoteLayerDamage(bool partial, bool unchanged,
+                                   std::uint64_t scanned, std::uint64_t full)
+{
+    static std::uint64_t frames = 0, partialFrames = 0, unchangedFrames = 0;
+    static std::uint64_t scannedPixels = 0, fullPixels = 0;
+    ++frames;
+    partialFrames += partial;
+    unchangedFrames += unchanged;
+    scannedPixels += scanned;
+    fullPixels += full;
+    if (frames == 1 || frames % 120 == 0)
+        KRKRNS_LOG("[emote-layer-damage] frames=%llu partial=%llu unchanged=%llu pixels=%llu fullPixels=%llu",
+            (unsigned long long)frames, (unsigned long long)partialFrames,
+            (unsigned long long)unchangedFrames, (unsigned long long)scannedPixels,
+            (unsigned long long)fullPixels);
+}
+#endif
+
 // A Kirikiri layer bitmap is commonly bottom-up: scan line 0 points at the
 // logical top row while GetMainImagePixelBufferPitch() is negative.  Copying
 // the whole render target forward from that pointer corrupts the guard area
@@ -91,8 +125,47 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         return false;
     }
 
+    // Capture the destination generation before the transient writer advances
+    // it or detaches a shared bitmap. The GL target owns the matching record.
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+    auto* damageBackend = dynamic_cast<krkrsdl3::EmoteGLRenderBackend*>(renderer);
+    auto* layerBitmap = damageBackend ? layer->GetMainImage() : nullptr;
+    const auto beforeView = layerBitmap ? layerBitmap->GetBitmap()->GetGPUView()
+                                        : krkrns::BitmapView{};
+#endif
     int sourcePitch = 0;
     uint8_t* source = renderer->LockTarget(target, sourcePitch);
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+    const int predictedWidth = std::min(sourceWidth, static_cast<int>(layer->GetImageWidth()));
+    const int predictedHeight = std::min(sourceHeight, static_cast<int>(layer->GetImageHeight()));
+    const auto previousIdentity = EmoteLayerIdentityForView(beforeView, predictedWidth, predictedHeight);
+    krkrsdl3::EmoteLayerBounds damage{};
+    bool partial = damageBackend && previousIdentity &&
+        damageBackend->GetLayerDamage(target, previousIdentity, damage);
+    int scanLeft = 0, scanTop = 0, scanRight = predictedWidth, scanBottom = predictedHeight;
+    if (partial)
+    {
+        scanLeft = std::clamp(damage.left, 0, predictedWidth);
+        scanTop = std::clamp(damage.top, 0, predictedHeight);
+        scanRight = std::clamp(damage.right, scanLeft, predictedWidth);
+        scanBottom = std::clamp(damage.bottom, scanTop, predictedHeight);
+    }
+    // No source pixel in this Layer changed. Keep the observable modification
+    // flag, but do not manufacture a new CPU generation or force a GPU upload.
+    const std::ptrdiff_t predictedBytes = std::ptrdiff_t(predictedWidth) * 4;
+    if (partial && (scanLeft == scanRight || scanTop == scanBottom) && source &&
+        (std::ptrdiff_t(sourcePitch) >= predictedBytes || std::ptrdiff_t(sourcePitch) <= -predictedBytes) &&
+        (std::ptrdiff_t(beforeView.pitch) >= predictedBytes || std::ptrdiff_t(beforeView.pitch) <= -predictedBytes) &&
+        layerBitmap->GetBitmap()->IsIndependent())
+    {
+        layer->SetImageModified(true);
+        RecordEmoteLayerDamage(true, true, 0,
+            std::uint64_t(predictedWidth) * predictedHeight);
+        damageBackend->CommitLayerDamage(target, previousIdentity);
+        renderer->UnlockTarget(target);
+        return true;
+    }
+#endif
     uint8_t* destination =
         static_cast<uint8_t*>(layer->GetMainImagePixelBufferForTransientWrite());
     const int destinationPitch = layer->GetMainImagePixelBufferPitch();
@@ -117,6 +190,23 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
     static int lastLoggedW = -1, lastLoggedH = -1;
     if (canCopy)
     {
+#if !defined(__SWITCH__) || !defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        const int scanLeft = 0, scanTop = 0, scanRight = copyWidth, scanBottom = copyHeight;
+#else
+        // If layout unexpectedly changed while obtaining the writer, do a
+        // complete compare rather than trusting the earlier clipped bounds.
+        if (copyWidth != predictedWidth || copyHeight != predictedHeight)
+        {
+            partial = false;
+            scanLeft = scanTop = 0;
+            scanRight = copyWidth;
+            scanBottom = copyHeight;
+        }
+        if (damageBackend)
+            RecordEmoteLayerDamage(partial, false,
+                std::uint64_t(scanRight - scanLeft) * (scanBottom - scanTop),
+                std::uint64_t(copyWidth) * copyHeight);
+#endif
         if (!loggedLayout || sourceWidth != lastLoggedW || sourceHeight != lastLoggedH)
         {
             TVPConsoleLog("target-to-layer copy src=%dx%d pitch=%d dst=%ux%u pitch=%d copy=%dx%d",
@@ -150,7 +240,10 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         const Uint64 cvtStart = SDL_GetPerformanceCounter();
         {
             KrkrNSPerfScope perfConvert(KrkrNSPerfOp::EmoteConvert);
-            for (int y = 0; y < copyHeight; ++y)
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+            perfConvert.Bytes(std::uint64_t(scanRight - scanLeft) * (scanBottom - scanTop) * 4);
+#endif
+            for (int y = scanTop; y < scanBottom; ++y)
             {
                 uint8_t* destinationRow =
                     destination + static_cast<std::ptrdiff_t>(y) * destinationStride;
@@ -163,7 +256,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                 // catches transparent pixels left behind when a sprite moves.
                 int rowLeft = copyWidth;
                 int rowRight = 0;
-                int x = 0;
+                int x = scanLeft;
 #ifdef __SWITCH__
                 // Convert four RGBA pixels to Kirikiri BGRA at once.  The prior
                 // memcpy-per-pixel loop was measurable after GPU rendering became
@@ -190,7 +283,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                     uint32x4_t lastChanged3 = firstChanged0;
                     int firstBlockX = -1;
                     int lastBlockX = 0;
-                    for (; x + 16 <= copyWidth; x += 16)
+                    for (; x + 16 <= scanRight; x += 16)
                     {
                         const size_t offset = static_cast<size_t>(x) * 4u;
                         const uint8x16_t bgra0 = vqtbl1q_u8(vld1q_u8(sourceRow + offset), swizzle);
@@ -282,7 +375,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
 #endif
                 uint32x4_t lastChanged = vdupq_n_u32(0);
                 int lastChangedX = -1;
-                for (; x + 4 <= copyWidth; x += 4)
+                for (; x + 4 <= scanRight; x += 4)
                 {
                     const uint8x16_t rgba = vld1q_u8(sourceRow + static_cast<size_t>(x) * 4u);
                     const uint8x16_t bgra = vqtbl1q_u8(rgba, swizzle);
@@ -311,7 +404,7 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
 #endif
                 auto* destinationPixels = reinterpret_cast<std::uint32_t*>(destinationRow);
                 const auto* sourcePixels = reinterpret_cast<const std::uint32_t*>(sourceRow);
-                for (; x < copyWidth; ++x)
+                for (; x < scanRight; ++x)
                 {
                     const std::uint32_t sourcePixel = sourcePixels[x];
                     const std::uint32_t convertedPixel =
@@ -340,6 +433,16 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
         krkrsdl2_prof_emote_convert(
             (double)(SDL_GetPerformanceCounter() - cvtStart) * 1000.0 /
             (double)SDL_GetPerformanceFrequency());
+#if defined(__SWITCH__) && defined(KRKRNS_EMOTE_RESIDENT_READBACK)
+        if (damageBackend && layerBitmap)
+        {
+            const auto afterView = layerBitmap->GetBitmap()->GetGPUView();
+            auto identity = EmoteLayerIdentityForView(afterView, copyWidth, copyHeight);
+            if (afterView.row0 != destination || afterView.pitch != destinationPitch)
+                identity = {};
+            damageBackend->CommitLayerDamage(target, identity);
+        }
+#endif
     }
     else if (!loggedFailure)
     {

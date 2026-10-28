@@ -1,5 +1,6 @@
 #pragma once
 #include "TVPCompositor.h"
+#include "EmoteLayerDamage.h"
 #include <cstdint>
 #include <memory>
 
@@ -28,6 +29,11 @@ public:
     // Never retire a context while client images still exist.
     bool RetireUnusedContext() noexcept;
     EmoteResidentReadbackStats GetResidentReadbackStats() const noexcept;
+    // Damage is valid only for the immediately preceding synchronized Layer
+    // generation; unrelated target locks and destination writes invalidate it.
+    bool GetLayerDamage(void* target, const EmoteLayerIdentity& layer,
+                        EmoteLayerBounds& bounds) const noexcept;
+    void CommitLayerDamage(void* target, const EmoteLayerIdentity& layer) noexcept;
     void* CreateTarget(int width, int height) override;
     bool GetTargetSize(void* target, int& width, int& height) const override;
     void DestroyTarget(void* target) override;

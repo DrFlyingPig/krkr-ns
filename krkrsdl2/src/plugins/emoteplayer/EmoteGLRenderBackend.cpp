@@ -145,6 +145,7 @@ struct EmoteGLRenderBackend::Impl
         int dirtyX0 = 0, dirtyY0 = 0, dirtyX1 = 0, dirtyY1 = 0;
         bool dirtyValid = false;
         bool cleared = false;
+        EmoteLayerDamage layerDamage;
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
         GLuint previousTexture = 0, damageTexture = 0, damageFbo = 0;
         std::size_t residentBytes = 0;
@@ -930,7 +931,10 @@ struct EmoteGLRenderBackend::Impl
                     copyResidentBaseline(image);
                 }
                 else if (!image.dirtyValid && !image.cleared)
+                {
                     ++residentStats.cacheHits;
+                    image.layerDamage.SetDamage({});
+                }
                 else
                 {
                     readDamageMap(image);
@@ -939,7 +943,11 @@ struct EmoteGLRenderBackend::Impl
                         image.damagePixels.size(), std::size_t(image.damageWidth) * 4,
                         image.width, image.height, readTileWidth, plan, 8))
                         throw std::runtime_error("E-mote damage readback plan invalid");
-                    if (plan.rects.empty()) ++residentStats.cacheHits;
+                    if (plan.rects.empty())
+                    {
+                        ++residentStats.cacheHits;
+                        image.layerDamage.SetDamage({});
+                    }
                     else
                     {
                         for (const auto& rect : plan.rects)
@@ -951,6 +959,15 @@ struct EmoteGLRenderBackend::Impl
                         // Only publish after all CPU rectangles and the whole
                         // GPU baseline have reached the same current frame.
                         copyResidentBaseline(image);
+                        EmoteLayerBounds bounds{image.width, image.height, 0, 0};
+                        for (const auto& rect : plan.rects)
+                        {
+                            bounds.left = std::min(bounds.left, rect.x);
+                            bounds.top = std::min(bounds.top, rect.y);
+                            bounds.right = std::max(bounds.right, rect.x + rect.w);
+                            bounds.bottom = std::max(bounds.bottom, rect.y + rect.h);
+                        }
+                        image.layerDamage.SetDamage(bounds);
                     }
                 }
             }
@@ -1316,6 +1333,7 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
 {
     auto* target = impl->find(handle);
     if (!target || !target->target) return nullptr;
+    target->layerDamage.BeginLock();
     impl->bind(target);
     pitch = target->width * 4;
     {
@@ -1340,6 +1358,17 @@ uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
     return target->pixels.data();
 }
 void EmoteGLRenderBackend::UnlockTarget(void*) { impl->end(); }
+bool EmoteGLRenderBackend::GetLayerDamage(void* handle, const EmoteLayerIdentity& layer,
+                                         EmoteLayerBounds& bounds) const noexcept
+{
+    auto* target = impl->find(handle);
+    return target && target->target && target->layerDamage.GetDamage(layer, bounds);
+}
+void EmoteGLRenderBackend::CommitLayerDamage(void* handle, const EmoteLayerIdentity& layer) noexcept
+{
+    auto* target = impl->find(handle);
+    if (target && target->target) target->layerDamage.Commit(layer);
+}
 void* EmoteGLRenderBackend::GetTargetTexture(void* target) { return impl->find(target); }
 void EmoteGLRenderBackend::UpdateTargetTexture(void* t, const uint8_t* p, int w, int h, int pitch) { impl->update(t, p, w, h, pitch); }
 void EmoteGLRenderBackend::UpdateTexture(void* t, const uint8_t* p, int w, int h, int pitch) { impl->update(t, p, w, h, pitch); }
@@ -1347,6 +1376,9 @@ uint8_t* EmoteGLRenderBackend::LockTexture(void* texture, int& pitch)
 {
     auto* image = impl->find(texture);
     if (!image) return nullptr;
+    // This API exports a writable CPU mirror. Even a read-only caller cannot
+    // promise that a previously obtained pointer was not used to modify it.
+    if (image->target) image->layerDamage.Invalidate();
     pitch = image->width * 4;
     return image->pixels.data();
 }
