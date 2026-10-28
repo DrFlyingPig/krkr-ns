@@ -7,6 +7,8 @@
 void krkrsdl2_resource_policy_select_renderer(const char* native_game_dir) noexcept;
 void krkrsdl2_apply_reference_memory_settings(const char* usage, const char* source);
 void krkrsdl2_restore_reference_memory_settings() noexcept;
+void krkrsdl2_apply_reference_split_settings(bool software);
+void krkrsdl2_restore_reference_split_settings() noexcept;
 bool krkrsdl2_force_software_composition() noexcept;
 unsigned krkrsdl2_resource_policy_frame_rate() noexcept;
 void krkrsdl2_resource_policy_begin_session() noexcept;

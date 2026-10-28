@@ -6754,11 +6754,20 @@ void tTJSNI_BaseLayer::InternalComplete2(tTVPComplexRect & updateregion,
 			{
 				// split
 				tjs_int rw = r.get_width();
+			#ifdef __SWITCH__
+				// Match the reference's 16-scanline wide-rectangle split.
+				if(rw < 40) oh = 256;
+				else if(rw < 80) oh = 128;
+				else if(rw < 160) oh = 64;
+				else if(rw < 320) oh = 32;
+				else oh = 16;
+			#else
 				if(rw < 40) oh = 128;
 				else if(rw < 80) oh = 64;
 				else if(rw < 160) oh = 32;
 				else if(rw < 320) oh = 16;
 				else oh = 8;
+			#endif
 			}
 			else
 			{

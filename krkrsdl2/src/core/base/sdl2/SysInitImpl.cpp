@@ -1023,6 +1023,39 @@ struct TVPSwitchMemorySessionSnapshot
 };
 static TVPSwitchMemorySessionSnapshot TVPSwitchMemorySession;
 
+struct TVPSwitchSplitSessionSnapshot
+{
+	bool active = false;
+	tTVPGraphicSplitOperationType previous = gsotNone;
+};
+static TVPSwitchSplitSessionSnapshot TVPSwitchSplitSession;
+
+void krkrsdl2_restore_reference_split_settings() noexcept
+{
+	if (!TVPSwitchSplitSession.active) return;
+	TVPGraphicSplitOperationType = TVPSwitchSplitSession.previous;
+	TVPSwitchSplitSession.active = false;
+}
+
+void krkrsdl2_apply_reference_split_settings(bool software)
+{
+	if (TVPSwitchSplitSession.active) krkrsdl2_restore_reference_split_settings();
+	TVPSwitchSplitSession = {true, TVPGraphicSplitOperationType};
+	// A reference game starts in a fresh process. OpenGL always disables the
+	// CPU stripe splitter; software applies the command-line override.
+	TVPGraphicSplitOperationType = gsotNone;
+	tTJSVariant option;
+	if (software && TVPGetCommandLine(TJS_W("-gsplit"), &option))
+	{
+		const ttstr value(option);
+		if (value == TJS_W("int")) TVPGraphicSplitOperationType = gsotInterlace;
+		else if (value == TJS_W("yes") || value == TJS_W("simple"))
+			TVPGraphicSplitOperationType = gsotSimple;
+		else if (value == TJS_W("bidi")) TVPGraphicSplitOperationType = gsotBiDirection;
+	}
+	KRKRNS_LOG("[renderer] split=%d software=%d", (int)TVPGraphicSplitOperationType, (int)software);
+}
+
 void krkrsdl2_restore_reference_memory_settings() noexcept
 {
 	if (!TVPSwitchMemorySession.active) return;
