@@ -1,11 +1,59 @@
 /* SPDX-License-Identifier: MIT */
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #ifdef __SWITCH__
 #include <arm_neon.h>
 #else
 #include "simde/arm/neon.h"
 #endif
+
+// Kirikiroid2-NX processes eight ARGB pixels per NEON instruction group for
+// ConstAlphaBlend_SD. Keep this engine's existing scalar function for tails
+// and unusual opacity values, and do not change the order of overlapping rows.
+template<typename Functor>
+static inline bool TVPConstAlphaBlendSDNEON(tjs_uint32* dest,
+    const tjs_uint32* src1, const tjs_uint32* src2, tjs_int len,
+    tjs_int opa, const Functor& scalar)
+{
+    if (len < 8 || opa < 0 || opa > 255) return false;
+
+    const auto dst = reinterpret_cast<std::uintptr_t>(dest);
+    const std::size_t bytes = static_cast<std::size_t>(len) * sizeof(*dest);
+    const auto overlapsShifted = [dst, bytes](const tjs_uint32* source) {
+        const auto address = reinterpret_cast<std::uintptr_t>(source);
+        if (address == dst) return false;
+        return address < dst ? dst - address < bytes : address - dst < bytes;
+    };
+    if (overlapsShifted(src1) || overlapsShifted(src2)) return false;
+
+    const uint8x8_t alpha = vdup_n_u8(static_cast<std::uint8_t>(opa));
+    while (len >= 8)
+    {
+        const uint8x8x4_t first = vld4_u8(reinterpret_cast<const std::uint8_t*>(src1));
+        const uint8x8x4_t second = vld4_u8(reinterpret_cast<const std::uint8_t*>(src2));
+        uint8x8x4_t output;
+        for (unsigned channel = 0; channel < 4; ++channel)
+            output.val[channel] = vadd_u8(first.val[channel],
+                vsubhn_u16(vmull_u8(second.val[channel], alpha),
+                           vmull_u8(first.val[channel], alpha)));
+        vst4_u8(reinterpret_cast<std::uint8_t*>(dest), output);
+        dest += 8;
+        src1 += 8;
+        src2 += 8;
+        len -= 8;
+    }
+    while (len-- > 0)
+    {
+        *dest = scalar(*src1, *src2);
+        ++dest;
+        ++src1;
+        ++src2;
+    }
+    return true;
+}
 
 // Retain the SSE2 scalar edges and four-pixel groups: opaque shortcuts and
 // opacity rounding in the old scalar path differ from the vector path.

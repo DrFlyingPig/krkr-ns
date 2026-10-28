@@ -180,6 +180,7 @@ list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSResourcePolicy.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/SDLBitmapCompositor.cpp)
 
 option(KRKRNS_ALPHA_NEON "Use the native Switch alpha loops" ON)
+option(KRKRNS_CROSSFADE_NEON "Use the native Switch crossfade loops" ON)
 option(KRKRNS_GAME_LOG_BATCH "Batch ordinary Switch engine log writes" ON)
 option(KRKRNS_INTERPOLATION_NEON "Use native Switch bilinear copy loops" ON)
 option(KRKRNS_ALPHA_HOT_NEON "Use native Switch opacity and destination-alpha loops" ON)
@@ -216,6 +217,10 @@ endif()
 if(NINTENDO_SWITCH AND KRKRNS_ALPHA_HOT_NEON)
     set_property(SOURCE external/krkrz/visual/gl/blend_function_sse2.cpp APPEND
         PROPERTY COMPILE_DEFINITIONS KRKRNS_ALPHA_HOT_NEON)
+endif()
+if(NINTENDO_SWITCH AND KRKRNS_CROSSFADE_NEON)
+    set_property(SOURCE external/krkrz/visual/gl/blend_function_sse2.cpp APPEND
+        PROPERTY COMPILE_DEFINITIONS KRKRNS_CROSSFADE_NEON)
 endif()
 if(KRKRNS_PSB_APPEND)
     set_property(SOURCE src/plugins/psbfile/PsbFilePlugin.cpp APPEND

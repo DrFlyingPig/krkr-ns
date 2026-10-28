@@ -941,6 +941,9 @@ static void TVPAlphaBlend_do_neon_c(tjs_uint32* dest, const tjs_uint32* src,
 
 static void TVPConstAlphaBlend_SD_sse2_c(tjs_uint32 *dest, const tjs_uint32 *src1, const tjs_uint32 *src2, tjs_int len, tjs_int opa){
 	sse2_const_alpha_blend_functor func(opa);
+#if defined(__SWITCH__) && defined(KRKRNS_CROSSFADE_NEON) && !defined(KRKRNS_ALPHA_LEGACY)
+	if (TVPConstAlphaBlendSDNEON(dest, src1, src2, len, opa, func)) return;
+#endif
 	sd_blend_func_sse2( dest, src1, src2, len, func );
 }
 static void TVPCopyColor_sse2_c(tjs_uint32 *dest, const tjs_uint32 *src, tjs_int len) {
@@ -1374,6 +1377,9 @@ void TVPGL_SSE2_Init() {
 
 		TVPConstAlphaBlend_SD =  TVPConstAlphaBlend_SD_sse2_c;
 		TVPConstAlphaBlend_SD_a = TVPConstAlphaBlend_SD_sse2_c;
+#if defined(__SWITCH__) && defined(KRKRNS_CROSSFADE_NEON) && !defined(KRKRNS_ALPHA_LEGACY)
+		KRKRNS_LOG("[render] native AArch64 NEON crossfade spans active");
+#endif
 		// TVPConstAlphaBlend_SD_d
 
 		TVPCopyColor = TVPCopyColor_sse2_c;
