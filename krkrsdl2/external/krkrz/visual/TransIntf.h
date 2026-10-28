@@ -88,6 +88,9 @@ public:
 	~tTVPScanLineProviderForBaseBitmap();
 
 	void Attach(tTVPBaseBitmap *bmp); // attach bitmap
+#ifdef __SWITCH__
+	tTVPBaseBitmap * GetBaseBitmap() const { return Bitmap; }
+#endif
 
 
 	tjs_error TJS_INTF_METHOD AddRef();
@@ -112,6 +115,9 @@ public:
 TJS_EXP_FUNC_DEF(void, TVPAddTransHandlerProvider,(iTVPTransHandlerProvider *pro));
 TJS_EXP_FUNC_DEF(void, TVPRemoveTransHandlerProvider, (iTVPTransHandlerProvider *pro));
 iTVPTransHandlerProvider * TVPFindTransHandlerProvider(const ttstr &name);
+#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
+bool KrkrIsBuiltinGPUCrossfade(iTVPDivisibleTransHandler *handler);
+#endif
 //---------------------------------------------------------------------------
 
 
