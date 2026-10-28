@@ -363,9 +363,10 @@ tjs_int TVPGetProcessorNum( void )
 		const Result rc = svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
 		if (R_SUCCEEDED(rc) && mask)
 			return static_cast<tjs_int>(__builtin_popcountll(mask));
-		// Without a capability mask, one submitting thread is the only safe
-		// execution width; a hardware CPU count can include forbidden cores.
-		return 1;
+		// Kirikiroid2-NX falls back to the three application cores when its
+		// hardware-concurrency query is unavailable. Draw partitions remain
+		// sequential on Switch and do not set thread affinity.
+		return 3;
 	}();
 	return processors;
 #else
