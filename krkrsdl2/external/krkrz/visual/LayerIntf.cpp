@@ -6060,7 +6060,8 @@ bool tTJSNI_BaseLayer::IsDirectGPUPrimary(const char *&reason) const
 
 bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 	const char *&reason, tjs_uint &nodes, tjs_uint *groups,
-	const tTJSNI_BaseLayer **failedLayer, bool underStraightGroup)
+	const tTJSNI_BaseLayer **failedLayer, bool underStraightGroup,
+	tjs_uint *transitions)
 {
 	if(visiblecheck && !IsSeen()) return true;
 	tTVPRect rect;
@@ -6070,7 +6071,6 @@ bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 		if(failedLayer) *failedLayer = this;
 		return false;
 	};
-	if(InTransition) return reject("transition");
 	if(DisplayType != ltOpaque && DisplayType != ltAlpha &&
 		DisplayType != ltAddAlpha && DisplayType != ltBinder)
 		return reject("blend-mode");
@@ -6081,6 +6081,20 @@ bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 	// original straight-alpha group's normalization. Preserve its CPU path.
 	if(underStraightGroup && DisplayType == ltAddAlpha)
 		return reject("group-straight-addalpha");
+	if(InTransition)
+	{
+		// A with-children transition pins a private layer cache for its entire
+		// lifetime. Its existing CPU transition can produce one bitmap for the
+		// GPU canvas while sibling layers remain in the direct traversal.
+		// Other transitions and callers unable to track this case keep the
+		// original whole-scene fallback.
+		if(!transitions || !TransWithChildren || !DivisibleTransHandler ||
+			!GetCacheEnabled() || DisplayType == ltBinder)
+			return reject("transition");
+		++*transitions;
+		++nodes;
+		return true;
+	}
 	const bool group = Opacity != 255 && GetVisibleChildrenCount() != 0;
 	if(group)
 	{
@@ -6103,7 +6117,7 @@ bool tTJSNI_BaseLayer::CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 	ParentRectToChildRect(rect);
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_BEGIN(child)
 		if(!child->CanDrawDirectGPU(rect, true, reason, nodes, groups, failedLayer,
-			childrenUnderStraightGroup)) return false;
+			childrenUnderStraightGroup, transitions)) return false;
 	TVP_LAYER_FOR_EACH_CHILD_NOLOCK_END
 	return true;
 }
@@ -6232,6 +6246,38 @@ void tTJSNI_BaseLayer::DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
 	if(visiblecheck && !IsSeen()) return;
 	tTVPRect rect;
 	if(!TVPIntersectRect(&rect, r, Rect)) return;
+	if(InTransition)
+	{
+		// Draw() retains the transition handler, its cached children and all
+		// completion semantics. Translate its parent coordinates to the direct
+		// canvas only when reporting the completed subtree.
+		class tOffsetDrawable : public tTVPDrawable
+		{
+			tTVPDrawable *Target;
+			tjs_int X, Y;
+		public:
+			tOffsetDrawable(tTVPDrawable *target, tjs_int x, tjs_int y)
+				: Target(target), X(x), Y(y) {}
+			tTVPBaseBitmap *GetDrawTargetBitmap(const tTVPRect &rect, tTVPRect &clip) override
+			{
+				tTVPRect translated(rect);
+				translated.add_offsets(X, Y);
+				return Target->GetDrawTargetBitmap(translated, clip);
+			}
+			tTVPLayerType GetTargetLayerType() override { return Target->GetTargetLayerType(); }
+			void DrawCompleted(const tTVPRect &dest, tTVPBaseBitmap *bitmap,
+				const tTVPRect &clip, tTVPLayerType type, tjs_int opacity) override
+			{
+				tTVPRect translated(dest);
+				translated.add_offsets(X, Y);
+				Target->DrawCompleted(translated, bitmap, clip, type, opacity);
+			}
+		} translated(target, x - r.left, y - r.top);
+		try { Draw(&translated, rect, false); }
+		catch(...) { CurrentDrawTarget = NULL; TransDrawable.OrgDrawable = NULL; throw; }
+		TransDrawable.OrgDrawable = NULL;
+		return;
+	}
 	x += rect.left - r.left;
 	y += rect.top - r.top;
 	tTVPRect destination(rect);
@@ -6838,7 +6884,7 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 	{
 	#ifdef __SWITCH__
 		const char *directReason = "completion-cpu";
-		tjs_uint directNodes = 0, directGroups = 0;
+		tjs_uint directNodes = 0, directGroups = 0, directTransitions = 0;
 		const tTJSNI_BaseLayer *failedLayer = NULL;
 		bool direct = false;
 		if(krkrns::GPUCompletionReceiverSlot() &&
@@ -6846,8 +6892,16 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 		{
 			if(IsDirectGPUPrimary(directReason))
 				direct = CanDrawDirectGPU(Rect, false, directReason, directNodes,
-					&directGroups, &failedLayer);
+					&directGroups, &failedLayer, false, &directTransitions);
 			else failedLayer = this;
+		}
+		// The private GPU group graph is built from unmodified layer images;
+		// it cannot yet contain a CPU-produced transition bitmap.
+		if(direct && directGroups && directTransitions)
+		{
+			direct = false;
+			directReason = "transition-group";
+			failedLayer = this;
 		}
 		// Keep the known ordinary traversal unchanged. Only subtrees requiring
 		// whole-group opacity use private GPU scene targets.
@@ -6894,22 +6948,26 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 		static tjs_uint64 directFrames = 0, fallbackFrames = 0, directLayerCount = 0;
 		static const char *lastReason = NULL;
 		static bool lastDirect = false;
+		static tjs_uint lastTransitions = 0;
 		if(direct) { ++directFrames; directLayerCount += directNodes; }
 		else ++fallbackFrames;
 		if(!lastReason || direct != lastDirect ||
+			directTransitions != lastTransitions ||
 			std::strcmp(lastReason, directReason) != 0 ||
 			(directFrames + fallbackFrames) % 120 == 0)
 		{
 			const std::string failedName = failedLayer ? failedLayer->Name.AsNarrowStdString() : std::string();
-			KRKRNS_LOG("[gpu-layer] traversal=%s reason=%s nodes=%u direct=%llu fallback=%llu layers=%llu groups=%u failed-type=%d failed-name=%.80s",
+			KRKRNS_LOG("[gpu-layer] traversal=%s reason=%s nodes=%u direct=%llu fallback=%llu layers=%llu groups=%u failed-type=%d failed-name=%.80s transitions=%u",
 				direct ? "direct" : "legacy", directReason, (unsigned)directNodes,
 				(unsigned long long)directFrames, (unsigned long long)fallbackFrames,
 				(unsigned long long)directLayerCount, (unsigned)directGroups,
-				failedLayer ? (int)failedLayer->DisplayType : -1, failedName.c_str());
+				failedLayer ? (int)failedLayer->DisplayType : -1, failedName.c_str(),
+				(unsigned)directTransitions);
 			if(std::strcmp(directReason, "scene-prepare") == 0)
 				KRKRNS_LOG("[gpu-layer] scene-prepare-error=%.160s", SDL_GetError());
 			lastReason = directReason;
 			lastDirect = direct;
+			lastTransitions = directTransitions;
 		}
 	#endif
 	}

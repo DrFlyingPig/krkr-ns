@@ -936,7 +936,8 @@ private:
 	bool IsDirectGPUPrimary(const char *&reason) const;
 	bool CanDrawDirectGPU(const tTVPRect &r, bool visiblecheck,
 		const char *&reason, tjs_uint &nodes, tjs_uint *groups = NULL,
-		const tTJSNI_BaseLayer **failedLayer = NULL, bool underStraightGroup = false);
+		const tTJSNI_BaseLayer **failedLayer = NULL, bool underStraightGroup = false,
+		tjs_uint *transitions = NULL);
 	bool BuildDirectGPUScene(std::vector<krkrns::SceneGroup> &groups,
 		std::size_t target, tjs_int x, tjs_int y, const tTVPRect &r,
 		bool visiblecheck, const char *&reason,
