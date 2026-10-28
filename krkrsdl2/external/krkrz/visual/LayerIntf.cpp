@@ -184,12 +184,19 @@ private:
 			TVPAddCompactEventHook(this);
 			TempCompactInit = true;
 		}
-		if(GPUTempLevel == GPUTemporaries.size())
+		std::size_t slot = GPUTempLevel;
+		while(slot < GPUTemporaries.size() &&
+			(GPUTemporaries[slot]->GetWidth() != w || GPUTemporaries[slot]->GetHeight() != h))
+			++slot;
+		if(slot == GPUTemporaries.size() &&
+			GPUTemporaries.size() < (GPUTempLevel < 4 ? 4u : GPUTempLevel + 1u))
 		{
 			std::unique_ptr<tTVPBaseBitmap> bitmap(new tTVPBaseBitmap(w, h, 32));
 			GPUTemporaries.push_back(bitmap.get());
 			bitmap.release();
 		}
+		if(slot == GPUTemporaries.size()) slot = GPUTempLevel;
+		if(slot != GPUTempLevel) std::swap(GPUTemporaries[slot], GPUTemporaries[GPUTempLevel]);
 		auto *bitmap = GPUTemporaries[GPUTempLevel];
 		if(bitmap->GetWidth() != w || bitmap->GetHeight() != h)
 			bitmap->SetSize(w, h, false);
