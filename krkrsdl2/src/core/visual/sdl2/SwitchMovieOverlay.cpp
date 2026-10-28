@@ -13,6 +13,9 @@
 #include "StorageIntf.h"
 #include "KrkrNSLog.h"
 #include "NativeEventQueue.h"
+#ifdef __SWITCH__
+#include "ThreadIntf.h"
+#endif
 
 #include "AudioDevice.h"
 
@@ -325,13 +328,29 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
         return false;
     }
     videoCodec_ = avcodec_alloc_context3(codec);
-    if (!videoCodec_ || avcodec_parameters_to_context(videoCodec_, st->codecpar) < 0 ||
-        avcodec_open2(videoCodec_, codec, nullptr) < 0)
+    if (!videoCodec_ || avcodec_parameters_to_context(videoCodec_, st->codecpar) < 0)
     {
         KRKRNS_LOG("[movie] video decoder open failed");
         CloseCodecs();
         return false;
     }
+#ifdef __SWITCH__
+    // Kirikiroid2-NX's software movie decoder requests 1.5 threads per
+    // available processor, bounded to 1..16. Horizon's generic CPU detection
+    // can report one core, so use the engine's process-capability count.
+    const int requestedVideoThreads = std::max(1, std::min(TVPGetProcessorNum() * 3 / 2, 16));
+    videoCodec_->thread_count = requestedVideoThreads;
+#endif
+    if (avcodec_open2(videoCodec_, codec, nullptr) < 0)
+    {
+        KRKRNS_LOG("[movie] video decoder open failed");
+        CloseCodecs();
+        return false;
+    }
+#ifdef __SWITCH__
+    KRKRNS_LOG("[movie] video threads requested=%d actual=%d type=%d",
+               requestedVideoThreads, videoCodec_->thread_count, videoCodec_->active_thread_type);
+#endif
 
     // Audio track (best effort): when present and decodable, it is decoded
     // alongside the video and streamed through the engine's audio device.
