@@ -385,7 +385,14 @@ tjs_int TVPGetThreadNum( void )
 #ifdef KRKRZ_USE_SDL_THREADS
 	const tjs_int processors = std::max<tjs_int>(1, TVPGetProcessorNum());
 	const tjs_int threadNum = TVPDrawThreadNum ? TVPDrawThreadNum : processors;
+	#ifdef __SWITCH__
+	// Switch draw tasks run as ordered partitions on the caller, matching
+	// the reference's OpenMP-disabled build. An explicit partition count may
+	// therefore exceed the process core count; it does not spawn workers.
+	return std::max<tjs_int>(1, std::min(threadNum, TVPMaxThreadNum));
+	#else
 	return std::max<tjs_int>(1, std::min(threadNum, std::min(processors, TVPMaxThreadNum)));
+	#endif
 #else
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	return 1;
