@@ -101,6 +101,17 @@ class tTVPApplication {
 	AcceleratorKeyTable accel_key_;
 #endif
 	bool tarminate_;
+#ifdef __SWITCH__
+	unsigned engine_execution_depth_ = 0;
+	class EngineExecutionGuard {
+		unsigned &depth_;
+	public:
+		explicit EngineExecutionGuard(unsigned &depth) : depth_(depth) { ++depth_; }
+		~EngineExecutionGuard() { --depth_; }
+		EngineExecutionGuard(const EngineExecutionGuard&) = delete;
+		EngineExecutionGuard& operator=(const EngineExecutionGuard&) = delete;
+	};
+#endif
 	bool application_activating_;
 	bool has_map_report_process_;
 
@@ -139,6 +150,9 @@ public:
 	bool IsAttachConsole() { return is_attach_console_; }
 
 	bool IsTarminate() const { return tarminate_; }
+#ifdef __SWITCH__
+	bool IsEngineExecuting() const { return engine_execution_depth_ != 0; }
+#endif
 
 #ifdef _WIN32
 	HWND GetHandle();
@@ -233,6 +247,8 @@ public:
 	void LoadImageRequest( class iTJSDispatch2 *owner, class tTJSNI_Bitmap* bmp, const ttstr &name );
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 	tTVPAsyncImageLoader* GetAsyncImageLoader() const { return image_load_thread_; }
+	// Called after the outer event pump returns, before plugin/VM teardown.
+	void StopAsyncImageLoader() noexcept;
 #endif
 
 	void SyncSavedata()

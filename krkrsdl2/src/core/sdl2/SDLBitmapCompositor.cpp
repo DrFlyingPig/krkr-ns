@@ -13,6 +13,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <zlib.h>
 #if defined(__SWITCH__) && !defined(KRKRNS_BITMAP_GPU_TEST_BUDGET)
 #include <switch.h>
 #endif
@@ -65,6 +66,117 @@ struct ResidentFrameSnapshot
         : state(std::move(value)) { state->snapshots.fetch_add(1, std::memory_order_relaxed); }
     ~ResidentFrameSnapshot() { state->snapshots.fetch_sub(1, std::memory_order_relaxed); }
 };
+
+struct LoadedBitmapSourceState
+{
+    const void* storage = nullptr;
+    std::uint64_t serial = 0, version = 0;
+    int width = 0, height = 0, pitch = 0;
+    std::uint32_t bytes = 0;
+    AllocateLoadedPixels allocate = nullptr;
+    FreeLoadedPixels release = nullptr;
+    mutable std::mutex cpuMutex;
+    mutable void* cpu = nullptr;
+    mutable bool cpuPublished = false;
+    bool ownsCPU = false;
+    mutable std::shared_ptr<const std::vector<std::uint8_t>> compressed;
+    // Accessed by the renderer owner under Impl::mutex. Handle copies share
+    // this control, rather than adding unaccounted immutable-frame pins.
+    std::shared_ptr<ResidentFrameState> texture;
+    ~LoadedBitmapSourceState() { if (ownsCPU && cpu && release) release(cpu); }
+
+    const void* CPUBuffer() const noexcept
+    {
+        try {
+            std::shared_ptr<const std::vector<std::uint8_t>> recovery;
+            const void* existing = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(cpuMutex);
+                if (cpu) {
+                    cpuPublished = true;
+                    existing = cpu;
+                    recovery = std::move(compressed);
+                } else recovery = compressed;
+            }
+            if (existing) return existing; // Drops obsolete compressed bytes unlocked.
+            if (!recovery || !allocate || !release) return nullptr;
+            // AllocNoCompact can still take the engine allocator lock. Never
+            // hold an asset lock across it: ordinary allocation can compact
+            // caches while owning that allocator lock on another thread.
+            void* restored = allocate(bytes, width, height);
+            if (!restored) return nullptr;
+            uLongf count = bytes;
+            if (uncompress(static_cast<Bytef*>(restored), &count,
+                    recovery->data(), static_cast<uLong>(recovery->size())) != Z_OK || count != bytes) {
+                release(restored);
+                return nullptr;
+            }
+            const void* published = nullptr;
+            std::shared_ptr<const std::vector<std::uint8_t>> obsolete;
+            {
+                std::lock_guard<std::mutex> lock(cpuMutex);
+                // Concurrent readers may both restore; only one allocation
+                // becomes the stable mirror. Release a losing copy unlocked.
+                if (!cpu) { cpu = restored; restored = nullptr; }
+                cpuPublished = true;
+                // The permanent immutable mirror is now the exact recovery.
+                // In-flight restorers retain their own compressed snapshot.
+                obsolete = std::move(compressed);
+                published = cpu;
+            }
+            if (restored) release(restored);
+            return published;
+        } catch (...) { return nullptr; }
+    }
+    std::uint8_t* Row0(const void* base) const noexcept
+    {
+        auto* result = static_cast<std::uint8_t*>(const_cast<void*>(base));
+        if (result && pitch < 0) result += std::size_t(height - 1) * std::size_t(-std::int64_t(pitch));
+        return result;
+    }
+    bool Matches(const BitmapView& view) const noexcept
+    {
+        return storage == view.storage && serial == view.serial && version == view.version &&
+            width == view.width && height == view.height && pitch == view.pitch && view.bpp == 32;
+    }
+};
+
+const void* LoadedBitmapSource::CPUBuffer() const noexcept
+    { return state_ ? state_->CPUBuffer() : nullptr; }
+const void* LoadedBitmapSource::PeekCPUBuffer() const noexcept
+{
+    try {
+        if (!state_) return nullptr;
+        std::lock_guard<std::mutex> lock(state_->cpuMutex);
+        return state_->cpu;
+    } catch (...) { return nullptr; }
+}
+bool LoadedBitmapSource::Matches(const BitmapView& view) const noexcept
+    { return state_ && state_->Matches(view); }
+std::uint64_t LoadedBitmapSource::CPUBackingBytes() const noexcept
+{
+    try {
+        if (!state_) return 0;
+        std::lock_guard<std::mutex> lock(state_->cpuMutex);
+        return (state_->cpu ? state_->bytes : 0) +
+            (state_->compressed ? std::uint64_t(state_->compressed->capacity()) : 0);
+    } catch (...) { return 0; }
+}
+bool LoadedBitmapSource::ReleaseDecodedCPU() noexcept
+{
+    try {
+        if (!state_) return false;
+        void* pixels = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(state_->cpuMutex);
+            if (!state_->compressed || state_->cpuPublished || !state_->cpu) return false;
+            pixels = state_->cpu;
+            state_->cpu = nullptr;
+        }
+        state_->release(pixels);
+        return true;
+    } catch (...) { return false; }
+}
 
 namespace
 {
@@ -141,7 +253,7 @@ void DrainRetired(const std::shared_ptr<RendererEpoch>& epoch)
 bool ValidView(const BitmapView& view)
 {
     const auto pitch = view.pitch < 0 ? -std::int64_t(view.pitch) : std::int64_t(view.pitch);
-    return view.storage && view.serial && view.row0 && view.bpp == 32 &&
+    return view.storage && view.serial && (view.sourceHandle ? view.sourceHandle.Matches(view) : view.row0 != nullptr) && view.bpp == 32 &&
         view.width > 0 && view.height > 0 &&
         std::int64_t(view.width) * 4 <= pitch &&
         pitch <= (std::numeric_limits<int>::max)() &&
@@ -248,6 +360,7 @@ struct SDLBitmapCompositor::Impl
         bool rgbaValid = false, opaqueValid = false, sceneOpaqueValid = false;
         std::uint64_t rgbaVersion = 0, opaqueVersion = 0, used = 0;
         std::shared_ptr<ResidentFrameState> target, rgba, opaque, sceneOpaque;
+        std::weak_ptr<LoadedBitmapSourceState> loaded;
     };
     mutable std::mutex mutex;
     SDL_Renderer* renderer = nullptr;
@@ -313,8 +426,14 @@ struct SDLBitmapCompositor::Impl
     Entry* Get(const BitmapView& view)
     {
         if (!Fits(view)) return nullptr;
+        if (view.sourceHandle && !view.sourceHandle.Matches(view)) return nullptr;
         auto result = entries.emplace(Identity(view), Entry{});
         auto& entry = result.first->second;
+        // A pre-promotion raw view cannot become a dangling CPU upload after
+        // the loaded asset has taken ownership and released its decode buffer.
+        if (!view.sourceHandle) {
+            if (auto old = entry.loaded.lock(); old && old->Matches(view)) return nullptr;
+        }
         if (!result.second && entry.cpuStale &&
             (entry.view.width != view.width || entry.view.height != view.height ||
              entry.view.row0 != view.row0 || entry.view.version != view.version)) {
@@ -322,12 +441,33 @@ struct SDLBitmapCompositor::Impl
             return nullptr;
         }
         if (entry.view.width != view.width || entry.view.height != view.height) {
-            entry.target.reset(); entry.rgba.reset(); entry.opaque.reset(); entry.sceneOpaque.reset();
+            entry.target.reset(); DropSource(entry, entry.rgba); entry.opaque.reset(); entry.sceneOpaque.reset();
             entry.targetValid = entry.rgbaValid = entry.opaqueValid = entry.sceneOpaqueValid = false;
         }
         entry.view = view;
+        entry.loaded = view.sourceHandle.state_;
+        entry.view.sourceHandle = {}; // The file/bitmap cache owns the asset.
         entry.used = ++clock;
         return &entry;
+    }
+    std::shared_ptr<LoadedBitmapSourceState> CacheOwner(const Entry& entry,
+        const std::shared_ptr<ResidentFrameState>& resource) const
+    {
+        auto asset = entry.loaded.lock();
+        return asset && asset->texture == resource ? asset : nullptr;
+    }
+    bool Disposable(const Entry& entry, const std::shared_ptr<ResidentFrameState>& resource) const
+    {
+        if (!resource) return false;
+        const auto asset = CacheOwner(entry, resource);
+        // One Entry reference plus, at most, one shared asset control. Scene
+        // commands and immutable completed frames add ordinary protected refs.
+        return resource.use_count() == (asset ? 2 : 1);
+    }
+    void DropSource(Entry& entry, std::shared_ptr<ResidentFrameState>& resource)
+    {
+        if (auto asset = CacheOwner(entry, resource)) asset->texture.reset();
+        resource.reset();
     }
     bool Reserve(std::uint64_t bytes, const Entry* protectedEntry)
     {
@@ -339,14 +479,14 @@ struct SDLBitmapCompositor::Impl
             for (auto& item : entries) {
                 auto& entry = item.second;
                 if (&entry == protectedEntry) continue;
-                const bool disposable = (entry.rgba && entry.rgba.use_count() == 1) ||
+                const bool disposable = Disposable(entry, entry.rgba) ||
                     (entry.opaque && entry.opaque.use_count() == 1) ||
                     (entry.sceneOpaque && entry.sceneOpaque.use_count() == 1);
                 if (disposable && (!victim || entry.used < victim->used)) victim = &entry;
             }
             if (!victim) return false;
-            if (victim->rgba && victim->rgba.use_count() == 1) {
-                victim->rgba.reset(); victim->rgbaValid = false;
+            if (Disposable(*victim, victim->rgba)) {
+                DropSource(*victim, victim->rgba); victim->rgbaValid = false;
             }
             if (victim->opaque && victim->opaque.use_count() == 1) {
                 victim->opaque.reset(); victim->opaqueValid = false;
@@ -487,6 +627,29 @@ struct SDLBitmapCompositor::Impl
     std::shared_ptr<ResidentFrameState> Source(Entry& entry, bool opaque)
     {
         if (!opaque && entry.opaqueTarget && entry.targetValid) return entry.target;
+        if (auto asset = entry.loaded.lock(); asset && asset->Matches(entry.view)) {
+            if (!opaque) {
+                if (asset->texture && asset->texture->epoch == epoch && asset->texture->texture.load()) {
+                    entry.rgba = asset->texture;
+                    entry.rgbaValid = true; entry.rgbaVersion = entry.view.version;
+                    return entry.rgba;
+                }
+                const auto* pixels = asset->CPUBuffer();
+                if (!pixels) return {};
+                auto view = entry.view;
+                view.row0 = asset->Row0(pixels);
+                auto texture = Create(view, false, false, &entry);
+                if (!texture || !Upload(texture, view)) return {};
+                asset->texture = texture;
+                entry.rgba = texture;
+                entry.rgbaValid = true; entry.rgbaVersion = entry.view.version;
+                return texture;
+            }
+            // Legacy constant-opacity Copy still needs its RGB888 view.
+            const auto* pixels = asset->CPUBuffer();
+            if (!pixels) return {};
+            entry.view.row0 = asset->Row0(pixels);
+        }
         if (entry.cpuStale && !Sync(entry)) return {};
         auto& resource = opaque ? entry.opaque : entry.rgba;
         auto& valid = opaque ? entry.opaqueValid : entry.rgbaValid;
@@ -712,10 +875,68 @@ bool SDLBitmapCompositor::PrepareSource(const BitmapView& view)
       catch (...) { return false; }
 }
 
+LoadedBitmapSource SDLBitmapCompositor::CreateLoadedSource(const BitmapView& view,
+    void*& cpuAllocation, AllocateLoadedPixels allocate, FreeLoadedPixels release,
+    bool allowCPURelease)
+{
+    std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
+    if (!impl_ || !impl_->Owner() || view.sourceHandle || view.volatileCPU ||
+        !view.row0 || !cpuAllocation || !allocate || !release ||
+        krkrsdl2_force_software_composition() || !impl_->Fits(view) ||
+        (view.gpuWriteTracked && view.gpuWriteTracked->load(std::memory_order_acquire))) return {};
+    const auto pitch = view.pitch < 0 ? -std::int64_t(view.pitch) : std::int64_t(view.pitch);
+    const auto bytes = std::uint64_t(pitch) * view.height;
+    if (bytes > (std::numeric_limits<std::uint32_t>::max)() ||
+        std::uint64_t(view.width) * view.height * 4 > TextureBudget()) return {};
+    auto* base = view.row0 + (view.pitch < 0 ? std::ptrdiff_t(view.height - 1) * view.pitch : 0);
+    if (base != cpuAllocation) return {};
+    try {
+        KrkrNSPerfScope perfPrepare(KrkrNSPerfOp::GpuSourcePrepare);
+        auto asset = std::make_shared<LoadedBitmapSourceState>();
+        asset->storage = view.storage; asset->serial = view.serial; asset->version = view.version;
+        asset->width = view.width; asset->height = view.height; asset->pitch = view.pitch;
+        asset->bytes = static_cast<std::uint32_t>(bytes);
+        asset->allocate = allocate; asset->release = release;
+        // Compression is an exact device-loss recovery representation. Never
+        // require it for success: incompressible/OOM inputs retain raw pixels.
+        if (allowCPURelease) {
+            try {
+                // Keep startup peak bounded to the original decode buffer
+                // plus at most 3/4 of its bytes. Weak compression is not worth
+                // another near-full allocation: Z_BUF_ERROR uses raw recovery.
+                const auto capacity = static_cast<uLongf>((bytes * 3) / 4);
+                if (capacity) {
+                    uLongf count = capacity;
+                    std::vector<std::uint8_t> temporary(capacity);
+                    if (compress2(temporary.data(), &count, base, asset->bytes,
+                            Z_BEST_SPEED) == Z_OK && count <= capacity && count < bytes) {
+                        temporary.resize(count);
+                        asset->compressed = std::make_shared<const std::vector<std::uint8_t>>(std::move(temporary));
+                    }
+                }
+            } catch (...) { asset->compressed.reset(); }
+        }
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            auto* entry = impl_->Get(view);
+            if (!entry || entry->opaqueTarget || entry->cpuStale) return {};
+            auto texture = impl_->Source(*entry, false);
+            if (!texture) return {};
+            asset->texture = std::move(texture);
+            entry->loaded = asset;
+            asset->cpu = cpuAllocation;
+            asset->ownsCPU = true;
+            cpuAllocation = nullptr;
+        }
+        return LoadedBitmapSource(std::move(asset));
+    } catch (const SubmittedGPUFailure&) { throw; }
+      catch (...) { return {}; }
+}
+
 bool SDLBitmapCompositor::SetOpaqueTarget(const BitmapView& view)
 {
     std::lock_guard<std::recursive_mutex> lifetimeLock(mutex_);
-    if (!impl_ || !impl_->Owner() || view.volatileCPU) return false;
+    if (!impl_ || !impl_->Owner() || view.volatileCPU || view.sourceHandle) return false;
     try {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         auto* entry = impl_->Get(view);
@@ -930,16 +1151,18 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             std::shared_ptr<ResidentFrameState>* resource;
             bool* valid;
             std::uint64_t used;
+            std::shared_ptr<LoadedBitmapSourceState> asset;
         };
         std::vector<Eviction> optional;
         std::uint64_t additional = 0, mandatoryFreed = 0, optionalFreed = 0;
         std::uint64_t sourceAdditional = 0, outputAdditional = 0, poolAdditional = 0;
-        const auto releasedBytes = [](const auto& resource) -> std::uint64_t {
-            return resource && resource.use_count() == 1 ? resource->bytes : 0;
+        const auto releasedBytes = [&](const auto& resource, const Impl::Entry* entry = nullptr) -> std::uint64_t {
+            return resource && (entry ? impl_->Disposable(*entry, resource) : resource.use_count() == 1) ? resource->bytes : 0;
         };
-        const auto disposable = [&](auto& resource, bool* valid, std::uint64_t used, bool keep) {
-            if (!keep && resource && resource.use_count() == 1) {
-                optional.push_back({&resource, valid, used});
+        const auto disposable = [&](auto& resource, bool* valid, std::uint64_t used, bool keep,
+                                    const Impl::Entry* entry = nullptr) {
+            if (!keep && resource && (entry ? impl_->Disposable(*entry, resource) : resource.use_count() == 1)) {
+                optional.push_back({&resource, valid, used, entry ? impl_->CacheOwner(*entry, resource) : nullptr});
                 optionalFreed += resource->bytes;
             }
         };
@@ -956,11 +1179,11 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             const bool changedSize = &entry == destination ? outputResized :
                 source != sourceViews.end() && resized(source->second, &entry);
             if (changedSize) {
-                mandatoryFreed += releasedBytes(entry.target) + releasedBytes(entry.rgba) +
+                mandatoryFreed += releasedBytes(entry.target) + releasedBytes(entry.rgba, &entry) +
                     releasedBytes(entry.opaque) + releasedBytes(entry.sceneOpaque);
             } else {
                 const bool direct = entry.opaqueTarget && entry.targetValid;
-                disposable(entry.rgba, &entry.rgbaValid, entry.used, (flags & 1) && !direct);
+                disposable(entry.rgba, &entry.rgbaValid, entry.used, (flags & 1) && !direct, &entry);
                 disposable(entry.opaque, &entry.opaqueValid, entry.used, (flags & 2) && !entry.cpuStale);
                 disposable(entry.sceneOpaque, &entry.sceneOpaqueValid, entry.used, (flags & 2) && entry.cpuStale);
             }
@@ -971,8 +1194,11 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             const unsigned flags = sourceNeeds.at(item.first);
             const bool sameSize = entry && !resized(view, entry);
             const bool direct = sameSize && entry->opaqueTarget && entry->targetValid;
+            const auto asset = view.sourceHandle.state_;
+            const bool residentAsset = asset && asset->texture && asset->texture->epoch == impl_->epoch &&
+                asset->texture->texture.load();
             const auto bytes = std::uint64_t(view.width) * view.height * 4;
-            if ((flags & 1) && !direct && (!sameSize || !entry->rgba ||
+            if ((flags & 1) && !direct && !residentAsset && (!sameSize || !entry->rgba ||
                 ((!entry->rgbaValid || view.volatileCPU || entry->rgbaVersion != view.version) && entry->rgba.use_count() > 1))) {
                 additional += bytes; sourceAdditional += bytes;
             }
@@ -1022,6 +1248,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             std::uint64_t freed = 0;
             for (const auto& victim : optional) {
                 freed += (*victim.resource)->bytes;
+                if (victim.asset) victim.asset->texture.reset();
                 victim.resource->reset();
                 if (victim.valid) *victim.valid = false;
                 if (freed >= requiredFree) break;
@@ -1263,6 +1490,8 @@ void SDLBitmapCompositor::CPUWritten(const BitmapView& view) noexcept
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (auto* entry = impl_->Find(view)) {
         entry->view = view;
+        entry->loaded = view.sourceHandle.state_;
+        entry->view.sourceHandle = {};
         entry->cpuStale = false;
         entry->targetValid = entry->rgbaValid = entry->opaqueValid = entry->sceneOpaqueValid = false;
     }

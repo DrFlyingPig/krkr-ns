@@ -2620,7 +2620,7 @@ iTJSDispatch2 * tTJSNI_BaseLayer::LoadImages(const ttstr &name, tjs_uint32 color
 		// NX's BaseTexture load prepares its texture before returning, including
 		// hidden layers loaded ahead by the game. Keep the final physical bitmap
 		// after resizing/province validation and reuse its normal source cache.
-		krkrns::GetBitmapCompositor().PrepareSource(MainImage->GetBitmap()->GetGPUView());
+		TVPPrepareLoadedGraphic(MainImage);
 #endif
 		Update(false);
 	}

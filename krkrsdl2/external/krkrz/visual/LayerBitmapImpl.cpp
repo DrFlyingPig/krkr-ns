@@ -489,7 +489,7 @@ tTVPBitmap::tTVPBitmap(const tTVPBitmap & r)
 	*BitmapInfo = *r.BitmapInfo;
 
 	// copy Bits
-	if(r.Bits) memcpy(Bits, r.Bits, r.BitmapInfo->GetImageSize() );
+	if(const void* pixels = r.GetBits()) memcpy(Bits, pixels, r.BitmapInfo->GetImageSize() );
 	if(r.Palette) {
 		memcpy(Palette, r.Palette, sizeof(tjs_uint)*DEFAULT_PALETTE_COUNT );
 		ActualPalCount = r.ActualPalCount;
@@ -547,21 +547,40 @@ void tTVPBitmap::ResetGPUStorageIdentity()
 		GPUStorageSerial = nextSerial.fetch_add(1, std::memory_order_relaxed);
 	CPUVersion = 1;
 	CPUBufferExposed = false;
+	CPUReadBufferExposed = false;
+	LoadedSource = {};
 	GPUWriteTracked.store(false, std::memory_order_relaxed);
 }
 
 krkrns::BitmapView tTVPBitmap::GetGPUView() const
 {
-	auto* row0 = static_cast<std::uint8_t*>(Bits);
+	auto* row0 = static_cast<std::uint8_t*>(Bits ? Bits : const_cast<void*>(LoadedSource.PeekCPUBuffer()));
 	if (row0 && Height > 0)
 		row0 += static_cast<std::size_t>(Height - 1) * PitchBytes;
 	return {this, GPUStorageSerial, CPUVersion, row0,
 		Width, Height, PitchStep, static_cast<int>(GetBPP()), CPUBufferExposed,
-		&GPUWriteTracked};
+		&GPUWriteTracked, LoadedSource};
+}
+
+bool tTVPBitmap::PromoteLoadedSource()
+{
+	if (LoadedSource) return true;
+	if (!Bits || !Is32bit() || CPUBufferExposed || GPUWriteTracked.load(std::memory_order_acquire)) return false;
+	auto source = krkrns::GetBitmapCompositor().CreateLoadedSource(GetGPUView(), Bits,
+		[](std::uint32_t bytes, std::uint32_t width, std::uint32_t height) -> void* {
+			return tTVPBitmapBitsAlloc::AllocNoCompact(bytes, width, height);
+		},
+		[](void* pixels) { tTVPBitmapBitsAlloc::Free(pixels); }, !CPUReadBufferExposed);
+	if (!source) return false;
+	LoadedSource = std::move(source);
+	LoadedSource.ReleaseDecodedCPU();
+	return true;
 }
 
 void tTVPBitmap::SyncForCPURead() const
 {
+	if (LoadedSource && !LoadedSource.CPUBuffer())
+		TVPThrowExceptionMessage(TJS_W("Cannot restore immutable loaded bitmap pixels"));
 	// Most bitmaps remain CPU-owned sources for the renderer. Their reads
 	// need no renderer mutex or hash lookup, just like NX's software textures.
 	if (!GPUWriteTracked.load(std::memory_order_acquire)) return;
@@ -572,6 +591,18 @@ void tTVPBitmap::SyncForCPURead() const
 void tTVPBitmap::BeforeCPUWrite(bool exposeBuffer) const
 {
 	SyncForCPURead();
+	if (LoadedSource)
+	{
+		// Even a single bitmap can have external scene/source handles. Copy the
+		// immutable recovery pixels; moving its sole raw buffer would corrupt
+		// those snapshots when this caller writes through the returned pointer.
+		auto source = LoadedSource;
+		const void* pixels = source.CPUBuffer();
+		void* replacement = tTVPBitmapBitsAlloc::Alloc(BitmapInfo->GetImageSize(), Width, Height);
+		memcpy(replacement, pixels, BitmapInfo->GetImageSize());
+		Bits = replacement;
+		LoadedSource = {};
+	}
 	if (exposeBuffer) CPUBufferExposed = true;
 	++CPUVersion;
 	// CPU source caches validate this generation in Source(). Only a storage
@@ -588,41 +619,62 @@ void tTVPBitmap::MarkCPUBufferExposed()
 #endif
 }
 
-void * tTVPBitmap::ScanLinePointer(tjs_uint l) const
+void tTVPBitmap::CheckScanLine(tjs_uint l) const
 {
 	if (l >= static_cast<tjs_uint>(BitmapInfo->GetHeight()))
 		TVPThrowExceptionMessage(TVPScanLineRangeOver, ttstr((tjs_int)l),
 			ttstr((tjs_int)BitmapInfo->GetHeight() - 1));
-	return (BitmapInfo->GetHeight() - l - 1) * PitchBytes + (tjs_uint8*)Bits;
+}
+
+void * tTVPBitmap::ScanLinePointer(tjs_uint l) const
+{
+	CheckScanLine(l);
+	const void* base = Bits;
+#ifdef __SWITCH__
+	if (!base) base = LoadedSource.PeekCPUBuffer();
+#endif
+	return (BitmapInfo->GetHeight() - l - 1) * PitchBytes + (tjs_uint8*)base;
+}
+
+const void * tTVPBitmap::GetBits() const
+{
+#ifdef __SWITCH__
+	SyncForCPURead();
+	CPUReadBufferExposed = true;
+	return Bits ? Bits : LoadedSource.PeekCPUBuffer();
+#else
+	return Bits;
+#endif
 }
 
 const void * tTVPBitmap::GetScanLineForRead(tjs_uint l) const
 {
-	const void* pixels = ScanLinePointer(l);
+	CheckScanLine(l);
 #ifdef __SWITCH__
 	SyncForCPURead();
+	CPUReadBufferExposed = true;
 #endif
-	return pixels;
+	return ScanLinePointer(l);
 }
 //---------------------------------------------------------------------------
 void * tTVPBitmap::GetScanLine(tjs_uint l) const
 {
-	void* pixels = ScanLinePointer(l);
+	CheckScanLine(l);
 #ifdef __SWITCH__
 	// This legacy public method exposes a mutable pointer with no bounded
 	// lifetime. Internal writers use the explicit ephemeral write accessor.
 	BeforeCPUWrite(true);
 #endif
-	return pixels;
+	return ScanLinePointer(l);
 }
 
 void * tTVPBitmap::GetScanLineForWrite(tjs_uint l)
 {
-	void* pixels = ScanLinePointer(l);
+	CheckScanLine(l);
 #ifdef __SWITCH__
 	BeforeCPUWrite();
 #endif
-	return pixels;
+	return ScanLinePointer(l);
 }
 //---------------------------------------------------------------------------
 void tTVPBitmap::SetPaletteCount( tjs_uint count ) {
@@ -790,6 +842,7 @@ const void * tTVPNativeBaseBitmap::GetScanLine(tjs_uint l) const
 //---------------------------------------------------------------------------
 void * tTVPNativeBaseBitmap::GetScanLineForWrite(tjs_uint l)
 {
+	Bitmap->CheckScanLine(l);
 	Independ();
 	return Bitmap->GetScanLineForWrite(l);
 }
@@ -826,8 +879,9 @@ void tTVPNativeBaseBitmap::Recreate()
 //---------------------------------------------------------------------------
 void tTVPNativeBaseBitmap::Recreate(tjs_uint w, tjs_uint h, tjs_uint bpp, bool unpadding)
 {
+	std::unique_ptr<tTVPBitmap> replacement(new tTVPBitmap(w, h, bpp, unpadding));
 	Bitmap->Release();
-	Bitmap = new tTVPBitmap(w, h, bpp, unpadding);
+	Bitmap = replacement.release();
 	FontChanged = true; // informs internal font information is invalidated
 }
 //---------------------------------------------------------------------------

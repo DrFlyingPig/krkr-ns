@@ -11,6 +11,7 @@
 #include "DebugIntf.h"
 #include "KrkrNSLog.h"
 #include <atomic>
+#include <new>
 #ifdef __SWITCH__
 #include <malloc.h>
 #include "BitmapBufferPool.h"
@@ -111,15 +112,27 @@ static tTVPAtExit
 	TVPUninitMessageLoad(TVP_ATEXIT_PRI_CLEANUP, tTVPBitmapBitsAlloc::FreeAllocator);
 
 void* tTVPBitmapBitsAlloc::Alloc( tjs_uint size, tjs_uint width, tjs_uint height ) {
+	return AllocInternal(size, width, height, true);
+}
+void* tTVPBitmapBitsAlloc::AllocNoCompact(tjs_uint size, tjs_uint width, tjs_uint height) {
+	try {
+		return AllocInternal(size, width, height, false);
+	} catch (const std::bad_alloc&) {
+		return NULL;
+	}
+}
+void* tTVPBitmapBitsAlloc::AllocInternal(tjs_uint size, tjs_uint width, tjs_uint height, bool allowCompact) {
 	if(size == 0) return NULL;
 	tTJSCriticalSectionHolder Lock(AllocCS);	// Lock
 
-	InitializeAllocator();
+	if (allowCompact) InitializeAllocator();
+	else if (!Allocator) return NULL;
 	tjs_uint8 * ptrorg, * ptr;
 	size_t allocbytes = 16 + static_cast<size_t>(size) + sizeof(tTVPLayerBitmapMemoryRecord) + sizeof(tjs_uint32)*2;
 
 	ptr = ptrorg = (tjs_uint8*)Allocator->allocate(allocbytes);
 	if(!ptr) {
+		if (!allowCompact) return NULL;
 		LogMemory("bitmap-allocation-failed", allocbytes);
 		// Do GC
 		TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);

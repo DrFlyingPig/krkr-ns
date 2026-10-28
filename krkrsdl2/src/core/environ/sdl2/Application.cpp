@@ -9,6 +9,9 @@
 #include "KrkrNSProf.h"
 #include "KrkrNSVMProf.h"
 #include "KrkrNSPerf.h"
+#ifdef __SWITCH__
+#include "KrkrNSStartupConsole.h"
+#endif
 
 #include <algorithm>
 #include <string>
@@ -50,6 +53,7 @@
 #include "SystemImpl.h"
 #include "WaveImpl.h"
 #include "GraphicsLoadThread.h"
+#include "BitmapIntf.h"
 #include "CharacterSet.h"
 #ifdef __SWITCH__
 // KRKR-ns patch: declared in SDLApplication.cpp
@@ -378,6 +382,9 @@ tTVPApplication::tTVPApplication() : is_attach_console_(false), tarminate_(false
 	syncfs_is_finished_ = true;
 }
 tTVPApplication::~tTVPApplication() {
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	StopAsyncImageLoader();
+#endif
 	while( windows_list_.size() ) {
 		std::vector<class TTVPWindowForm*>::iterator i = windows_list_.begin();
 		delete (*i);
@@ -466,6 +473,9 @@ const tjs_char* SECodeToMessage( unsigned int code ) {
 
 #endif
 bool tTVPApplication::StartApplication( int argc, tjs_char* argv[] ) {
+#ifdef __SWITCH__
+	EngineExecutionGuard engineExecution(engine_execution_depth_);
+#endif
 	// _set_se_translator(se_translator_function);
 
 	ArgC = argc;
@@ -689,6 +699,10 @@ void tTVPApplication::CloseConsole() {
 #endif
 
 void tTVPApplication::PrintConsole( const tjs_char* mes, unsigned long len, bool iserror ) {
+#ifdef __SWITCH__
+	static_assert(sizeof(tjs_char) == sizeof(char16_t), "Startup console needs UTF-16");
+	krkrsdl2_startup_console_log(reinterpret_cast<const char16_t*>(mes), len, iserror);
+#endif
 #if 0
 	HANDLE hStdOutput = ::GetStdHandle(iserror ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
 	if (hStdOutput > 0) {
@@ -829,6 +843,10 @@ extern "C" void EMSCRIPTEN_KEEPALIVE emscripten_syncfs_is_finished()
 #endif
 
 void tTVPApplication::Run() {
+#ifdef __SWITCH__
+	EngineExecutionGuard engineExecution(engine_execution_depth_);
+	krkrns::StartupConsoleRunGuard startupConsoleRun;
+#endif
 #if 0
 	TVPTerminateCode = 0;
 
@@ -910,6 +928,9 @@ void tTVPApplication::Run() {
 	// The reference runs watchdog maintenance after event delivery and window
 	// ticks on this thread, outside the script timer's producer lock.
 	if (TVPSystemControl) TVPSystemControl->SystemWatchTimerTimer();
+	// A launch callback may have returned inside this Run. Reveal only after
+	// the following complete outer pump, never by recursively pumping here.
+	startupConsoleRun.Complete();
 #endif
 #if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
 	// Cocos budgets its complete update, including ordinary log writes,
@@ -1046,7 +1067,31 @@ void tTVPApplication::SetTitle( const tjs_string& caption ) {
 #endif
 }
 
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+void tTVPApplication::StopAsyncImageLoader() noexcept {
+#ifdef __SWITCH__
+	if (IsEngineExecuting()) {
+		if (image_load_thread_) image_load_thread_->ExitRequest();
+		return;
+	}
+#endif
+	// Command finalizers can reenter Application while releasing their owners.
+	// Detach first, and only destroy from outside an active loader callback.
+	auto* loader = image_load_thread_;
+	image_load_thread_ = nullptr;
+#ifdef __SWITCH__
+	// Releasing queued script owners can itself run finalizers/modal pumps.
+	// Keep teardown deferred until every owner has finished releasing.
+	EngineExecutionGuard engineExecution(engine_execution_depth_);
+#endif
+	delete loader; // Stops/joins the worker, cancels events, then releases owners.
+}
+#endif
+
 void tTVPApplication::Terminate() {
+#ifdef __SWITCH__
+	krkrsdl2_startup_console_abort();
+#endif
 #if 0
 	::PostQuitMessage(0);
 #endif
@@ -1056,15 +1101,20 @@ void tTVPApplication::Terminate() {
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 		if (image_load_thread_)
 		{
+#ifdef __SWITCH__
+			// A nested callback may still be inside Proc/HandleLoadedImage.
+			// Stop producing now; the outer pump joins and releases the loader.
+			image_load_thread_->ExitRequest();
+#else
 			try
 			{
-				delete image_load_thread_;
-				image_load_thread_ = NULL;
+				StopAsyncImageLoader();
 			}
 			catch (...)
 			{
 				// ignore errors
 			}
+#endif
 		}
 #endif
 	}
@@ -1235,6 +1285,9 @@ void tTVPApplication::LoadImageRequest( class iTJSDispatch2 *owner, class tTJSNI
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 	if( image_load_thread_ ) {
 		image_load_thread_->LoadRequest( owner, bmp, name );
+	}
+	else if (bmp) {
+		bmp->SetLoading(false);
 	}
 #endif
 }

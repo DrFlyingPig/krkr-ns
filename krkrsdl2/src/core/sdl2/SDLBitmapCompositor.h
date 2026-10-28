@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include "LoadedBitmapSource.h"
 
 namespace krkrns
 {
@@ -22,6 +23,7 @@ struct BitmapView
     // Optional allocation-owned latch. Only registered GPU write targets
     // need CPU read synchronization; cached CPU source textures do not.
     std::atomic<bool>* gpuWriteTracked = nullptr;
+    LoadedBitmapSource sourceHandle;
 };
 
 enum class BitmapBlend { Copy, Alpha, AddAlpha };
@@ -91,6 +93,11 @@ public:
     // Volatile CPU buffers are skipped. This never registers GPU-write
     // authority, writes engine pixels, or reads GPU pixels back to the CPU.
     bool PrepareSource(const BitmapView& source);
+    // On success the immutable asset takes ownership of cpuAllocation and sets
+    // it to null. On failure all engine pixels and their ownership stay intact.
+    LoadedBitmapSource CreateLoadedSource(const BitmapView& source,
+        void*& cpuAllocation, AllocateLoadedPixels allocate, FreeLoadedPixels release,
+        bool allowCPURelease);
     bool SetOpaqueTarget(const BitmapView& target);
     bool IsOpaqueTarget(const BitmapView& target) const noexcept;
     bool HasGPUWrites(const BitmapView& bitmap) const noexcept;

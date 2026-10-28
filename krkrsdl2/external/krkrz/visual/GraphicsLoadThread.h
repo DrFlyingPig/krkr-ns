@@ -7,22 +7,21 @@
 #include <deque>
 #include <memory>
 #include <atomic>
-#include <set>
 #include "ThreadIntf.h"
 #include "NativeEventQueue.h"
 #include "GraphicsLoaderIntf.h"
 
-// Private decoded buffers are bounded across every pending touch batch. They
-// never own VM objects or enter the engine bitmap allocator on the worker.
+// Track private decoded bytes without imposing a different preload policy.
+// The worker never owns VM objects or runs compact callbacks.
 struct tTVPAsyncTouchMemory {
 	std::atomic<tjs_uint64> Pending{0}, Peak{0};
 };
 struct tTVPAsyncTouchBatch {
-	tjs_uint64 Id = 0, Requested = 0, Prepared = 0, CacheHits = 0, Duplicates = 0, Rejected = 0;
-	tjs_uint64 Limit = 0, Started = 0, Timeout = 0, Generation = 0;
+	tjs_uint64 Id = 0, Requested = 0, Prepared = 0, CacheHits = 0, Rejected = 0;
+	tjs_uint64 Limit = 0, Timeout = 0; // diagnostic arguments; reference async path ignores both
 	bool PreparationComplete = false;
 	std::atomic<tjs_uint64> Outstanding{0}, Bytes{0}, Decoded{0}, Cached{0};
-	std::atomic<tjs_uint64> BudgetSkipped{0}, TimedOut{0}, Cancelled{0}, Errors{0}, CapacityWaits{0};
+	std::atomic<tjs_uint64> Cancelled{0}, Errors{0};
 };
 
 // BaseBitmap を使うとリエントラントではないので、別の構造体に独自にロードする必要がある
@@ -32,10 +31,8 @@ struct tTVPTmpBitmapImage {
 	tjs_int pitch;
 	tjs_uint32* buf;
 	std::vector<tTVPGraphicMetaInfoPair> * MetaInfo;
-	bool PrivateBuffer;
-	tjs_uint64 MaxBytes;
 	std::shared_ptr<tTVPAsyncTouchMemory> TouchMemory;
-	tjs_uint64 PendingLimit = 0, ReservedBytes = 0;
+	tjs_uint64 ReservedBytes = 0;
 	void ReleaseTouchBytes() noexcept;
 	tTVPTmpBitmapImage();
 	~tTVPTmpBitmapImage();
@@ -52,7 +49,6 @@ struct tTVPImageLoadCommand {
 	std::unique_ptr<tTVPGraphicHandlerType> handler_;
 	bool touch_;
 	bool touch_cancelled_ = false;
-	tjs_uint64 touch_generation_;
 	std::shared_ptr<tTVPAsyncTouchBatch> touch_batch_;
 	tTVPImageLoadCommand();
 	~tTVPImageLoadCommand();
@@ -71,15 +67,12 @@ class tTVPAsyncImageLoader : public tTVPThread {
 
 	/** 読込み要求コマンドキュー */
 	std::queue<tTVPImageLoadCommand*> CommandQueue;
-	std::deque<tTVPImageLoadCommand*> TouchQueue;
-	tTVPImageLoadCommand* DeferredTouch = nullptr;
 	/** 読込み完了画像キュー */
 	std::queue<tTVPImageLoadCommand*> LoadedQueue;
 	std::atomic<bool> Stopping;
 	// Main-thread preparation/cache publication; the worker only uses immutable
-	// prepared handlers and atomic counters. Ordinary Bitmap requests have priority.
+	// prepared handlers and atomic counters. All requests share reference FIFO order.
 	std::deque<std::shared_ptr<tTVPAsyncTouchBatch>> TouchBatches;
-	std::set<std::pair<tjs_uint64, ttstr>> TouchNames;
 	std::shared_ptr<tTVPAsyncTouchMemory> TouchMemory;
 	tjs_uint64 TouchSequence = 0, TouchRequested = 0, TouchPrepared = 0;
 	tjs_uint64 TouchDecoded = 0, TouchCached = 0;
@@ -99,7 +92,7 @@ private:
 	 */
 	bool PushLoadQueue(iTJSDispatch2 *owner, tTJSNI_Bitmap *bmp,
 		const ttstr &nname, const ttstr &loadname, tTVPGraphicHandlerType *handler,
-		bool touch = false, tjs_uint64 generation = 0, tjs_uint64 maxbytes = 0,
+		bool touch = false,
 		const std::shared_ptr<tTVPAsyncTouchBatch>& batch = {});
 	void ReportTouchBatches();
 	void ResetTouchImage(tTVPImageLoadCommand *cmd) noexcept;
@@ -115,8 +108,7 @@ private:
 	/**
 	 * 画像読込み処理
 	 */
-	// false means retry after private-buffer capacity becomes available.
-	bool LoadImageFromCommand( tTVPImageLoadCommand* cmd );
+	void LoadImageFromCommand( tTVPImageLoadCommand* cmd );
 	
 	/**
 	 * 読込みスレッドメイン
@@ -147,13 +139,10 @@ public:
 	void LoadRequest( iTJSDispatch2 *owner, tTJSNI_Bitmap* bmp, const ttstr &name );
 	void TouchImages(const std::vector<ttstr> &names, tjs_uint64 limit,
 		tjs_uint64 timeout);
-	// Cache clear/limit changes invalidate results without touching VM objects
-	// or depending on an Application object still being alive at process exit.
-	static void InvalidateTouchRequests();
 };
 
-// Resolves handlers and companion images on the main thread, never in the
-// decoder. Cache-only loads must not cache an image lacking its mask/province.
+// Resolve/copy the native handler on the registry-owning main thread. Like the
+// reference async path, this does not merge masks or discover province images.
 bool TVPResolveGraphicForAsyncTouch(const ttstr &name, ttstr &loadname,
 	tTVPGraphicHandlerType *&handler);
 

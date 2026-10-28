@@ -18,6 +18,7 @@
 #ifdef __SWITCH__
 #include <cstdint>
 #include <atomic>
+#include "LoadedBitmapSource.h"
 namespace krkrns { struct BitmapView; }
 #endif
 
@@ -34,12 +35,13 @@ extern void TVPResetFontRasterizersForEngineRestart();
 //---------------------------------------------------------------------------
 class tTVPBitmap
 {
+    friend class tTVPNativeBaseBitmap;
 public:
 	static const tjs_int DEFAULT_PALETTE_COUNT = 256;
 private:
 	tjs_int RefCount;
 
-	void * Bits; // pointer to bitmap bits
+	mutable void * Bits; // pointer to writable CPU bitmap bits
 	BitmapInfomation *BitmapInfo; // DIB information
 
 	tjs_int PitchBytes; // bytes required in a line
@@ -49,6 +51,7 @@ private:
 
 	tjs_int ActualPalCount;
 	tjs_uint* Palette;
+	void CheckScanLine(tjs_uint l) const;
 	void * ScanLinePointer(tjs_uint l) const;
 #ifdef __SWITCH__
 	// Identity belongs to the shared pixel allocation, not a BaseBitmap
@@ -56,7 +59,9 @@ private:
 	std::uint64_t GPUStorageSerial = 0;
 	mutable std::uint64_t CPUVersion = 1;
 	mutable bool CPUBufferExposed = false;
+	mutable bool CPUReadBufferExposed = false;
 	mutable std::atomic<bool> GPUWriteTracked{false};
+	mutable krkrns::LoadedBitmapSource LoadedSource;
 	void ResetGPUStorageIdentity();
 	void SyncForCPURead() const;
 	void BeforeCPUWrite(bool exposeBuffer = false) const;
@@ -103,6 +108,7 @@ public:
 	void MarkCPUBufferExposed();
 #ifdef __SWITCH__
 	krkrns::BitmapView GetGPUView() const;
+	bool PromoteLoadedSource();
 #endif
 
 	tjs_int GetPitch() const { return PitchStep; }
@@ -115,13 +121,7 @@ public:
 	const BITMAPINFOHEADER * GetBITMAPINFOHEADER() const { return (const BITMAPINFOHEADER*)( BitmapInfo->GetBITMAPINFO() ); }
 #endif
 
-	const void * GetBits() const
-	{
-#ifdef __SWITCH__
-		SyncForCPURead();
-#endif
-		return Bits;
-	}
+	const void * GetBits() const;
 	const tjs_uint* GetPalette() const { return Palette; };
 	tjs_uint* GetPalette() { return Palette; };
 	tjs_uint GetPaletteCount() const { return ActualPalCount; };

@@ -277,6 +277,11 @@ extern void TVPTouchImages(const std::vector<ttstr> & storages, tjs_int64 limit,
 extern void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int keyidx,
 	tjs_uint desw, tjs_uint desh,
 	tTVPGraphicLoadMode mode, ttstr *provincename = NULL, iTJSDispatch2 ** metainfo = NULL, bool unpadding=false);
+#ifdef __SWITCH__
+// Promote a completed ordinary BGRA load to a shared immutable source asset.
+// Failure preserves the CPU bitmap; this does not grant GPU write authority.
+extern bool TVPPrepareLoadedGraphic(tTVPBaseBitmap *bitmap);
+#endif
 	// throws exception when this function can not handle the file
 //---------------------------------------------------------------------------
 

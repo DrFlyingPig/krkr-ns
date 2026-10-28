@@ -3,6 +3,9 @@
 
 #include "tjsCommHead.h"
 #include "NativeEventQueue.h"
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <vector>
 #if defined(_WIN32) && defined(KRKRSDL2_USE_WIN32_EVENT_QUEUE)
 #include "WindowsUtil.h"
@@ -235,40 +238,141 @@ NativeEventQueueImplement::NativeEventQueueImplement() {
 // dispatching happens on the main thread.
 static SDL_mutex * krkrsdl2_pending_events_mutex = nullptr;
 static std::vector<NativeEvent*> * krkrsdl2_pending_events = nullptr;
-static bool krkrsdl2_pending_events_initialized = false;
+static std::atomic<bool> krkrsdl2_pending_events_initialized{false};
+static std::once_flag krkrsdl2_pending_events_once;
 
-static void krkrsdl2_pending_events_init()
+struct KrkrNSDefaultNativeEventBatch
 {
-	if (!krkrsdl2_pending_events_initialized)
-	{
-		krkrsdl2_pending_events_initialized = true;
-		krkrsdl2_pending_events_mutex = SDL_CreateMutex();
-		krkrsdl2_pending_events = new std::vector<NativeEvent*>();
+	std::vector<NativeEvent*> Events;
+	std::size_t Next = 0;
+	KrkrNSDefaultNativeEventBatch* Following = nullptr;
+};
+struct KrkrNSDefaultNativeEventFrame
+{
+	KrkrNSDefaultNativeEventBatch* Head = nullptr;
+	KrkrNSDefaultNativeEventFrame* Previous = nullptr;
+};
+static KrkrNSDefaultNativeEventFrame* krkrsdl2_active_native_frames = nullptr;
+static KrkrNSDefaultNativeEventBatch* krkrsdl2_deferred_native_head = nullptr;
+static KrkrNSDefaultNativeEventBatch* krkrsdl2_deferred_native_tail = nullptr;
+
+// Caller holds the payload mutex. Cancelled/consumed nodes need no later pump
+// to release their vector storage, including during engine teardown.
+static void krkrsdl2_prune_empty_native_batches(KrkrNSDefaultNativeEventBatch*& head) noexcept
+{
+	auto** link = &head;
+	while (auto* batch = *link) {
+		while (batch->Next < batch->Events.size() && !batch->Events[batch->Next]) ++batch->Next;
+		if (batch->Next == batch->Events.size()) {
+			*link = batch->Following;
+			delete batch;
+		} else link = &batch->Following;
 	}
 }
 
+class KrkrNSDefaultNativeEventLock
+{
+public:
+	KrkrNSDefaultNativeEventLock() { SDL_LockMutex(krkrsdl2_pending_events_mutex); }
+	~KrkrNSDefaultNativeEventLock() { SDL_UnlockMutex(krkrsdl2_pending_events_mutex); }
+};
+
+static void krkrsdl2_pending_events_init()
+{
+	std::call_once(krkrsdl2_pending_events_once, [] {
+		std::unique_ptr<std::vector<NativeEvent*>> pending(new std::vector<NativeEvent*>());
+		SDL_mutex* mutex = SDL_CreateMutex();
+		if (!mutex) throw std::bad_alloc();
+		krkrsdl2_pending_events_mutex = mutex;
+		krkrsdl2_pending_events = pending.release();
+		krkrsdl2_pending_events_initialized.store(true, std::memory_order_release);
+	});
+}
+
+class KrkrNSDefaultNativeEventDrain
+{
+	KrkrNSDefaultNativeEventFrame Frame;
+	bool Active = false;
+public:
+	KrkrNSDefaultNativeEventDrain()
+	{
+		KrkrNSDefaultNativeEventLock lock;
+		if (krkrsdl2_pending_events->empty() && !krkrsdl2_deferred_native_head) return;
+		// Allocate before taking any pending/deferred ownership. A failed
+		// allocation leaves every callback available for the next pump.
+		std::unique_ptr<KrkrNSDefaultNativeEventBatch> pending;
+		if (!krkrsdl2_pending_events->empty()) pending.reset(new KrkrNSDefaultNativeEventBatch());
+		Frame.Head = krkrsdl2_deferred_native_head;
+		if (pending) {
+			pending->Events.swap(*krkrsdl2_pending_events);
+			if (krkrsdl2_deferred_native_tail) krkrsdl2_deferred_native_tail->Following = pending.get();
+			else Frame.Head = pending.get();
+			pending.release();
+		}
+		krkrsdl2_deferred_native_head = krkrsdl2_deferred_native_tail = nullptr;
+		Frame.Previous = krkrsdl2_active_native_frames;
+		krkrsdl2_active_native_frames = &Frame;
+		Active = true;
+	}
+	~KrkrNSDefaultNativeEventDrain()
+	{
+		if (!Active) return;
+		KrkrNSDefaultNativeEventLock lock;
+		krkrsdl2_active_native_frames = Frame.Previous;
+		krkrsdl2_prune_empty_native_batches(Frame.Head);
+		if (Frame.Head) {
+			// Exception unwinding transfers the remaining chain without an
+			// allocation. Older outer batches precede nested deferred work,
+			// which in turn precedes newly posted events on the next pump.
+			auto* tail = Frame.Head;
+			while (tail->Following) tail = tail->Following;
+			tail->Following = krkrsdl2_deferred_native_head;
+			krkrsdl2_deferred_native_head = Frame.Head;
+			if (!krkrsdl2_deferred_native_tail) krkrsdl2_deferred_native_tail = tail;
+		}
+	}
+	NativeEvent* Next()
+	{
+		if (!Active) return nullptr;
+		KrkrNSDefaultNativeEventLock lock;
+		while (auto* batch = Frame.Head) {
+			while (batch->Next < batch->Events.size()) {
+				auto*& slot = batch->Events[batch->Next++];
+				auto* event = slot;
+				slot = nullptr;
+				if (event) return event;
+			}
+			Frame.Head = batch->Following;
+			delete batch; // all payload slots have been consumed or cancelled
+		}
+		return nullptr;
+	}
+};
+
 void krkrsdl2_drain_pending_native_events()
 {
-	if (!krkrsdl2_pending_events_initialized) return;
-	SDL_LockMutex(krkrsdl2_pending_events_mutex);
-	std::vector<NativeEvent*> local;
-	local.swap(*krkrsdl2_pending_events);
-	SDL_UnlockMutex(krkrsdl2_pending_events_mutex);
-	for (NativeEvent* ev : local)
-	{
-		ev->HandleEvent();
+	if (!krkrsdl2_pending_events_initialized.load(std::memory_order_acquire)) return;
+	KrkrNSDefaultNativeEventDrain drain;
+	while (auto* event = drain.Next()) {
+		// HandleEvent deletes itself after successful dispatch. On failure its
+		// detached payload still belongs to this caller, exactly once.
+		try { event->HandleEvent(); }
+		catch (...) { delete event; throw; }
 	}
 }
 
 void NativeEventQueueImplement::Clear(unsigned int message)
 {
-	if (!krkrsdl2_pending_events_initialized) return;
-	SDL_LockMutex(krkrsdl2_pending_events_mutex);
+	if (!krkrsdl2_pending_events_initialized.load(std::memory_order_acquire)) return;
+	KrkrNSDefaultNativeEventLock lock;
+	const auto matches = [this, message](const NativeEvent* event) {
+		return event && event->queue == this && (!message || event->Message == message);
+	};
 	for (auto it = krkrsdl2_pending_events->begin();
 		it != krkrsdl2_pending_events->end();)
 	{
 		NativeEvent *ev = *it;
-		if (ev->queue == this && (message == 0 || ev->Message == message))
+		if (matches(ev))
 		{
 			delete ev;
 			it = krkrsdl2_pending_events->erase(it);
@@ -278,7 +382,21 @@ void NativeEventQueueImplement::Clear(unsigned int message)
 			++it;
 		}
 	}
-	SDL_UnlockMutex(krkrsdl2_pending_events_mutex);
+	const auto clearBatches = [&](KrkrNSDefaultNativeEventBatch* batch) {
+		for (; batch; batch = batch->Following)
+			for (std::size_t i = batch->Next; i < batch->Events.size(); ++i)
+				if (matches(batch->Events[i])) { delete batch->Events[i]; batch->Events[i] = nullptr; }
+	};
+	clearBatches(krkrsdl2_deferred_native_head);
+	krkrsdl2_prune_empty_native_batches(krkrsdl2_deferred_native_head);
+	krkrsdl2_deferred_native_tail = krkrsdl2_deferred_native_head;
+	if (krkrsdl2_deferred_native_tail)
+		while (krkrsdl2_deferred_native_tail->Following)
+			krkrsdl2_deferred_native_tail = krkrsdl2_deferred_native_tail->Following;
+	for (auto* frame = krkrsdl2_active_native_frames; frame; frame = frame->Previous) {
+		clearBatches(frame->Head);
+		krkrsdl2_prune_empty_native_batches(frame->Head);
+	}
 }
 
 void NativeEventQueueImplement::Deallocate()
@@ -292,11 +410,13 @@ void NativeEventQueueImplement::PostEvent(const NativeEvent& ev) {
 		return;
 	}
 	krkrsdl2_pending_events_init();
-	NativeEvent * tmp_ev = new NativeEvent(ev);
+	std::unique_ptr<NativeEvent> tmp_ev(new NativeEvent(ev));
 	tmp_ev->SetQueue(this);
-	SDL_LockMutex(krkrsdl2_pending_events_mutex);
-	krkrsdl2_pending_events->push_back(tmp_ev);
-	SDL_UnlockMutex(krkrsdl2_pending_events_mutex);
+	{
+		KrkrNSDefaultNativeEventLock lock;
+		krkrsdl2_pending_events->push_back(tmp_ev.get());
+		tmp_ev.release();
+	}
 	// Wake the main thread's SDL_WaitEvent without carrying the payload: a
 	// single bounded push (no retry loop) is the documented thread-safe use;
 	// if it is dropped the next pump tick still drains the pending list.

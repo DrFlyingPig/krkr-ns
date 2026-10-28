@@ -11,6 +11,9 @@
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSPerf.h"
+#ifdef __SWITCH__
+#include "KrkrNSStartupConsole.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -1279,6 +1282,56 @@ static void TVPClearAutoPathLookupCache()
 {
 	TVPAutoPathCache.Clear();
 }
+// A write to one storage must not discard unrelated hot XP3 segments. Match
+// the reference's name-only memo eviction, retaining directory validation for
+// the optional persistent auto-path index. Caller holds TVPCreateStreamCS.
+static void TVPInvalidateWrittenStorageName(const ttstr &name, const ttstr &resolved)
+{
+	const ttstr directory = TVPExtractStoragePath(resolved);
+	ttstr basename = TVPExtractStorageName(resolved);
+	basename.ToLowerCase();
+	const bool indexedFolder = std::find(TVPAutoPathList.begin(), TVPAutoPathList.end(), directory)
+		!= TVPAutoPathList.end();
+	const tTVPFileInfo *indexed = indexedFolder ? TVPAutoPathTable.Find(basename) : nullptr;
+	const bool refreshIndex = indexedFolder &&
+		(!indexed || indexed->FilePath != directory || !indexed->ExistFile() ||
+		 TVPExtractStorageExt(resolved) == TJS_W(".prop"));
+	std::vector<ttstr> aliases;
+	for (auto it = TVPAutoPathCache.GetFirst(); !it.IsNull(); it++) {
+		const ttstr &key = it.GetKey(), &value = it.GetValue();
+		if (key == name) continue;
+		bool affected = value == resolved;
+		ttstr keybase = TVPExtractStorageName(key);
+		keybase.ToLowerCase();
+		if (!affected && keybase == basename) {
+			affected = TVPNormalizeStorageName(key) == resolved;
+			// A new loose auto-path file can resolve a previous miss or change
+			// the bare-name winner. Explicit existing files in other folders
+			// keep their memo entries, even when their basenames match.
+			if (indexedFolder && (value.IsEmpty() || TVPExtractStorageName(key) == key))
+				affected = true;
+		}
+		if (affected) aliases.push_back(key);
+	}
+	TVPAutoPathCache.Delete(name);
+	for (const auto &alias : aliases) TVPAutoPathCache.Delete(alias);
+	if (refreshIndex) {
+		// This project retains its filename index across ordinary writes.
+		// Rebuild it on the next lookup when one of its loose folders changed;
+		// otherwise a newly created file could remain absent indefinitely.
+		// Overwriting an already indexed winning file retains the same index.
+		AutoPathTableInit = false;
+		AutoPathBuiltCount = 0;
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+		AutoPathFolderSnapshotsValid = false;
+		AutoPathFolderValidationPending = false;
+		AutoPathPendingCompactLevel = 0;
+#endif
+	}
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	TVPDeferAutoPathFolderValidation(0);
+#endif
+}
 //---------------------------------------------------------------------------
 struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
 {
@@ -2091,7 +2144,10 @@ static tTJSBinaryStream * _TVPCreateStream(const ttstr & _name, tjs_uint32 flags
 	else
 		name = TVPGetPlacedPath(_name); // file must exist
 
-	if(name.IsEmpty()) TVPThrowExceptionMessage(TVPCannotOpenStorage, _name);
+	if(name.IsEmpty()) {
+		if (access >= 1) TVPInvalidateWrittenStorageName(_name, TVPNormalizeStorageName(_name));
+		TVPThrowExceptionMessage(TVPCannotOpenStorage, _name);
+	}
 
 	// does name contain > ?
 	const tjs_char * sharp_pos = TJS_strchr(name.c_str(), TVPArchiveDelimiter);
@@ -2115,25 +2171,26 @@ static tTJSBinaryStream * _TVPCreateStream(const ttstr & _name, tjs_uint32 flags
 		catch(...)
 		{
 			arc->Release();
-			if(access >= 1) TVPClearStorageCaches();
+			if(access >= 1) TVPInvalidateWrittenStorageName(_name, name);
 			throw;
 		}
-		if(access >= 1) TVPClearStorageCaches();
+		if(access >= 1) TVPInvalidateWrittenStorageName(_name, name);
 		arc->Release();
 		return stream;
 	}
 
 	tTJSBinaryStream *stream;
+	// Invalidate before opening: creation makes the new name visible, and any
+	// allocation failure while collecting aliases cannot leak an opened stream.
+	if (access >= 1) TVPInvalidateWrittenStorageName(_name, name);
 	try
 	{
 		stream = TVPStorageMediaManager.Open(name, flags);
 	}
 	catch(...)
 	{
-		if(access >= 1) TVPClearStorageCaches();
 		throw;
 	}
-	if(access >= 1) TVPClearStorageCaches();
 	return stream;
 }
 
@@ -3213,6 +3270,9 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 		if(result) *result = false;
 		return TJS_S_OK;
 	}
+#ifdef __SWITCH__
+	krkrns::StartupConsoleLaunchGuard startupConsole;
+#endif
 	const ttstr entry = krkrsdl2_prepare_xp3_game(*param[0], *param[1]);
 
 	// KRKR-ns: Kirikiroid2-compatible per-game XP3 extraction filter.  Titles
@@ -3401,6 +3461,9 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 			try
 			{
 				TVPExecuteStorage(entry);
+#ifdef __SWITCH__
+				startupConsole.Returned();
+#endif
 			}
 			catch(...)
 			{

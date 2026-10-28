@@ -33,6 +33,8 @@
 #include "SDLBitmapCompletion.h"
 #ifdef __SWITCH__
 #include "SDLBitmapCompositor.h"
+#include "KrkrNSStartupConsole.h"
+#include "SDLStartupConsoleState.h"
 #endif
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
@@ -72,6 +74,8 @@
 #include <atomic>
 #include <cstring>
 #include <vector>
+#include <memory>
+#include <stdexcept>
 #endif
 
 #include "KrkrNSLog.h"
@@ -1240,6 +1244,10 @@ struct tTVPMessageReceiverRecord
 // (hidden) launcher window owns the display a game window presents into the
 // void and the screen stays black.
 static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
+#ifdef __SWITCH__
+static krkrns::StartupConsoleState krkrsdl2_startup_console;
+static SDL_threadID krkrsdl2_startup_console_owner = 0;
+#endif
 
 // Presentation policy shared by the texture upload and the present path: a
 // canvas taller than the window's fit-width height AND at least as wide as the
@@ -1401,6 +1409,7 @@ public:
 	   texture starts as undefined/black content, and the engine only reports
 	   incremental damage, so a lost upload would otherwise never be retried. */
 	void InvalidateFullSurface(bool recreateTexture = false);
+	bool DrawStartupConsole();
 #endif
 	/* Called from tTJSNI_Window */
 	virtual bool GetFormEnabled() override;
@@ -2139,6 +2148,100 @@ static int MulDiv(int nNumber, int nNumerator, int nDenominator)
 #endif
 
 #ifdef __SWITCH__
+bool TVPWindowWindow::DrawStartupConsole()
+{
+	// No native window/renderer is created for the console. In particular,
+	// never borrow an active compositor FBO or acquire its GPU resource lease.
+	if (this->hostWindow || !this->renderer || !this->window || this->isBeingDeleted ||
+		SDL_ThreadID() != krkrsdl2_startup_console_owner ||
+		SDL_GetRenderTarget(this->renderer) != nullptr ||
+		!krkrsdl2_startup_console.BeginDraw(SDL_GetTicks64())) return false;
+	struct DrawGuard { ~DrawGuard() { krkrsdl2_startup_console.EndDraw(); } } drawGuard;
+	SDL_Renderer* const renderer = this->renderer;
+	SDL_Window* const window = this->window;
+	std::unique_ptr<tTVPBaseBitmap> bitmap;
+	std::vector<std::uint32_t> pixels;
+	const int width = 800, height = 450;
+	try {
+		// Font allocation/GC can itself log. Snapshot bounded UTF-16 lines
+		// before drawing and keep the recursion guard active across all of it.
+		const auto lines = krkrsdl2_startup_console.Lines();
+		bitmap.reset(new tTVPBaseBitmap(width, height, 32));
+		const tTVPRect bounds(0, 0, width, height);
+		bitmap->Fill(bounds, 0xff08090b);
+		auto font = bitmap->GetFont();
+		font.Height = -18; font.Angle = 0;
+		bitmap->SetFont(font);
+		int y = 10;
+		for (const auto& line : lines) {
+			bitmap->DrawText(bounds, 8, y,
+				ttstr(reinterpret_cast<const tjs_char*>(line.text.c_str())),
+				line.important ? 0x00ffff80 : 0x00c0c0c0, bmAlpha, 255);
+			y += 23;
+		}
+		pixels.resize(std::size_t(width) * height);
+		for (int row = 0; row < height; ++row)
+			std::memcpy(pixels.data() + std::size_t(row) * width,
+				bitmap->GetScanLine(row), std::size_t(width) * 4);
+	} catch (...) { return false; } // Allocation/font failure leaves normal startup intact.
+	// Engine allocation may invoke compact/GC and destroy the window. Never
+	// dereference a removed native object, nor retain any texture across calls.
+	if (!krkrsdl2_startup_console.Active() ||
+		std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this) == krkrsdl2_live_windows.end() ||
+		this->renderer != renderer || this->window != window || this->isBeingDeleted ||
+		SDL_GetRenderTarget(renderer) != nullptr) return false;
+	std::unique_ptr<SDL_Texture, void (*)(SDL_Texture*)> text(
+		SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height), SDL_DestroyTexture);
+	if (!text || SDL_SetTextureBlendMode(text.get(), SDL_BLENDMODE_NONE) != 0 ||
+		SDL_UpdateTexture(text.get(), nullptr, pixels.data(), width * 4) != 0) return false;
+	SDLStartupConsoleState saved(renderer);
+	const bool good = saved.Begin() && SDL_RenderClear(renderer) == 0 &&
+		SDL_RenderCopy(renderer, text.get(), nullptr, nullptr) == 0;
+	if (!saved.Restore()) {
+		krkrsdl2_startup_console.Abort();
+		throw std::runtime_error("Cannot restore startup console renderer state");
+	}
+	if (good) SDL_RenderPresent(renderer);
+	return good;
+}
+
+static void krkrsdl2_startup_console_draw()
+{
+	if (!krkrsdl2_startup_console.Active() || krkrsdl2_startup_console.Drawing() ||
+		SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
+	std::vector<TVPWindowWindow*> windows;
+	try { windows = krkrsdl2_live_windows; } catch (...) { return; }
+	for (auto* window : windows)
+		if (std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), window) != krkrsdl2_live_windows.end() &&
+			window->DrawStartupConsole()) break;
+}
+
+bool krkrsdl2_startup_console_begin()
+{
+	const bool begun = krkrsdl2_startup_console.Begin();
+	if (begun) krkrsdl2_startup_console_owner = SDL_ThreadID();
+	return begun;
+}
+void krkrsdl2_startup_console_returned() noexcept { krkrsdl2_startup_console.EntryReturned(); }
+void krkrsdl2_startup_console_abort() noexcept { krkrsdl2_startup_console.Abort(); }
+void krkrsdl2_startup_console_log(const char16_t* text, std::size_t length, bool important)
+{
+	if (!krkrsdl2_startup_console.Active() || SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
+	try { krkrsdl2_startup_console.Append(text, length, important); } catch (...) { return; }
+	krkrsdl2_startup_console_draw();
+}
+void krkrsdl2_startup_console_enter_run() noexcept { krkrsdl2_startup_console.EnterRun(); }
+void krkrsdl2_startup_console_leave_run(bool complete)
+{
+	if (!krkrsdl2_startup_console.LeaveRun(complete)) return;
+	// Events/timers/LayerManager/window updates have now completed once in a
+	// fresh outer Run. Present that prepared frame, without recursively Run().
+	const auto windows = krkrsdl2_live_windows;
+	for (auto* window : windows)
+		if (std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), window) != krkrsdl2_live_windows.end())
+			window->TickBeat();
+}
+
 TVPWindowWindow *TVPWindowWindow::find_host_for_secondary_window(TVPWindowWindow *self)
 {
 	for (TVPWindowWindow *w : krkrsdl2_live_windows)
@@ -2229,6 +2332,7 @@ void TVPWindowWindow::DrawHostedPresentation()
 
 bool TVPWindowWindow::PresentCompletedFrame(bool gpuPresented, bool cachedPresent, bool presentationOwner)
 {
+	if (krkrsdl2_startup_console.Active()) return false;
 	if (!gpuPresented && (!presentationOwner || !cachedFrameReady || !texture)) return false;
 	const Uint64 presentStart = SDL_GetPerformanceCounter();
 	// Legacy direct-GL composition already swapped. SDL owns the swap in the
@@ -2486,6 +2590,11 @@ void TVPWindowWindow::ShowWindowAsModal()
 	{
 		TVPThrowExceptionMessage(TJS_W("Showing window as modal is not supported"));
 	}
+#endif
+#ifdef __SWITCH__
+	// Reference showModal removes its startup console before entering the
+	// modal pump, so a required startup question remains visible/interactive.
+	krkrsdl2_startup_console_abort();
 #endif
 	KRKRNS_LOG("[win] modal enter window=%p host=%p", (void *)this, (void *)this->hostWindow);
 	if (this->hostWindow) krkrsdl2_log_flush();
@@ -2961,6 +3070,9 @@ void TVPWindowWindow::GetDrawableSize(tjs_int &w, tjs_int &h)
 }
 void TVPWindowWindow::Swap()
 {
+#ifdef __SWITCH__
+	if (krkrsdl2_startup_console.Active()) return;
+#endif
 	if (this->context)
 	{
 		SDL_GL_SwapWindow(this->window);
@@ -3281,6 +3393,12 @@ void TVPWindowWindow::krkrsdl2_dump_layer_tree()
 
 void TVPWindowWindow::TickBeat()
 {
+#ifdef __SWITCH__
+	if (krkrsdl2_startup_console.Active()) {
+		krkrsdl2_startup_console_draw();
+		return;
+	}
+#endif
 	// KRKR-ns (Switch): native resources were released when a game took over
 	// the single display; this object only survives until the session ends.
 	if (!this->renderer)
@@ -5707,6 +5825,16 @@ static bool process_events()
 			::Application->Run();
 			if (::Application->IsTarminate())
 			{
+#ifdef __SWITCH__
+				// Modal windows also pump events from inside script callbacks
+				// and startup. Let those stacks unwind before destroying owners.
+				if (::Application->IsEngineExecuting()) return false;
+#endif
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+				// Run and all native callbacks have unwound. Release queued
+				// script owners while their engine and decoder plugins are alive.
+				::Application->StopAsyncImageLoader();
+#endif
 				// KRKR-ns: on an in-process engine restart, do NOT run the final
 				// system teardown.  TVPSystemUninit() is one-way: it latches
 				// TVPSystemUninitCalled, calls TVPUninitTVPGL() (dropping the
@@ -6838,7 +6966,20 @@ static bool krkrsdl2_create_engine()
 	KRKRNS_LOG("[ns] before new tTVPApplication()");
 	::Application = new tTVPApplication();
 	KRKRNS_LOG("[ns] tTVPApplication created");
-	bool ret = ::Application->StartApplication(_argc, _wargv);
+	bool ret;
+	try {
+		ret = ::Application->StartApplication(_argc, _wargv);
+	} catch (...) {
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+		// Startup's execution guard has unwound, but main() can return
+		// directly from this failure without reaching the normal cleanup.
+		::Application->StopAsyncImageLoader();
+#endif
+		throw;
+	}
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	if (ret) ::Application->StopAsyncImageLoader();
+#endif
 	KRKRNS_LOG("[ns] StartApplication returned %d", (int)ret);
 	return !!ret;
 }
@@ -6863,6 +7004,10 @@ bool krkrsdl2_init_platform(void)
 // the same guarantee the real console gets from the chain-load restart.
 static void krkrsdl2_reinitialize_engine()
 {
+	krkrsdl2_startup_console_abort();
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	if (::Application) ::Application->StopAsyncImageLoader();
+#endif
 	krkrsdl2_resource_policy_end_session();
 	KRKRNS_STAGE("reinit: begin");
 	KRKRNS_LOG("[reinit] ===== restarting engine in-process =====");
@@ -7069,6 +7214,9 @@ void krkrsdl2_run_main_loop(void)
 
 void krkrsdl2_cleanup(void)
 {
+#ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
+	if (::Application) ::Application->StopAsyncImageLoader();
+#endif
 #ifdef __SWITCH__
 	// Stop the detached diagnostic heartbeat before teardown: its log writes
 	// would otherwise race libnx thread/TLS destruction and fault.

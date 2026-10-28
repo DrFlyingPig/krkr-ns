@@ -20,15 +20,8 @@
 #include <limits>
 #include <new>
 
-static std::atomic<tjs_uint64> TVPAsyncTouchGeneration(0);
-namespace {
-struct tTVPTouchCapacityWait {};
-struct tTVPTouchBudgetExceeded {};
-}
-
 tTVPTmpBitmapImage::tTVPTmpBitmapImage()
-	: w(0), h(0), pitch(0), buf(NULL), MetaInfo(NULL), PrivateBuffer(false),
-	  MaxBytes((std::numeric_limits<tjs_uint64>::max)())
+	: w(0), h(0), pitch(0), buf(NULL), MetaInfo(NULL)
 {}
 void tTVPTmpBitmapImage::ReleaseTouchBytes() noexcept {
 	if (ReservedBytes) {
@@ -38,8 +31,7 @@ void tTVPTmpBitmapImage::ReleaseTouchBytes() noexcept {
 }
 tTVPTmpBitmapImage::~tTVPTmpBitmapImage() {
 	if(buf) {
-		if (PrivateBuffer) std::free(buf);
-		else tTVPBitmapBitsAlloc::Free(buf);
+		tTVPBitmapBitsAlloc::Free(buf);
 		buf = NULL;
 	}
 	ReleaseTouchBytes();
@@ -49,7 +41,7 @@ tTVPTmpBitmapImage::~tTVPTmpBitmapImage() {
 	}
 }
 tTVPImageLoadCommand::tTVPImageLoadCommand()
-	: owner_(NULL), bmp_(NULL), dest_(NULL), touch_(false), touch_generation_(0) {}
+	: owner_(NULL), bmp_(NULL), dest_(NULL), touch_(false) {}
 tTVPImageLoadCommand::~tTVPImageLoadCommand() {
 	if( owner_ ) {
 		owner_->Release();
@@ -70,38 +62,24 @@ static void TVPLoadGraphicAsync_SizeCallback(void *callbackdata, tjs_uint w, tjs
 	if (!w || !h || pitch > (std::numeric_limits<tjs_int>::max)() ||
 		size > (std::numeric_limits<tjs_uint>::max)())
 		throw std::bad_alloc();
-	if (size > img->MaxBytes) {
-		if (img->TouchMemory) throw tTVPTouchBudgetExceeded();
-		throw std::bad_alloc();
-	}
 	if (img->buf) {
-		if (img->PrivateBuffer) std::free(img->buf);
-		else tTVPBitmapBitsAlloc::Free(img->buf);
+		tTVPBitmapBitsAlloc::Free(img->buf);
 		img->buf = NULL;
 	}
 	img->ReleaseTouchBytes();
 	img->h = h;
 	img->w = w;
 	BitmapInfomation info( w, h, 32 );
-	if (img->PrivateBuffer) {
-		if (img->TouchMemory) {
-			auto pending = img->TouchMemory->Pending.load(std::memory_order_acquire);
-			do {
-				if (size > img->PendingLimit || pending > img->PendingLimit - size)
-					throw tTVPTouchCapacityWait();
-			} while (!img->TouchMemory->Pending.compare_exchange_weak(pending, pending + size,
-				std::memory_order_acq_rel, std::memory_order_acquire));
-			img->ReservedBytes = size;
-			auto peak = img->TouchMemory->Peak.load(std::memory_order_relaxed);
-			while (peak < pending + size && !img->TouchMemory->Peak.compare_exchange_weak(
-				peak, pending + size, std::memory_order_relaxed)) {}
-		}
-		// BitmapBitsAlloc retries through compact/GC and initializes a compact
-		// hook. Cache-only decoding must never run either operation here.
-		img->buf = static_cast<tjs_uint32*>(std::malloc(info.GetImageSize()));
-		if (!img->buf) { img->ReleaseTouchBytes(); throw std::bad_alloc(); }
-	} else {
-		img->buf = (tjs_uint32*)tTVPBitmapBitsAlloc::Alloc(info.GetImageSize(), w, h);
+	// Like the reference bitmap, all decoded images use engine-owned pixels.
+	// The worker must not run the ordinary allocator's VM/cache/GPU compaction.
+	img->buf = (tjs_uint32*)tTVPBitmapBitsAlloc::AllocNoCompact(info.GetImageSize(), w, h);
+	if (!img->buf) throw std::bad_alloc();
+	if (img->TouchMemory) {
+		const auto pending = img->TouchMemory->Pending.fetch_add(size, std::memory_order_acq_rel) + size;
+		img->ReservedBytes = size;
+		auto peak = img->TouchMemory->Peak.load(std::memory_order_relaxed);
+		while (peak < pending && !img->TouchMemory->Peak.compare_exchange_weak(
+			peak, pending, std::memory_order_relaxed)) {}
 	}
 	img->pitch = info.GetPitchBytes();
 }
@@ -141,6 +119,10 @@ tTVPAsyncImageLoader::~tTVPAsyncImageLoader() {
 	while( CommandQueue.size() > 0 ) {
 		tTVPImageLoadCommand* cmd = CommandQueue.front();
 		CommandQueue.pop();
+		if (cmd->touch_batch_) {
+			if (!cmd->touch_cancelled_) ++cmd->touch_batch_->Cancelled;
+			--cmd->touch_batch_->Outstanding;
+		}
 		delete cmd;
 	}
 	while( LoadedQueue.size() > 0 ) {
@@ -152,19 +134,6 @@ tTVPAsyncImageLoader::~tTVPAsyncImageLoader() {
 		}
 		delete cmd;
 	}
-	while (!TouchQueue.empty()) {
-		auto* cmd = TouchQueue.front(); TouchQueue.pop_front();
-		if (!cmd->touch_cancelled_) ++cmd->touch_batch_->Cancelled;
-		--cmd->touch_batch_->Outstanding;
-		delete cmd;
-	}
-	if (DeferredTouch) {
-		if (!DeferredTouch->touch_cancelled_) ++DeferredTouch->touch_batch_->Cancelled;
-		--DeferredTouch->touch_batch_->Outstanding;
-		delete DeferredTouch;
-		DeferredTouch = nullptr;
-	}
-	TouchNames.clear();
 	ReportTouchBatches();
 	KRKRNS_LOG("[touch] summary batches=%llu requested=%llu prepared=%llu decoded=%llu cached=%llu pending=%llu peak=%llu",
 		static_cast<unsigned long long>(TouchSequence), static_cast<unsigned long long>(TouchRequested),
@@ -192,11 +161,29 @@ void tTVPAsyncImageLoader::Proc( NativeEvent& ev )
 		EventQueue.HandlerDefault(ev);
 		return;
 	}
-	HandleLoadedImage();
+	try {
+		HandleLoadedImage();
+	} catch (...) {
+		bool pending;
+		{
+			tTJSCriticalSectionHolder cs(ImageQueueCS);
+			pending = !LoadedQueue.empty();
+		}
+		// Touch notifications are coalesced. A throwing ordinary callback must
+		// not strand results already behind it; retry through the next main pump.
+		if (pending && !Stopping.load(std::memory_order_acquire)) {
+			try { SendToLoadFinish(); }
+			catch (...) { /* Keep the original dispatch exception if posting also fails. */ }
+		}
+		throw;
+	}
 }
 void tTVPAsyncImageLoader::HandleLoadedImage() {
 	bool loading;
 	do {
+		// Termination may be requested by the current onLoaded callback. Keep
+		// remaining commands owned until the outer pump stops/joins this loader.
+		if (Stopping.load(std::memory_order_acquire)) break;
 		loading = false;
 		tTVPImageLoadCommand* cmd = NULL;
 		{
@@ -213,12 +200,8 @@ void tTVPAsyncImageLoader::HandleLoadedImage() {
 				// A preload is best effort. Even an allocation/cache failure must
 				// release its buffer and allow the next request to progress.
 				try { HandleTouchedImage(cmd); } catch (...) { ++cmd->touch_batch_->Errors; }
-				TouchNames.erase(std::make_pair(cmd->touch_generation_, cmd->path_));
 				--cmd->touch_batch_->Outstanding;
 				command.reset();
-				// Releasing a pending buffer may unblock a touch decode, while
-				// ordinary Bitmap requests remain independently serviceable.
-				PushCommandQueueEvent.Set();
 				ReportTouchBatches();
 				continue;
 			}
@@ -275,23 +258,28 @@ void tTVPAsyncImageLoader::HandleLoadedImage() {
 // onLoaded( dic, is_async, is_error, error_mes ); エラーは
 // sync ( main thead )
 void tTVPAsyncImageLoader::LoadRequest( iTJSDispatch2 *owner, tTJSNI_Bitmap* bmp, const ttstr &name ) {
-	if (Stopping.load(std::memory_order_acquire)) return;
+	if (Stopping.load(std::memory_order_acquire)) {
+		if (bmp) bmp->SetLoading(false);
+		return;
+	}
 	//tTVPBaseBitmap* dest = new tTVPBaseBitmap( 32, 32, 32 );
 	tTVPBaseBitmap dest( TVPGetInitialBitmap() );
 	iTJSDispatch2* metainfo = NULL;
 	ttstr nname = TVPNormalizeStorageName(name);
 	if( TVPCheckImageCache(nname,&dest,glmNormal,0,0,TVP_clNone,&metainfo) ) {
+		// CopyFrom and the immediate callback can throw. Retain the returned
+		// dictionary before either operation, including the ownerless path.
+		tTJSVariant metadata(metainfo, metainfo);
+		if (metainfo) metainfo->Release();
 		// キャッシュ内に発見、即座に読込みを完了する
 		bmp->CopyFrom( &dest );
 		bmp->SetLoading( false );
 		if (!owner) {
-			if (metainfo) metainfo->Release();
 			return;
 		}
 
 		tTJSVariant param[4];
-		param[0] = tTJSVariant(metainfo,metainfo);
-		if( metainfo ) metainfo->Release();
+		param[0] = metadata;
 		param[1] = 0; // false
 		param[2] = 0; // false
 		param[3] = TJS_W(""); // error_mes
@@ -308,8 +296,9 @@ void tTVPAsyncImageLoader::LoadRequest( iTJSDispatch2 *owner, tTJSNI_Bitmap* bmp
 	}
 
 	tTVPGraphicHandlerType *handler = TVPGetGraphicLoadHandler(ext);
-	if (!handler) TVPThrowExceptionMessage(TVPUnknownGraphicFormat, nname);
-	PushLoadQueue(owner, bmp, nname, nname, handler);
+	// Like the reference, an existing resource with an unknown extension is an
+	// asynchronous onLoaded error; it is not a synchronous validation failure.
+	if (!PushLoadQueue(owner, bmp, nname, nname, handler) && bmp) bmp->SetLoading(false);
 }
 
 // tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
@@ -317,7 +306,7 @@ void tTVPAsyncImageLoader::LoadRequest( iTJSDispatch2 *owner, tTJSNI_Bitmap* bmp
 // TVPCreateStream はロックされているので、非同期で実行可能
 bool tTVPAsyncImageLoader::PushLoadQueue(iTJSDispatch2 *owner, tTJSNI_Bitmap *bmp,
 	const ttstr &nname, const ttstr &loadname, tTVPGraphicHandlerType *handler,
-	bool touch, tjs_uint64 generation, tjs_uint64 maxbytes,
+	bool touch,
 	const std::shared_ptr<tTVPAsyncTouchBatch>& batch) {
 	std::unique_ptr<tTVPImageLoadCommand> cmd(new tTVPImageLoadCommand());
 	cmd->owner_ = owner;
@@ -326,25 +315,19 @@ bool tTVPAsyncImageLoader::PushLoadQueue(iTJSDispatch2 *owner, tTJSNI_Bitmap *bm
 	cmd->path_ = nname;
 	cmd->load_path_ = loadname;
 	cmd->dest_ = new tTVPTmpBitmapImage();
-	cmd->handler_.reset(new tTVPGraphicHandlerType(*handler));
+	if (handler) cmd->handler_.reset(new tTVPGraphicHandlerType(*handler));
 	cmd->touch_ = touch;
-	cmd->touch_generation_ = generation;
 	cmd->touch_batch_ = batch;
 	if (touch) {
-		cmd->dest_->PrivateBuffer = true;
-		cmd->dest_->MaxBytes = maxbytes;
 		cmd->dest_->TouchMemory = TouchMemory;
-		cmd->dest_->PendingLimit = batch->Limit;
 	}
 	cmd->result_.Clear();
 	{
 		// キューをロックしてプッシュ
 		tTJSCriticalSectionHolder cs(CommandQueueCS);
 		if (Stopping.load(std::memory_order_acquire)) return false;
-		if (touch) {
-			TouchQueue.push_back(cmd.get());
-			++batch->Outstanding;
-		} else CommandQueue.push(cmd.get());
+		CommandQueue.push(cmd.get());
+		if (touch) ++batch->Outstanding;
 		cmd.release();
 	}
 	// 追加したことをイベントで通知
@@ -366,23 +349,12 @@ void tTVPAsyncImageLoader::LoadingThread() {
 				if( CommandQueue.size() ) {
 					cmd = CommandQueue.front();
 					CommandQueue.pop();
-				} else if (DeferredTouch) {
-					cmd = DeferredTouch; DeferredTouch = nullptr;
-				} else if (!TouchQueue.empty()) {
-					cmd = TouchQueue.front(); TouchQueue.pop_front();
 				}
 			}
 			if( cmd ) {
 				loading = true;
 				if (!cmd->touch_) KRKRNS_LOG("[imgload] begin %s", cmd->path_.AsNarrowStdString().c_str());
-				if (!LoadImageFromCommand(cmd)) {
-					// A full pending budget is backpressure, not a decode error.
-					// Retry only after a completion or ordinary request wakes us.
-					tTJSCriticalSectionHolder cs(CommandQueueCS);
-					DeferredTouch = cmd;
-					if (CommandQueue.empty()) break;
-					continue;
-				}
+				LoadImageFromCommand(cmd);
 				if (!cmd->touch_) KRKRNS_LOG("[imgload] done %s%s", cmd->path_.AsNarrowStdString().c_str(),
 					cmd->result_.length() ? " (error)" : "");
 				bool notify;
@@ -397,21 +369,18 @@ void tTVPAsyncImageLoader::LoadingThread() {
 		} while (loading && !Stopping.load(std::memory_order_acquire));
 	}
 }
-bool tTVPAsyncImageLoader::LoadImageFromCommand( tTVPImageLoadCommand* cmd ) {
+void tTVPAsyncImageLoader::LoadImageFromCommand( tTVPImageLoadCommand* cmd ) {
 	try {
+		if (!cmd->handler_) {
+			cmd->result_ = TVPUnknownGraphicFormat;
+			if (cmd->touch_batch_) ++cmd->touch_batch_->Errors;
+			return;
+		}
 		if (cmd->touch_) {
-			auto& batch = *cmd->touch_batch_;
-			if (Stopping.load(std::memory_order_acquire) || batch.Generation !=
-				TVPAsyncTouchGeneration.load(std::memory_order_acquire)) {
-				++batch.Cancelled; cmd->touch_cancelled_ = true;
-				ResetTouchImage(cmd); return true;
+			if (Stopping.load(std::memory_order_acquire)) {
+				++cmd->touch_batch_->Cancelled; cmd->touch_cancelled_ = true;
+				ResetTouchImage(cmd); return;
 			}
-			if (batch.Timeout && TVPGetTickCount() - batch.Started >= batch.Timeout) {
-				++batch.TimedOut; ResetTouchImage(cmd); return true;
-			}
-			const auto bytes = batch.Bytes.load(std::memory_order_relaxed);
-			if (bytes >= batch.Limit) { ++batch.BudgetSkipped; ResetTouchImage(cmd); return true; }
-			cmd->dest_->MaxBytes = batch.Limit - bytes;
 		}
 		tTVPStreamHolder holder(cmd->load_path_);
 		(cmd->handler_->Load)(cmd->handler_->FormatData, (void*)cmd->dest_, TVPLoadGraphicAsync_SizeCallback,
@@ -422,76 +391,65 @@ bool tTVPAsyncImageLoader::LoadImageFromCommand( tTVPImageLoadCommand* cmd ) {
 				std::memory_order_relaxed);
 			++cmd->touch_batch_->Decoded;
 		}
-	} catch (const tTVPTouchCapacityWait&) {
-		++cmd->touch_batch_->CapacityWaits;
-		ResetTouchImage(cmd);
-		return false;
-	} catch (const tTVPTouchBudgetExceeded&) {
-		++cmd->touch_batch_->BudgetSkipped;
-		ResetTouchImage(cmd);
-		cmd->result_ = TVPImageLoadError;
 	} catch(...) {
 		// 例外は全てキャッチ
 		cmd->result_ = TVPImageLoadError;
 		if (cmd->touch_) { ++cmd->touch_batch_->Errors; ResetTouchImage(cmd); }
 	}
-	return true;
 }
 
 void tTVPAsyncImageLoader::ResetTouchImage(tTVPImageLoadCommand *cmd) noexcept {
 	// Only the worker's unpublished private decoder state is discarded here.
 	// Path/handler preparation and cache/VM ownership stay on the main thread.
 	auto* image = cmd->dest_;
-	if (image->buf) { std::free(image->buf); image->buf = NULL; }
+	if (image->buf) { tTVPBitmapBitsAlloc::Free(image->buf); image->buf = NULL; }
 	image->ReleaseTouchBytes();
 	delete image->MetaInfo; image->MetaInfo = NULL;
 	image->w = image->h = 0; image->pitch = 0;
 }
 
-void tTVPAsyncImageLoader::InvalidateTouchRequests() {
-	TVPAsyncTouchGeneration.fetch_add(1, std::memory_order_acq_rel);
-}
-
 void tTVPAsyncImageLoader::TouchImages(const std::vector<ttstr> &names,
 	tjs_uint64 limit, tjs_uint64 timeout) {
-	if (names.empty() || !limit || Stopping.load(std::memory_order_acquire)) return;
+	if (names.empty() || Stopping.load(std::memory_order_acquire)) return;
+	// NoCompact never initializes the allocator or registers compact hooks on
+	// a worker. Initialize the shared engine bitmap on its owning main thread.
+	(void)TVPGetInitialBitmap();
 	auto batch = std::make_shared<tTVPAsyncTouchBatch>();
 	batch->Id = ++TouchSequence; batch->Requested = names.size();
 	TouchRequested += names.size();
-	batch->Limit = limit; batch->Started = TVPGetTickCount(); batch->Timeout = timeout;
-	batch->Generation = TVPAsyncTouchGeneration.load(std::memory_order_acquire);
+	// The reference computes these arguments before its asynchronous branch,
+	// then queues every miss without applying either to decoding.
+	batch->Limit = limit; batch->Timeout = timeout;
 	TouchBatches.push_back(batch);
 	for (size_t index = 0; index < names.size(); ++index) {
-		if (Stopping.load(std::memory_order_acquire) || batch->Generation !=
-			TVPAsyncTouchGeneration.load(std::memory_order_acquire)) {
+		if (Stopping.load(std::memory_order_acquire)) {
 			batch->Cancelled.fetch_add(names.size() - index); break;
-		}
-		if (batch->Timeout && TVPGetTickCount() - batch->Started >= batch->Timeout) {
-			batch->TimedOut.fetch_add(names.size() - index); break;
 		}
 		try {
 			const ttstr nname = TVPNormalizeStorageName(names[index]);
 			if (TVPHasImageCache(nname, glmNormal, 0, 0, TVP_clNone)) { ++batch->CacheHits; continue; }
 			ttstr loadname;
 			tTVPGraphicHandlerType *handler = NULL;
-			if (!TVPResolveGraphicForAsyncTouch(nname, loadname, handler)) { ++batch->Rejected; continue; }
-			const auto key = std::make_pair(batch->Generation, nname);
-			if (!TouchNames.insert(key).second) { ++batch->Duplicates; continue; }
-			try {
-				if (PushLoadQueue(NULL, NULL, nname, loadname, handler, true, batch->Generation, limit, batch))
-					++batch->Prepared;
-				else TouchNames.erase(key);
-			} catch (...) { TouchNames.erase(key); throw; }
+			TVPResolveGraphicForAsyncTouch(nname, loadname, handler);
+			// Missing handlers complete through the same worker error path.
+			// Repeated names remain separate FIFO commands until cached.
+			if (PushLoadQueue(NULL, NULL, nname, loadname, handler, true, batch))
+				++batch->Prepared;
 		} catch (...) {
-			// Match touchImages' best-effort handling of an invalid storage.
+			// Reference enqueue/preparation errors propagate synchronously.
+			// Already queued commands still own this batch and finish normally.
 			++batch->Rejected;
+			batch->PreparationComplete = true;
+			try { ReportTouchBatches(); }
+			catch (...) { /* Preserve the original preparation exception. */ }
+			throw;
 		}
 	}
 	batch->PreparationComplete = true;
-	KRKRNS_LOG("[touch] queued batch=%llu requested=%llu prepared=%llu hits=%llu duplicates=%llu rejected=%llu limit=%llu timeout=%llu",
+	KRKRNS_LOG("[touch] queued batch=%llu requested=%llu prepared=%llu hits=%llu duplicates=0 rejected=%llu limit=%llu timeout=%llu policy=reference-fifo async-params-ignored=1",
 		static_cast<unsigned long long>(batch->Id), static_cast<unsigned long long>(batch->Requested),
 		static_cast<unsigned long long>(batch->Prepared), static_cast<unsigned long long>(batch->CacheHits),
-		static_cast<unsigned long long>(batch->Duplicates), static_cast<unsigned long long>(batch->Rejected),
+		static_cast<unsigned long long>(batch->Rejected),
 		static_cast<unsigned long long>(batch->Limit), static_cast<unsigned long long>(batch->Timeout));
 	ReportTouchBatches();
 }
@@ -501,12 +459,11 @@ void tTVPAsyncImageLoader::ReportTouchBatches() {
 		const auto& batch = TouchBatches.front();
 		if (!batch->PreparationComplete || batch->Outstanding.load(std::memory_order_acquire)) return;
 		TouchPrepared += batch->Prepared; TouchDecoded += batch->Decoded.load(); TouchCached += batch->Cached.load();
-		KRKRNS_LOG("[touch] done batch=%llu decoded=%llu cached=%llu bytes=%llu budget=%llu timeout=%llu cancelled=%llu errors=%llu waits=%llu pending=%llu peak=%llu",
+		KRKRNS_LOG("[touch] done batch=%llu decoded=%llu cached=%llu bytes=%llu cancelled=%llu errors=%llu pending=%llu peak=%llu",
 			static_cast<unsigned long long>(batch->Id), static_cast<unsigned long long>(batch->Decoded.load()),
 			static_cast<unsigned long long>(batch->Cached.load()), static_cast<unsigned long long>(batch->Bytes.load()),
-			static_cast<unsigned long long>(batch->BudgetSkipped.load()), static_cast<unsigned long long>(batch->TimedOut.load()),
 			static_cast<unsigned long long>(batch->Cancelled.load()), static_cast<unsigned long long>(batch->Errors.load()),
-			static_cast<unsigned long long>(batch->CapacityWaits.load()), static_cast<unsigned long long>(TouchMemory->Pending.load()),
+			static_cast<unsigned long long>(TouchMemory->Pending.load()),
 			static_cast<unsigned long long>(TouchMemory->Peak.load()));
 		TouchBatches.pop_front();
 	}
@@ -514,30 +471,21 @@ void tTVPAsyncImageLoader::ReportTouchBatches() {
 
 void tTVPAsyncImageLoader::HandleTouchedImage(tTVPImageLoadCommand *cmd) {
 	if (!cmd->touch_batch_) return;
-	if (Stopping.load(std::memory_order_acquire) || cmd->touch_generation_ !=
-		TVPAsyncTouchGeneration.load(std::memory_order_acquire)) {
+	if (Stopping.load(std::memory_order_acquire)) {
 		if (!cmd->touch_cancelled_) ++cmd->touch_batch_->Cancelled;
 		cmd->touch_cancelled_ = true;
 		return;
 	}
 	if (cmd->result_.length() || !cmd->dest_->buf) return;
 	auto *image = cmd->dest_;
-	const tjs_uint size = static_cast<tjs_uint>(image->pitch) * image->h;
 	if (TVPHasImageCache(cmd->path_, glmNormal, 0, 0, TVP_clNone)) return;
 
-	// Main-thread allocation owns the engine bitmap. Its OOM compact callback
-	// may cancel this very batch; check the generation again before caching.
+	// Main-thread allocation owns the engine bitmap. Cache clear/limit changes
+	// do not cancel queued reference preloads; publication honors current limits.
 	tTVPBaseBitmap bitmap(TVPGetInitialBitmap());
-	std::unique_ptr<void, void (*)(void*)> bits(
-		tTVPBitmapBitsAlloc::Alloc(size, image->w, image->h), &tTVPBitmapBitsAlloc::Free);
-	std::memcpy(bits.get(), image->buf, size);
-	bitmap.SetSizeAndImageBuffer(image->w, image->h, bits.get());
-	bits.release();
-	if (cmd->touch_generation_ != TVPAsyncTouchGeneration.load(std::memory_order_acquire)) {
-		if (!cmd->touch_cancelled_) ++cmd->touch_batch_->Cancelled;
-		cmd->touch_cancelled_ = true;
-		return;
-	}
+	bitmap.SetSizeAndImageBuffer(image->w, image->h, image->buf);
+	image->buf = NULL; // The bitmap took ownership only after construction succeeded.
+	image->ReleaseTouchBytes();
 	auto *pairs = image->MetaInfo;
 	image->MetaInfo = NULL; // PushGraphicCache consumes this even on failure.
 	TVPPushGraphicCache(cmd->path_, &bitmap, pairs);

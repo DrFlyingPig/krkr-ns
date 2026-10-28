@@ -35,10 +35,15 @@ class tTVPBitmapBitsAlloc {
 	static iTVPMemoryAllocator* Allocator;
 	static tTJSCriticalSection AllocCS;
 	static void InitializeAllocator();
+	static void* AllocInternal(tjs_uint size, tjs_uint width, tjs_uint height, bool allowCompact);
 
 public:
 	static void FreeAllocator();
 	static void* Alloc( tjs_uint size, tjs_uint width, tjs_uint height );
+	// Worker-safe allocation with the same Free/sentinel/accounting contract.
+	// Never initializes the compact-hook-owning allocator; returns null on OOM
+	// or when the main thread has not initialized the allocator yet.
+	static void* AllocNoCompact(tjs_uint size, tjs_uint width, tjs_uint height);
 	static void Free( void* ptr );
 	static void LogMemory(const char *reason, size_t requested = 0);
 };
