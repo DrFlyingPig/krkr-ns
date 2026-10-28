@@ -787,6 +787,44 @@ void TVPDumpScriptEngine()
 //---------------------------------------------------------------------------
 // TVPExecuteStartupScript
 //---------------------------------------------------------------------------
+void TVPExecuteGameStartupScript(const ttstr &entry, const ttstr &applicationPath)
+{
+	// The platform already mounted this game's resources and ran its loose
+	// patch.tjs. Keep an explicit selected archive entry instead of resolving
+	// another game's or the built-in launcher's startup.tjs by basename.
+	try
+	{
+		const ttstr placed(TVPSearchPlacedPath(entry));
+		TVPAddLog(TJS_W("(info) Loading startup script : ") + placed);
+		TVPStartupSuccess = false;
+		try
+		{
+			iTJSTextReadStream *stream = TVPCreateTextStreamForRead(placed, TJS_W(""));
+			if (!stream) TVPThrowExceptionMessage(TVPCannotOpenStorage, placed);
+			stream->Destruct();
+			TVPExecuteStorage(entry);
+			TVPStartupSuccess = true;
+		}
+		catch (...)
+		{
+			if (!TVPIsExistentStorage(TJS_W("System/Initialize.tjs"))) throw;
+		}
+		if (!TVPStartupSuccess)
+		{
+			TVPExecuteStorage(TJS_W("System/Initialize.tjs"));
+			TVPStartupSuccess = true;
+		}
+		TVPAddLog(TJS_W("(info) Startup script ended."));
+		try
+		{
+			const ttstr after = applicationPath + TJS_W("AfterStartup.tjs");
+			if (TVPIsExistentStorageNoSearch(after)) TVPExecuteStorage(after);
+		}
+		catch (...) {}
+	}
+	TJS_CONVERT_TO_TJS_EXCEPTION
+}
+
 void TVPExecuteStartupScript()
 {
 	// execute "startup.tjs"

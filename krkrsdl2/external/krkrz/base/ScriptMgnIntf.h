@@ -82,6 +82,10 @@ extern bool TVPProcessUnhandledException(eTJS &e);
 // TVPInitializeStartupScript
 //---------------------------------------------------------------------------
 extern void TVPInitializeStartupScript();
+// Execute the selected game's entry with Kirikiroid2 fallback/post-startup
+// ordering. applicationPath is the normalized game directory, ending in '/'.
+// The built-in launcher keeps its separate TVPExecuteStartupScript flow.
+extern void TVPExecuteGameStartupScript(const ttstr &entry, const ttstr &applicationPath);
 extern bool TVPCheckProcessLog();
 extern ttstr TVPGetSystemInitializeScript();
 //---------------------------------------------------------------------------

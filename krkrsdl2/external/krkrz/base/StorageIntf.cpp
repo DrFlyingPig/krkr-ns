@@ -3450,28 +3450,12 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 			KRKRNS_LOG("[launcher] compat stub execution failed");
 		}
 		TVPExecuteStorage(ttstr(TJS_W("file://?/romfs:/compat/system/k2compat_reinstall.tjs")));
-		// The reference marks the startup script as (in)complete around this
-		// call, and System.exit()/terminate() are inert until it completes
-		// (see TVPStartupSuccess in ScriptMgnIntf.cpp).  A localisation whose
-		// product-key check fails and calls System.exit() keeps booting instead
-		// of dropping back to the launcher.
-		{
-			extern void TVPSetStartupSuccess(bool);
-			TVPSetStartupSuccess(false);
-			try
-			{
-				TVPExecuteStorage(entry);
+		// The shared game flow preserves reference entry/fallback/AfterStartup
+		// ordering and only marks startup successful after script completion.
+		TVPExecuteGameStartupScript(entry, TVPProjectDir);
 #ifdef __SWITCH__
-				startupConsole.Returned();
+		startupConsole.Returned();
 #endif
-			}
-			catch(...)
-			{
-				TVPSetStartupSuccess(true);
-				throw;
-			}
-			TVPSetStartupSuccess(true);
-		}
 		KRKRNS_STAGE("game startup returned");
 		KRKRNS_LOG("[launcher] game startup returned");
 	}
