@@ -35,6 +35,7 @@
 #include "SDLBitmapCompositor.h"
 #include "KrkrNSStartupConsole.h"
 #include "SDLStartupConsoleState.h"
+#include "SDLStartupConsoleNativeHost.h"
 #endif
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
@@ -1247,6 +1248,7 @@ static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
 #ifdef __SWITCH__
 static krkrns::StartupConsoleState krkrsdl2_startup_console;
 static SDL_threadID krkrsdl2_startup_console_owner = 0;
+static krkrns::StartupConsoleNativeHost krkrsdl2_startup_console_host;
 #endif
 
 // Presentation policy shared by the texture upload and the present path: a
@@ -1630,6 +1632,13 @@ SDL_Renderer *TVPGetPrimarySDLRenderer(void)
 
 TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 {
+#ifdef __SWITCH__
+	// The temporary startup display must relinquish the only native window
+	// before the game creates its own. An engine callback reentering while the
+	// overlay draws is rejected before this object joins the window list.
+	if (!krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing()))
+		throw std::runtime_error("Cannot create a game window during startup console drawing");
+#endif
 	this->window = nullptr;
 	this->ResetImeMode();
 	this->fileDropArray = nullptr;
@@ -2121,6 +2130,18 @@ void TVPWindowWindow::ReleaseNativeForSwitch(void)
 		SDL_FreeSurface(this->surface);
 		this->surface = nullptr;
 	}
+#ifdef __SWITCH__
+	// Keep the existing display alive for real startup messages until the
+	// first game window takes over. All launcher textures/compositor state
+	// have already been released; hosted windows never own this pair.
+	bool canTransfer = !this->hostWindow && SDL_ThreadID() == krkrsdl2_startup_console_owner;
+#ifdef KRKRZ_ENABLE_CANVAS
+	canTransfer = canTransfer && !this->context;
+#endif
+	if (canTransfer && krkrsdl2_startup_console_host.Adopt(this->window, this->renderer,
+		krkrsdl2_startup_console.Active(), krkrsdl2_startup_console.Drawing()))
+		KRKRNS_LOG("[startup-console] launcher display retained for startup messages");
+#endif
 	if (this->renderer && !this->hostWindow)
 	{
 		SDL_DestroyRenderer(this->renderer);
@@ -2148,17 +2169,19 @@ static int MulDiv(int nNumber, int nNumerator, int nDenominator)
 #endif
 
 #ifdef __SWITCH__
-bool TVPWindowWindow::DrawStartupConsole()
+template <typename Validate>
+static bool krkrsdl2_draw_startup_console(SDL_Window* window, SDL_Renderer* renderer, Validate validate)
 {
-	// No native window/renderer is created for the console. In particular,
-	// never borrow an active compositor FBO or acquire its GPU resource lease.
-	if (this->hostWindow || !this->renderer || !this->window || this->isBeingDeleted ||
+	// Neither the retained launcher nor the game window's compositor FBO is
+	// touched; console pixels are drawn only at the default framebuffer.
+	if (!renderer || !window ||
 		SDL_ThreadID() != krkrsdl2_startup_console_owner ||
-		SDL_GetRenderTarget(this->renderer) != nullptr ||
+		SDL_GetRenderTarget(renderer) != nullptr ||
 		!krkrsdl2_startup_console.BeginDraw(SDL_GetTicks64())) return false;
-	struct DrawGuard { ~DrawGuard() { krkrsdl2_startup_console.EndDraw(); } } drawGuard;
-	SDL_Renderer* const renderer = this->renderer;
-	SDL_Window* const window = this->window;
+	struct DrawGuard { ~DrawGuard() {
+		krkrsdl2_startup_console.EndDraw();
+		krkrsdl2_startup_console_host.EndDraw();
+	} } drawGuard;
 	std::unique_ptr<tTVPBaseBitmap> bitmap;
 	std::vector<std::uint32_t> pixels;
 	const int width = 800, height = 450;
@@ -2186,9 +2209,7 @@ bool TVPWindowWindow::DrawStartupConsole()
 	} catch (...) { return false; } // Allocation/font failure leaves normal startup intact.
 	// Engine allocation may invoke compact/GC and destroy the window. Never
 	// dereference a removed native object, nor retain any texture across calls.
-	if (!krkrsdl2_startup_console.Active() ||
-		std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this) == krkrsdl2_live_windows.end() ||
-		this->renderer != renderer || this->window != window || this->isBeingDeleted ||
+	if (!krkrsdl2_startup_console.Active() || !validate() ||
 		SDL_GetRenderTarget(renderer) != nullptr) return false;
 	std::unique_ptr<SDL_Texture, void (*)(SDL_Texture*)> text(
 		SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height), SDL_DestroyTexture);
@@ -2198,17 +2219,34 @@ bool TVPWindowWindow::DrawStartupConsole()
 	const bool good = saved.Begin() && SDL_RenderClear(renderer) == 0 &&
 		SDL_RenderCopy(renderer, text.get(), nullptr, nullptr) == 0;
 	if (!saved.Restore()) {
-		krkrsdl2_startup_console.Abort();
+		krkrsdl2_startup_console_abort();
 		throw std::runtime_error("Cannot restore startup console renderer state");
 	}
 	if (good) SDL_RenderPresent(renderer);
 	return good;
 }
 
+bool TVPWindowWindow::DrawStartupConsole()
+{
+	if (this->hostWindow || !this->renderer || !this->window || this->isBeingDeleted) return false;
+	SDL_Renderer* const renderer = this->renderer;
+	SDL_Window* const window = this->window;
+	return krkrsdl2_draw_startup_console(window, renderer, [this, window, renderer]() {
+		return std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this) != krkrsdl2_live_windows.end() &&
+			this->renderer == renderer && this->window == window && !this->isBeingDeleted;
+	});
+}
+
 static void krkrsdl2_startup_console_draw()
 {
 	if (!krkrsdl2_startup_console.Active() || krkrsdl2_startup_console.Drawing() ||
 		SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
+	SDL_Window* const window = krkrsdl2_startup_console_host.Window();
+	SDL_Renderer* const renderer = krkrsdl2_startup_console_host.Renderer();
+	const auto generation = krkrsdl2_startup_console_host.Generation();
+	if (krkrsdl2_draw_startup_console(window, renderer, [window, renderer, generation]() {
+		return krkrsdl2_startup_console_host.Matches(window, renderer, generation);
+	})) return;
 	std::vector<TVPWindowWindow*> windows;
 	try { windows = krkrsdl2_live_windows; } catch (...) { return; }
 	for (auto* window : windows)
@@ -2218,12 +2256,17 @@ static void krkrsdl2_startup_console_draw()
 
 bool krkrsdl2_startup_console_begin()
 {
+	if (!krkrsdl2_startup_console.Active() && !krkrsdl2_startup_console.Drawing())
+		krkrsdl2_startup_console_host.Release(false);
 	const bool begun = krkrsdl2_startup_console.Begin();
 	if (begun) krkrsdl2_startup_console_owner = SDL_ThreadID();
 	return begun;
 }
 void krkrsdl2_startup_console_returned() noexcept { krkrsdl2_startup_console.EntryReturned(); }
-void krkrsdl2_startup_console_abort() noexcept { krkrsdl2_startup_console.Abort(); }
+void krkrsdl2_startup_console_abort() noexcept {
+	krkrsdl2_startup_console.Abort();
+	krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing());
+}
 void krkrsdl2_startup_console_log(const char16_t* text, std::size_t length, bool important)
 {
 	if (!krkrsdl2_startup_console.Active() || SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
@@ -2233,7 +2276,10 @@ void krkrsdl2_startup_console_log(const char16_t* text, std::size_t length, bool
 void krkrsdl2_startup_console_enter_run() noexcept { krkrsdl2_startup_console.EnterRun(); }
 void krkrsdl2_startup_console_leave_run(bool complete)
 {
-	if (!krkrsdl2_startup_console.LeaveRun(complete)) return;
+	const bool reveal = krkrsdl2_startup_console.LeaveRun(complete);
+	if (!krkrsdl2_startup_console.Active())
+		krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing());
+	if (!reveal) return;
 	// Events/timers/LayerManager/window updates have now completed once in a
 	// fresh outer Run. Present that prepared frame, without recursively Run().
 	const auto windows = krkrsdl2_live_windows;
@@ -7214,6 +7260,9 @@ void krkrsdl2_run_main_loop(void)
 
 void krkrsdl2_cleanup(void)
 {
+#ifdef __SWITCH__
+	krkrsdl2_startup_console_abort();
+#endif
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 	if (::Application) ::Application->StopAsyncImageLoader();
 #endif

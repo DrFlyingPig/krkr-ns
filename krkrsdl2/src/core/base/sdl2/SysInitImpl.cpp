@@ -1593,21 +1593,15 @@ void TVPAfterSystemInit()
 //	TVPGraphicCacheSystemLimit = 1*1024*1024; // DEBUG
 
 #ifdef __SWITCH__
-		// KRKR-ns: enable the decoded-image cache by default.  KAG games do not
-		// touch System.graphicCacheLimit, so TVPGraphicCacheEnabled stayed false and
-		// every menu/dialog open re-decoded all its psb:// TLG icons on the main
-		// thread — the "click any button -> one core pegged at 100% -> lag" symptom
-		// in the device logs (quickmenu 32 / file.pimg 99 resources).  With the
-		// cache on, a previously opened UI opens instantly.
-		// Marker sdmc:/switch/KRKR-ns/no-imagecache.txt disables it (A/B test).
+		// Match Kirikiroid2: calculating the system limit does not enable the
+		// image cache. Games may opt in through System.graphicCacheLimit.
+		// The existing diagnostic marker still forces it off at initialization.
 		FILE* noImageCache = fopen(KRKRNS_BASE_A "/no-imagecache.txt", "rb");
 		const bool cacheDisabledByMarker = noImageCache != nullptr;
-		if (noImageCache) { fclose(noImageCache); }
-		else if (TVPGetGraphicCacheLimit() == 0 && TVPGraphicCacheSystemLimit > 0)
+		if (noImageCache)
 		{
-			TVPSetGraphicCacheLimit(TVPGraphicCacheSystemLimit);
-			KRKRNS_LOG("[ns] graphic cache enabled: %lluMB",
-				(unsigned long long)(TVPGraphicCacheSystemLimit / (1024 * 1024)));
+			fclose(noImageCache);
+			TVPSetGraphicCacheLimit(0);
 		}
 		KRKRNS_LOG("[memory-budget] source=%s applet=%d queried=%d rc=%08x sdl-mb=%d kernel=%llu total=%llu assumed=%llu cache=%llu enabled=%llu explicit=%d marker=%d",
 			TVPSwitchMemoryBudget.Source, int(TVPSwitchMemoryBudget.Applet), int(TVPSwitchMemoryBudget.Queried),

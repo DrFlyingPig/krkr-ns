@@ -1576,29 +1576,21 @@ void TVPClearGraphicCache()
 	TVPGraphicCacheTotalBytes = 0;
 }
 
-// Caller holds gGraphicCacheLock. Replacing the same key (e.g. an asynchronous
-// decode finishing after a synchronous load) must not count its bytes twice.
-// Enforce the budget after insertion and never evict the UI for an oversized
-// image which cannot itself stay in the cache.
+// Caller holds gGraphicCacheLock. Kirikiroid2 trims the previous contents
+// before adding the new image. Consequently the newest image remains cached
+// even if it alone exceeds the configured limit, until a later insertion or
+// an explicit limit change. Keep replacement accounting exact when an async
+// decode finishes after the same key was inserted synchronously.
 static void TVPStoreGraphicCache(const tTVPGraphicsSearchData &key, tjs_uint32 hash,
 	tTVPGraphicImageData *data)
 {
+	TVPCheckGraphicCacheLimit();
 	const tjs_uint size = data->GetSize();
 	auto *old = TVPGraphicCache.FindWithHash(key, hash);
 	const tjs_uint oldSize = old ? old->GetObjectNoAddRef()->GetSize() : 0;
-	if (size > TVPGraphicCacheLimit)
-	{
-		if (old)
-		{
-			TVPGraphicCache.DeleteWithHash(key, hash);
-			TVPGraphicCacheTotalBytes -= oldSize;
-		}
-		return;
-	}
 	tTVPGraphicImageHolder holder(data);
 	TVPGraphicCache.AddWithHash(key, hash, holder);
 	TVPGraphicCacheTotalBytes = TVPGraphicCacheTotalBytes - oldSize + size;
-	TVPCheckGraphicCacheLimit();
 }
 static tTVPAtExit
 	TVPUninitMessageLoad(TVP_ATEXIT_PRI_RELEASE, TVPClearGraphicCache);
