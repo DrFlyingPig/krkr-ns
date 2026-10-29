@@ -33,9 +33,6 @@
 #include "SDLBitmapCompletion.h"
 #ifdef __SWITCH__
 #include "SDLBitmapCompositor.h"
-#include "KrkrNSStartupConsole.h"
-#include "SDLStartupConsoleState.h"
-#include "SDLStartupConsoleNativeHost.h"
 #endif
 #include "SDLBitmapBridge.h"
 #include "SDLTextureUploadState.h"
@@ -1245,11 +1242,6 @@ struct tTVPMessageReceiverRecord
 // (hidden) launcher window owns the display a game window presents into the
 // void and the screen stays black.
 static std::vector<TVPWindowWindow *> krkrsdl2_live_windows;
-#ifdef __SWITCH__
-static krkrns::StartupConsoleState krkrsdl2_startup_console;
-static SDL_threadID krkrsdl2_startup_console_owner = 0;
-static krkrns::StartupConsoleNativeHost krkrsdl2_startup_console_host;
-#endif
 
 // Presentation policy shared by the texture upload and the present path: a
 // canvas taller than the window's fit-width height AND at least as wide as the
@@ -1411,7 +1403,6 @@ public:
 	   texture starts as undefined/black content, and the engine only reports
 	   incremental damage, so a lost upload would otherwise never be retried. */
 	void InvalidateFullSurface(bool recreateTexture = false);
-	bool DrawStartupConsole();
 #endif
 	/* Called from tTJSNI_Window */
 	virtual bool GetFormEnabled() override;
@@ -1545,10 +1536,10 @@ public:
 	/* The hosted child that currently owns input (modal), or null. */
 	TVPWindowWindow *hosted_modal_child();
 	TVPWindowWindow *PresentationOwner();
-	bool CanPresentCachedFrame();
+	void RequestHostPresentation();
 	void DrawHostedLayer(TVPWindowWindow *child, int logicalWidth, int logicalHeight);
 	void DrawHostedPresentation();
-	bool PresentCompletedFrame(bool gpuPresented, bool cachedPresent, bool presentationOwner);
+	bool PresentCompletedFrame(bool gpuPresented, bool presentationOwner);
 #endif
 	enum CloseAction
 	{
@@ -1632,13 +1623,6 @@ SDL_Renderer *TVPGetPrimarySDLRenderer(void)
 
 TVPWindowWindow::TVPWindowWindow(tTJSNI_Window *w)
 {
-#ifdef __SWITCH__
-	// The temporary startup display must relinquish the only native window
-	// before the game creates its own. An engine callback reentering while the
-	// overlay draws is rejected before this object joins the window list.
-	if (!krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing()))
-		throw std::runtime_error("Cannot create a game window during startup console drawing");
-#endif
 	this->window = nullptr;
 	this->ResetImeMode();
 	this->fileDropArray = nullptr;
@@ -1926,6 +1910,9 @@ else
 
 TVPWindowWindow::~TVPWindowWindow()
 {
+#ifdef __SWITCH__
+	TVPWindowWindow *presentationHost = this->hostWindow;
+#endif
 	// KRKR-ns diagnostic: the in-process engine restart depends on this running.
 	// The engine restart deletes the Application, which deletes its window list,
 	// and only here are the native SDL objects released.  If this never logs, the
@@ -2013,6 +2000,11 @@ TVPWindowWindow::~TVPWindowWindow()
 	krkrsdl2_live_windows.erase(
 		std::remove(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this),
 		krkrsdl2_live_windows.end());
+#ifdef __SWITCH__
+	if (presentationHost &&
+		std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), presentationHost) != krkrsdl2_live_windows.end())
+		presentationHost->RequestHostPresentation();
+#endif
 }
 
 void TVPWindowWindow::SetPaintBoxSize(tjs_int w, tjs_int h)
@@ -2130,18 +2122,6 @@ void TVPWindowWindow::ReleaseNativeForSwitch(void)
 		SDL_FreeSurface(this->surface);
 		this->surface = nullptr;
 	}
-#ifdef __SWITCH__
-	// Keep the existing display alive for real startup messages until the
-	// first game window takes over. All launcher textures/compositor state
-	// have already been released; hosted windows never own this pair.
-	bool canTransfer = !this->hostWindow && SDL_ThreadID() == krkrsdl2_startup_console_owner;
-#ifdef KRKRZ_ENABLE_CANVAS
-	canTransfer = canTransfer && !this->context;
-#endif
-	if (canTransfer && krkrsdl2_startup_console_host.Adopt(this->window, this->renderer,
-		krkrsdl2_startup_console.Active(), krkrsdl2_startup_console.Drawing()))
-		KRKRNS_LOG("[startup-console] launcher display retained for startup messages");
-#endif
 	if (this->renderer && !this->hostWindow)
 	{
 		SDL_DestroyRenderer(this->renderer);
@@ -2169,125 +2149,6 @@ static int MulDiv(int nNumber, int nNumerator, int nDenominator)
 #endif
 
 #ifdef __SWITCH__
-template <typename Validate>
-static bool krkrsdl2_draw_startup_console(SDL_Window* window, SDL_Renderer* renderer, Validate validate)
-{
-	// Neither the retained launcher nor the game window's compositor FBO is
-	// touched; console pixels are drawn only at the default framebuffer.
-	if (!renderer || !window ||
-		SDL_ThreadID() != krkrsdl2_startup_console_owner ||
-		SDL_GetRenderTarget(renderer) != nullptr ||
-		!krkrsdl2_startup_console.BeginDraw(SDL_GetTicks64())) return false;
-	struct DrawGuard { ~DrawGuard() {
-		krkrsdl2_startup_console.EndDraw();
-		krkrsdl2_startup_console_host.EndDraw();
-	} } drawGuard;
-	std::unique_ptr<tTVPBaseBitmap> bitmap;
-	std::vector<std::uint32_t> pixels;
-	const int width = 800, height = 450;
-	try {
-		// Font allocation/GC can itself log. Snapshot bounded UTF-16 lines
-		// before drawing and keep the recursion guard active across all of it.
-		const auto lines = krkrsdl2_startup_console.Lines();
-		bitmap.reset(new tTVPBaseBitmap(width, height, 32));
-		const tTVPRect bounds(0, 0, width, height);
-		bitmap->Fill(bounds, 0xff08090b);
-		auto font = bitmap->GetFont();
-		font.Height = -18; font.Angle = 0;
-		bitmap->SetFont(font);
-		int y = 10;
-		for (const auto& line : lines) {
-			bitmap->DrawText(bounds, 8, y,
-				ttstr(reinterpret_cast<const tjs_char*>(line.text.c_str())),
-				line.important ? 0x00ffff80 : 0x00c0c0c0, bmAlpha, 255);
-			y += 23;
-		}
-		pixels.resize(std::size_t(width) * height);
-		for (int row = 0; row < height; ++row)
-			std::memcpy(pixels.data() + std::size_t(row) * width,
-				bitmap->GetScanLine(row), std::size_t(width) * 4);
-	} catch (...) { return false; } // Allocation/font failure leaves normal startup intact.
-	// Engine allocation may invoke compact/GC and destroy the window. Never
-	// dereference a removed native object, nor retain any texture across calls.
-	if (!krkrsdl2_startup_console.Active() || !validate() ||
-		SDL_GetRenderTarget(renderer) != nullptr) return false;
-	std::unique_ptr<SDL_Texture, void (*)(SDL_Texture*)> text(
-		SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, width, height), SDL_DestroyTexture);
-	if (!text || SDL_SetTextureBlendMode(text.get(), SDL_BLENDMODE_NONE) != 0 ||
-		SDL_UpdateTexture(text.get(), nullptr, pixels.data(), width * 4) != 0) return false;
-	SDLStartupConsoleState saved(renderer);
-	const bool good = saved.Begin() && SDL_RenderClear(renderer) == 0 &&
-		SDL_RenderCopy(renderer, text.get(), nullptr, nullptr) == 0;
-	if (!saved.Restore()) {
-		krkrsdl2_startup_console_abort();
-		throw std::runtime_error("Cannot restore startup console renderer state");
-	}
-	if (good) SDL_RenderPresent(renderer);
-	return good;
-}
-
-bool TVPWindowWindow::DrawStartupConsole()
-{
-	if (this->hostWindow || !this->renderer || !this->window || this->isBeingDeleted) return false;
-	SDL_Renderer* const renderer = this->renderer;
-	SDL_Window* const window = this->window;
-	return krkrsdl2_draw_startup_console(window, renderer, [this, window, renderer]() {
-		return std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), this) != krkrsdl2_live_windows.end() &&
-			this->renderer == renderer && this->window == window && !this->isBeingDeleted;
-	});
-}
-
-static void krkrsdl2_startup_console_draw()
-{
-	if (!krkrsdl2_startup_console.Active() || krkrsdl2_startup_console.Drawing() ||
-		SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
-	SDL_Window* const window = krkrsdl2_startup_console_host.Window();
-	SDL_Renderer* const renderer = krkrsdl2_startup_console_host.Renderer();
-	const auto generation = krkrsdl2_startup_console_host.Generation();
-	if (krkrsdl2_draw_startup_console(window, renderer, [window, renderer, generation]() {
-		return krkrsdl2_startup_console_host.Matches(window, renderer, generation);
-	})) return;
-	std::vector<TVPWindowWindow*> windows;
-	try { windows = krkrsdl2_live_windows; } catch (...) { return; }
-	for (auto* window : windows)
-		if (std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), window) != krkrsdl2_live_windows.end() &&
-			window->DrawStartupConsole()) break;
-}
-
-bool krkrsdl2_startup_console_begin()
-{
-	if (!krkrsdl2_startup_console.Active() && !krkrsdl2_startup_console.Drawing())
-		krkrsdl2_startup_console_host.Release(false);
-	const bool begun = krkrsdl2_startup_console.Begin();
-	if (begun) krkrsdl2_startup_console_owner = SDL_ThreadID();
-	return begun;
-}
-void krkrsdl2_startup_console_returned() noexcept { krkrsdl2_startup_console.EntryReturned(); }
-void krkrsdl2_startup_console_abort() noexcept {
-	krkrsdl2_startup_console.Abort();
-	krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing());
-}
-void krkrsdl2_startup_console_log(const char16_t* text, std::size_t length, bool important)
-{
-	if (!krkrsdl2_startup_console.Active() || SDL_ThreadID() != krkrsdl2_startup_console_owner) return;
-	try { krkrsdl2_startup_console.Append(text, length, important); } catch (...) { return; }
-	krkrsdl2_startup_console_draw();
-}
-void krkrsdl2_startup_console_enter_run() noexcept { krkrsdl2_startup_console.EnterRun(); }
-void krkrsdl2_startup_console_leave_run(bool complete)
-{
-	const bool reveal = krkrsdl2_startup_console.LeaveRun(complete);
-	if (!krkrsdl2_startup_console.Active())
-		krkrsdl2_startup_console_host.Release(krkrsdl2_startup_console.Drawing());
-	if (!reveal) return;
-	// Events/timers/LayerManager/window updates have now completed once in a
-	// fresh outer Run. Present that prepared frame, without recursively Run().
-	const auto windows = krkrsdl2_live_windows;
-	for (auto* window : windows)
-		if (std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), window) != krkrsdl2_live_windows.end())
-			window->TickBeat();
-}
-
 TVPWindowWindow *TVPWindowWindow::find_host_for_secondary_window(TVPWindowWindow *self)
 {
 	for (TVPWindowWindow *w : krkrsdl2_live_windows)
@@ -2334,13 +2195,12 @@ TVPWindowWindow *TVPWindowWindow::PresentationOwner()
 	return host;
 }
 
-bool TVPWindowWindow::CanPresentCachedFrame()
+void TVPWindowWindow::RequestHostPresentation()
 {
-	// Cocos keeps drawing its resident sprite every display frame even when
-	// KiriKiri did not repaint the layer tree. Reuse that completed texture;
-	// do not manufacture engine damage or read CPU pixels to fill this frame.
-	return cachedFrameReady && renderer && window && surface && texture && bitmapCompletion &&
-		isVisible && !isBeingDeleted && !krkrsdl2_glc_enabled() && PresentationOwner() == this;
+	TVPWindowWindow *host = this->hostWindow ? this->hostWindow : this;
+	if (std::find(krkrsdl2_live_windows.begin(), krkrsdl2_live_windows.end(), host) == krkrsdl2_live_windows.end())
+		return;
+	if (auto *presenter = host->PresentationOwner()) presenter->needsGraphicUpdate = true;
 }
 
 void TVPWindowWindow::DrawHostedLayer(TVPWindowWindow *child, int logicalWidth, int logicalHeight)
@@ -2376,19 +2236,15 @@ void TVPWindowWindow::DrawHostedPresentation()
 	DrawHostedLayer(this, logicalWidth, logicalHeight);
 }
 
-bool TVPWindowWindow::PresentCompletedFrame(bool gpuPresented, bool cachedPresent, bool presentationOwner)
+bool TVPWindowWindow::PresentCompletedFrame(bool gpuPresented, bool presentationOwner)
 {
-	if (krkrsdl2_startup_console.Active()) return false;
 	if (!gpuPresented && (!presentationOwner || !cachedFrameReady || !texture)) return false;
 	const Uint64 presentStart = SDL_GetPerformanceCounter();
 	// Legacy direct-GL composition already swapped. SDL owns the swap in the
 	// ordinary path, with exactly one owner for the whole hosted-window stack.
 	if (!gpuPresented) {
 		KrkrNSPerfScope perfPresent(KrkrNSPerfOp::Present);
-		if (cachedPresent) {
-			KrkrNSPerfScope perfRepeat(KrkrNSPerfOp::GpuDisplayRepeat);
-			SDL_RenderPresent(this->renderer);
-		} else SDL_RenderPresent(this->renderer);
+		SDL_RenderPresent(this->renderer);
 	}
 	const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
 	if (g_krkrns_prof.last_pres_ticks) {
@@ -2610,6 +2466,9 @@ void TVPWindowWindow::SetAttentionPoint(tjs_int left, tjs_int top, const struct 
 }
 void TVPWindowWindow::BringToFront()
 {
+#ifdef __SWITCH__
+	const bool changed = _currentWindowWindow != this;
+#endif
 	if (_currentWindowWindow != this)
 	{
 		if (_currentWindowWindow)
@@ -2622,6 +2481,9 @@ void TVPWindowWindow::BringToFront()
 	{
 		SDL_RaiseWindow(this->window);
 	}
+#ifdef __SWITCH__
+	if (changed) this->RequestHostPresentation();
+#endif
 }
 void TVPWindowWindow::ShowWindowAsModal()
 {
@@ -2637,15 +2499,13 @@ void TVPWindowWindow::ShowWindowAsModal()
 		TVPThrowExceptionMessage(TJS_W("Showing window as modal is not supported"));
 	}
 #endif
-#ifdef __SWITCH__
-	// Reference showModal removes its startup console before entering the
-	// modal pump, so a required startup question remains visible/interactive.
-	krkrsdl2_startup_console_abort();
-#endif
 	KRKRNS_LOG("[win] modal enter window=%p host=%p", (void *)this, (void *)this->hostWindow);
 	if (this->hostWindow) krkrsdl2_log_flush();
 	this->in_mode_ = true;
 	this->BringToFront();
+#ifdef __SWITCH__
+	this->RequestHostPresentation();
+#endif
 	this->modal_result_ = 0;
 	while (this == _currentWindowWindow && !this->modal_result_)
 	{
@@ -2660,6 +2520,9 @@ void TVPWindowWindow::ShowWindowAsModal()
 		}
 	}
 	this->in_mode_ = false;
+#ifdef __SWITCH__
+	this->RequestHostPresentation();
+#endif
 	KRKRNS_LOG("[win] modal leave window=%p result=%d", (void *)this, this->modal_result_);
 	if (this->hostWindow) krkrsdl2_log_flush();
 }
@@ -2669,6 +2532,9 @@ bool TVPWindowWindow::GetVisible()
 }
 void TVPWindowWindow::SetVisible(bool visible)
 {
+#ifdef __SWITCH__
+	const bool changed = this->isVisible != visible;
+#endif
 	this->isVisible = visible;
 	if (!this->visibilityHasInitialized)
 	{
@@ -2699,6 +2565,9 @@ void TVPWindowWindow::SetVisible(bool visible)
 			_currentWindowWindow->BringToFront();
 		}
 	}
+#ifdef __SWITCH__
+	if (changed) this->RequestHostPresentation();
+#endif
 }
 void TVPWindowWindow::SetFullScreenMode(bool fullscreen)
 {
@@ -3116,9 +2985,6 @@ void TVPWindowWindow::GetDrawableSize(tjs_int &w, tjs_int &h)
 }
 void TVPWindowWindow::Swap()
 {
-#ifdef __SWITCH__
-	if (krkrsdl2_startup_console.Active()) return;
-#endif
 	if (this->context)
 	{
 		SDL_GL_SwapWindow(this->window);
@@ -3439,12 +3305,6 @@ void TVPWindowWindow::krkrsdl2_dump_layer_tree()
 
 void TVPWindowWindow::TickBeat()
 {
-#ifdef __SWITCH__
-	if (krkrsdl2_startup_console.Active()) {
-		krkrsdl2_startup_console_draw();
-		return;
-	}
-#endif
 	// KRKR-ns (Switch): native resources were released when a game took over
 	// the single display; this object only survives until the session ends.
 	if (!this->renderer)
@@ -3546,12 +3406,10 @@ void TVPWindowWindow::TickBeat()
 	}
 #endif
 #ifdef __SWITCH__
-	const bool presentationOwner = this->PresentationOwner() == this;
-	const bool cachedPresent = !this->needsGraphicUpdate && this->CanPresentCachedFrame();
-	if (this->needsGraphicUpdate || cachedPresent)
-#else
-	if (this->needsGraphicUpdate)
+	TVPWindowWindow *presenter = this->PresentationOwner();
+	const bool presentationOwner = presenter == this;
 #endif
+	if (this->needsGraphicUpdate)
 	{
 		if (this->bitmapCompletion)
 		{
@@ -3618,15 +3476,9 @@ void TVPWindowWindow::TickBeat()
 #endif
 				if (this->texture)
 				{
-					// Runs on every rendered frame, including frames with no
-					// damage (a static title screen), so the capture deadline is
-					// actually observed.
+					// Capture on the next frame requested by the engine.
 					krkrsdl2_maybe_capture_frame(this, this->surface, this->renderer);
-					if (this->surface
-#ifdef __SWITCH__
-						&& !cachedPresent
-#endif
-					)
+					if (this->surface)
 					{
 						static void* lastPresentSurface = (void*)-1;
 						if (lastPresentSurface != (void*)this->surface)
@@ -4054,7 +3906,7 @@ const int sw = this->surface->w;
 				}
 #endif
 #ifdef __SWITCH__
-				this->PresentCompletedFrame(gpuPresented, cachedPresent, presentationOwner);
+				this->PresentCompletedFrame(gpuPresented, presentationOwner);
 #else
 				if (!gpuPresented) {
 					KrkrNSPerfScope perfPresent(KrkrNSPerfOp::Present);
@@ -4081,6 +3933,12 @@ const int sw = this->surface->w;
 				SDL_UpdateWindowSurfaceRects(this->window, &rect, 1);
 				this->hasDrawn = true;
 			}
+			// A hosted dialog presents all windows on the shared display. If a
+			// lower window changes, request one composite from the owner too.
+#ifdef __SWITCH__
+			if (presenter && !presentationOwner && presenter->renderer == this->renderer)
+				presenter->needsGraphicUpdate = true;
+#endif
 			this->bitmapCompletion->update_rect.clear();
 			this->needsGraphicUpdate = false;
 		}
@@ -7050,7 +6908,6 @@ bool krkrsdl2_init_platform(void)
 // the same guarantee the real console gets from the chain-load restart.
 static void krkrsdl2_reinitialize_engine()
 {
-	krkrsdl2_startup_console_abort();
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 	if (::Application) ::Application->StopAsyncImageLoader();
 #endif
@@ -7260,9 +7117,6 @@ void krkrsdl2_run_main_loop(void)
 
 void krkrsdl2_cleanup(void)
 {
-#ifdef __SWITCH__
-	krkrsdl2_startup_console_abort();
-#endif
 #ifdef KRKRSDL2_ENABLE_ASYNC_IMAGE_LOAD
 	if (::Application) ::Application->StopAsyncImageLoader();
 #endif

@@ -10,40 +10,6 @@ inline bool& GPUCompletionReceiverSlot()
     return supported;
 }
 
-// A transition handler may render a GPU temporary only while the direct
-// window traversal is processing that exact layer. Nested offscreen layer
-// completions must not inherit the permission.
-inline const void*& GPUWindowTransitionOwnerSlot()
-{
-    static thread_local const void* owner = nullptr;
-    return owner;
-}
-inline bool& GPUWindowTransitionProcessSlot()
-{
-    static thread_local bool enabled = false;
-    return enabled;
-}
-class GPUWindowTransitionOwnerScope
-{
-    const void* previous_;
-public:
-    explicit GPUWindowTransitionOwnerScope(const void* owner)
-        : previous_(GPUWindowTransitionOwnerSlot()) { GPUWindowTransitionOwnerSlot() = owner; }
-    ~GPUWindowTransitionOwnerScope() { GPUWindowTransitionOwnerSlot() = previous_; }
-    GPUWindowTransitionOwnerScope(const GPUWindowTransitionOwnerScope&) = delete;
-    GPUWindowTransitionOwnerScope& operator=(const GPUWindowTransitionOwnerScope&) = delete;
-};
-class GPUWindowTransitionProcessScope
-{
-    bool previous_;
-public:
-    explicit GPUWindowTransitionProcessScope(bool enabled)
-        : previous_(GPUWindowTransitionProcessSlot()) { GPUWindowTransitionProcessSlot() = enabled; }
-    ~GPUWindowTransitionProcessScope() { GPUWindowTransitionProcessSlot() = previous_; }
-    GPUWindowTransitionProcessScope(const GPUWindowTransitionProcessScope&) = delete;
-    GPUWindowTransitionProcessScope& operator=(const GPUWindowTransitionProcessScope&) = delete;
-};
-
 class BitmapCompletionReceiverScope
 {
     bool previous_;

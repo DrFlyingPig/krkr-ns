@@ -197,9 +197,6 @@ struct EmoteGLRenderBackend::Impl
     // single readback row, so IsAvailable() can select a verified tile width.
     int readTileWidth = 0;
     std::vector<uint8_t> readScratch;
-#if defined(KRKRNS_EMOTE_REUSE_READBACK)
-    std::vector<uint8_t> tiledReadScratch;
-#endif
 
     void end()
     {
@@ -229,9 +226,6 @@ struct EmoteGLRenderBackend::Impl
         // silently fall back to corrupting full-width reads after an engine
         // restart.  readScratch is resized on demand.
         readScratch.clear();
-#if defined(KRKRNS_EMOTE_REUSE_READBACK)
-        tiledReadScratch.clear();
-#endif
         active = false; failed = false; blend = 0;
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
         // The old context owns these objects. As with the mesh resources,
@@ -438,15 +432,8 @@ struct EmoteGLRenderBackend::Impl
             {
                 const int tw = std::min(tileWidth, x1 - tx);
                 const size_t tileRow = size_t(tw) * 4;
-#if defined(KRKRNS_EMOTE_REUSE_READBACK)
-                tiledReadScratch.resize(tileRow * size_t(h));
-                // Match a fresh zeroed tile if a driver writes only part of it.
-                std::fill(tiledReadScratch.begin(), tiledReadScratch.end(), 0);
-                uint8_t* tilePixels = tiledReadScratch.data();
-#else
                 std::vector<uint8_t> tile(tileRow * size_t(h));
                 uint8_t* tilePixels = tile.data();
-#endif
                 {
                     KrkrNSPerfScope gpuReadback(KrkrNSPerfOp::GpuReadback);
                     ReadPixels(tx, y0, tw, h, GL_RGBA, GL_UNSIGNED_BYTE, tilePixels);
@@ -1012,23 +999,13 @@ struct EmoteGLRenderBackend::Impl
                 (unsigned long long)residentStats.probeCopies, (unsigned long long)residentStats.peakGPUBytes);
     }
 #endif
-    void* create(int width, int height, bool renderTarget,
-                 const uint8_t* initialPixels = nullptr, int initialPitch = 0)
+    void* create(int width, int height, bool renderTarget)
     {
         if (width <= 0 || height <= 0) return nullptr;
         Scope scope(*this);
         auto image = std::make_unique<Image>();
         image->width = width; image->height = height; image->target = renderTarget;
         image->pixels.resize(size_t(width) * height * 4);
-        if (initialPixels)
-        {
-            // Keep the independent CPU mirror used by LockTexture. Source
-            // rows may have padding or run backwards, just like UpdateTexture.
-            for (int y = 0; y < height; ++y)
-                std::memcpy(image->pixels.data() + size_t(y) * width * 4,
-                            initialPixels + std::ptrdiff_t(y) * initialPitch,
-                            size_t(width) * 4);
-        }
         GenTextures(1, &image->texture);
         BindTexture(GL_TEXTURE_2D, image->texture);
         TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image->pixels.data());
@@ -1285,30 +1262,6 @@ bool EmoteGLRenderBackend::GetTargetSize(void* target, int& width, int& height) 
     return true;
 }
 void* EmoteGLRenderBackend::CreateTexture(int w, int h) { return impl->create(w, h, false); }
-void* EmoteGLRenderBackend::CreateTextureWithPixels(int w, int h, const uint8_t* pixels,
-                                                 int pitch)
-{
-#if defined(KRKRNS_EMOTE_ATOMIC_TEXTURE)
-    if (w <= 0 || h <= 0) return nullptr;
-    const std::ptrdiff_t stride = pitch;
-    if (!pixels || (stride < std::ptrdiff_t(w) * 4 && stride > -std::ptrdiff_t(w) * 4))
-        throw std::runtime_error("Invalid E-mote texture update dimensions/pitch");
-    // One private-context transaction initializes the final pixels and mipmap;
-    // the control path first uploads zeroes, then replaces them in another call.
-    void* result = impl->create(w, h, false, pixels, pitch);
-    if (result)
-    {
-        static const bool announced = [] {
-            KRKRNS_LOG("[emote] atomic texture initialization candidate enabled");
-            return true;
-        }();
-        (void)announced;
-    }
-    return result;
-#else
-    return iTVPRenderBackend::CreateTextureWithPixels(w, h, pixels, pitch);
-#endif
-}
 void EmoteGLRenderBackend::DestroyTarget(void* target) { impl->destroy(target); }
 void EmoteGLRenderBackend::DestroyTexture(void* texture) { impl->destroy(texture); }
 void EmoteGLRenderBackend::SetTarget(void* target)

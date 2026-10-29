@@ -134,11 +134,9 @@ public:
     void captureCanvas(iTJSDispatch2* targetLayer);
     void unloadUnusedTextures();
 
-    // 直接用于绘制的GPU目标。_width/_height 是逻辑舞台尺寸（limitArea）；
-    // _renderW/_renderH 是实际渲染目标分辨率（可为逻辑的一半以提速）。
+    // 直接用于绘制的全尺寸 GPU 目标。_width/_height 是逻辑舞台尺寸。
     tjs_int _width = 0, _height = 0;
     tjs_int _orgX = 0, _orgY = 0;
-    tjs_int _renderW = 0, _renderH = 0;
     uint32_t _clearColor = 0;
     void* _target = nullptr;
     void* _maskTarget = nullptr;

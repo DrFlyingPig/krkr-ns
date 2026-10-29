@@ -115,9 +115,6 @@ public:
 TJS_EXP_FUNC_DEF(void, TVPAddTransHandlerProvider,(iTVPTransHandlerProvider *pro));
 TJS_EXP_FUNC_DEF(void, TVPRemoveTransHandlerProvider, (iTVPTransHandlerProvider *pro));
 iTVPTransHandlerProvider * TVPFindTransHandlerProvider(const ttstr &name);
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-bool KrkrIsBuiltinGPUCrossfade(iTVPDivisibleTransHandler *handler);
-#endif
 //---------------------------------------------------------------------------
 
 

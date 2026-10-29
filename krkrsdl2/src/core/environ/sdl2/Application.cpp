@@ -9,9 +9,6 @@
 #include "KrkrNSProf.h"
 #include "KrkrNSVMProf.h"
 #include "KrkrNSPerf.h"
-#ifdef __SWITCH__
-#include "KrkrNSStartupConsole.h"
-#endif
 
 #include <algorithm>
 #include <string>
@@ -699,10 +696,6 @@ void tTVPApplication::CloseConsole() {
 #endif
 
 void tTVPApplication::PrintConsole( const tjs_char* mes, unsigned long len, bool iserror ) {
-#ifdef __SWITCH__
-	static_assert(sizeof(tjs_char) == sizeof(char16_t), "Startup console needs UTF-16");
-	krkrsdl2_startup_console_log(reinterpret_cast<const char16_t*>(mes), len, iserror);
-#endif
 #if 0
 	HANDLE hStdOutput = ::GetStdHandle(iserror ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
 	if (hStdOutput > 0) {
@@ -845,7 +838,6 @@ extern "C" void EMSCRIPTEN_KEEPALIVE emscripten_syncfs_is_finished()
 void tTVPApplication::Run() {
 #ifdef __SWITCH__
 	EngineExecutionGuard engineExecution(engine_execution_depth_);
-	krkrns::StartupConsoleRunGuard startupConsoleRun;
 #endif
 #if 0
 	TVPTerminateCode = 0;
@@ -928,9 +920,6 @@ void tTVPApplication::Run() {
 	// The reference runs watchdog maintenance after event delivery and window
 	// ticks on this thread, outside the script timer's producer lock.
 	if (TVPSystemControl) TVPSystemControl->SystemWatchTimerTimer();
-	// A launch callback may have returned inside this Run. Reveal only after
-	// the following complete outer pump, never by recursively pumping here.
-	startupConsoleRun.Complete();
 #endif
 #if defined(__SWITCH__) && defined(KRKRNS_GAME_LOG_BATCH)
 	// Cocos budgets its complete update, including ordinary log writes,
@@ -1089,9 +1078,6 @@ void tTVPApplication::StopAsyncImageLoader() noexcept {
 #endif
 
 void tTVPApplication::Terminate() {
-#ifdef __SWITCH__
-	krkrsdl2_startup_console_abort();
-#endif
 #if 0
 	::PostQuitMessage(0);
 #endif

@@ -94,12 +94,6 @@ class tTVPTempBitmapHolder : public tTVPCompactEventCallbackIntf
 
 	std::vector<tTVPBaseBitmap *> Temporaries;
 	tjs_uint TempLevel;
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	// Separate window-only GPU crossfades from CPU scratch reuse. Otherwise
-	// the next CPU transition forces a synchronous readback of every frame.
-	std::vector<tTVPBaseBitmap *> GPUTemporaries;
-	tjs_uint GPUTempLevel = 0;
-#endif
 	bool TempCompactInit;
 
 private:
@@ -118,9 +112,6 @@ private:
 		{
 			delete (*i);
 		}
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-		for(auto *bitmap : GPUTemporaries) delete bitmap;
-#endif
 		if(TempCompactInit) TVPRemoveCompactEventHook(this);
 	}
 
@@ -176,35 +167,6 @@ private:
 		TempLevel--;
 	}
 
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	tTVPBaseBitmap *InternalGetGPUTemp(tjs_uint w, tjs_uint h)
-	{
-		if(!TempCompactInit)
-		{
-			TVPAddCompactEventHook(this);
-			TempCompactInit = true;
-		}
-		std::size_t slot = GPUTempLevel;
-		while(slot < GPUTemporaries.size() &&
-			(GPUTemporaries[slot]->GetWidth() != w || GPUTemporaries[slot]->GetHeight() != h))
-			++slot;
-		if(slot == GPUTemporaries.size() &&
-			GPUTemporaries.size() < (GPUTempLevel < 4 ? 4u : GPUTempLevel + 1u))
-		{
-			std::unique_ptr<tTVPBaseBitmap> bitmap(new tTVPBaseBitmap(w, h, 32));
-			GPUTemporaries.push_back(bitmap.get());
-			bitmap.release();
-		}
-		if(slot == GPUTemporaries.size()) slot = GPUTempLevel;
-		if(slot != GPUTempLevel) std::swap(GPUTemporaries[slot], GPUTemporaries[GPUTempLevel]);
-		auto *bitmap = GPUTemporaries[GPUTempLevel];
-		if(bitmap->GetWidth() != w || bitmap->GetHeight() != h)
-			bitmap->SetSize(w, h, false);
-		++GPUTempLevel;
-		return bitmap;
-	}
-	void InternalFreeGPUTemp() { if(GPUTempLevel) --GPUTempLevel; }
-#endif
 
 	void CompactTempBitmap()
 	{
@@ -217,11 +179,6 @@ private:
 		}
 
 		Temporaries.resize(TempLevel);
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-		for(auto it = GPUTemporaries.begin() + GPUTempLevel; it != GPUTemporaries.end(); ++it)
-			delete *it;
-		GPUTemporaries.resize(GPUTempLevel);
-#endif
 	}
 
 
@@ -264,12 +221,6 @@ public:
 
 	static void FreeTemp()
 		{ TVPTempBitmapHolder->InternalFreeTemp(); }
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	static tTVPBaseBitmap * GetGPUTemp(tjs_uint w, tjs_uint h)
-		{ return TVPTempBitmapHolder->InternalGetGPUTemp(w, h); }
-	static void FreeGPUTemp()
-		{ TVPTempBitmapHolder->InternalFreeGPUTemp(); }
-#endif
 };
 //---------------------------------------------------------------------------
 const tTVPBaseBitmap & TVPGetInitialBitmap()
@@ -6330,9 +6281,6 @@ void tTJSNI_BaseLayer::DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
 				Target->DrawCompleted(translated, bitmap, clip, type, opacity);
 			}
 		} translated(target, x - r.left, y - r.top);
-	#ifdef KRKRNS_GPU_OPAQUE_CROSSFADE
-		krkrns::GPUWindowTransitionOwnerScope gpuTransitionOwner(this);
-	#endif
 		try { Draw(&translated, rect, false); }
 		catch(...) { CurrentDrawTarget = NULL; TransDrawable.OrgDrawable = NULL; throw; }
 		TransDrawable.OrgDrawable = NULL;
@@ -7580,24 +7528,10 @@ void tTJSNI_BaseLayer::tTransDrawable::DrawCompleted(const tTVPRect &destrect,
 
 	tTVPBaseBitmap *dest;
 	bool tempalloc = false;
-	#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	bool gpuTempAlloc = false;
-	#endif
 	if(bmp == Target || Target == NULL)
 	{
 		// source bitmap is the same as the Original Target;
 		// allocatte temporary bitmap
-	#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-		if(type == ltOpaque && opacity == 255 &&
-			krkrns::GPUWindowTransitionOwnerSlot() == Owner &&
-			KrkrIsBuiltinGPUCrossfade(Owner->DivisibleTransHandler))
-		{
-			dest = tTVPTempBitmapHolder::GetGPUTemp(
-				cliprect.get_width(), cliprect.get_height());
-			gpuTempAlloc = true;
-		}
-		else
-	#endif
 		{
 			dest = tTVPTempBitmapHolder::GetTemp(
 				cliprect.get_width(), cliprect.get_height(), true);
@@ -7610,9 +7544,6 @@ void tTJSNI_BaseLayer::tTransDrawable::DrawCompleted(const tTVPRect &destrect,
 				Owner->DestSLP->Attach(dest);
 		} catch(...) {
 			if(tempalloc) tTVPTempBitmapHolder::FreeTemp();
-		#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-			if(gpuTempAlloc) tTVPTempBitmapHolder::FreeGPUTemp();
-		#endif
 			throw;
 		}
 		data.Dest = Owner->DestSLP;
@@ -7634,11 +7565,6 @@ void tTJSNI_BaseLayer::tTransDrawable::DrawCompleted(const tTVPRect &destrect,
 	try
 	{
 		{
-	#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-			krkrns::GPUWindowTransitionProcessScope gpuTransitionProcess(
-				gpuTempAlloc && type == ltOpaque &&
-				krkrns::GPUWindowTransitionOwnerSlot() == Owner);
-	#endif
 			Owner->DivisibleTransHandler->Process(&data);
 		}
 		tTVPRect cr = cliprect;
@@ -7662,16 +7588,10 @@ void tTJSNI_BaseLayer::tTransDrawable::DrawCompleted(const tTVPRect &destrect,
 	catch(...)
 	{
 		if(tempalloc) tTVPTempBitmapHolder::FreeTemp();
-	#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-		if(gpuTempAlloc) tTVPTempBitmapHolder::FreeGPUTemp();
-	#endif
 		throw;
 	}
 
 	if(tempalloc) tTVPTempBitmapHolder::FreeTemp();
-	#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	if(gpuTempAlloc) tTVPTempBitmapHolder::FreeGPUTemp();
-	#endif
 }
 //---------------------------------------------------------------------------
 tjs_uint64 tTJSNI_BaseLayer::GetTransTick()

@@ -265,114 +265,6 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
                     2, 1, 0, 3, 6, 5, 4, 7,
                     10, 9, 8, 11, 14, 13, 12, 15};
                 const uint8x16_t swizzle = vld1q_u8(swizzleBytes);
-#if defined(KRKRNS_EMOTE_BRIDGE_BLOCK16)
-                const std::uintptr_t sourceAddress = reinterpret_cast<std::uintptr_t>(sourceRow);
-                const std::uintptr_t destinationAddress = reinterpret_cast<std::uintptr_t>(destinationRow);
-                const bool disjointRows = sourceAddress < destinationAddress
-                    ? destinationAddress - sourceAddress >= rowBytes
-                    : sourceAddress - destinationAddress >= rowBytes;
-                if (disjointRows)
-                {
-                    uint32x4_t firstChanged0 = vdupq_n_u32(0);
-                    uint32x4_t firstChanged1 = firstChanged0;
-                    uint32x4_t firstChanged2 = firstChanged0;
-                    uint32x4_t firstChanged3 = firstChanged0;
-                    uint32x4_t lastChanged0 = firstChanged0;
-                    uint32x4_t lastChanged1 = firstChanged0;
-                    uint32x4_t lastChanged2 = firstChanged0;
-                    uint32x4_t lastChanged3 = firstChanged0;
-                    int firstBlockX = -1;
-                    int lastBlockX = 0;
-                    for (; x + 16 <= scanRight; x += 16)
-                    {
-                        const size_t offset = static_cast<size_t>(x) * 4u;
-                        const uint8x16_t bgra0 = vqtbl1q_u8(vld1q_u8(sourceRow + offset), swizzle);
-                        const uint8x16_t bgra1 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 16), swizzle);
-                        const uint8x16_t bgra2 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 32), swizzle);
-                        const uint8x16_t bgra3 = vqtbl1q_u8(vld1q_u8(sourceRow + offset + 48), swizzle);
-                        const uint32x4_t changed0 = vmvnq_u32(vceqq_u32(
-                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset)),
-                            vreinterpretq_u32_u8(bgra0)));
-                        const uint32x4_t changed1 = vmvnq_u32(vceqq_u32(
-                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 16)),
-                            vreinterpretq_u32_u8(bgra1)));
-                        const uint32x4_t changed2 = vmvnq_u32(vceqq_u32(
-                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 32)),
-                            vreinterpretq_u32_u8(bgra2)));
-                        const uint32x4_t changed3 = vmvnq_u32(vceqq_u32(
-                            vreinterpretq_u32_u8(vld1q_u8(destinationRow + offset + 48)),
-                            vreinterpretq_u32_u8(bgra3)));
-                        const uint32x4_t changed = vorrq_u32(
-                            vorrq_u32(changed0, changed1), vorrq_u32(changed2, changed3));
-                        if (vmaxvq_u32(changed) != 0)
-                        {
-                            if (firstBlockX < 0)
-                            {
-                                firstBlockX = x;
-                                firstChanged0 = changed0;
-                                firstChanged1 = changed1;
-                                firstChanged2 = changed2;
-                                firstChanged3 = changed3;
-                            }
-                            lastBlockX = x;
-                            lastChanged0 = changed0;
-                            lastChanged1 = changed1;
-                            lastChanged2 = changed2;
-                            lastChanged3 = changed3;
-                            // Equal pixels in a changed block are rewritten verbatim.
-                            vst1q_u8(destinationRow + offset, bgra0);
-                            vst1q_u8(destinationRow + offset + 16, bgra1);
-                            vst1q_u8(destinationRow + offset + 32, bgra2);
-                            vst1q_u8(destinationRow + offset + 48, bgra3);
-                        }
-                    }
-                    if (firstBlockX >= 0)
-                    {
-                        uint32x4_t firstChanged = firstChanged0;
-                        int firstGroupX = 0;
-                        if (vmaxvq_u32(firstChanged0) == 0)
-                        {
-                            firstGroupX = 4;
-                            firstChanged = firstChanged1;
-                            if (vmaxvq_u32(firstChanged1) == 0)
-                            {
-                                firstGroupX = 8;
-                                firstChanged = firstChanged2;
-                                if (vmaxvq_u32(firstChanged2) == 0)
-                                {
-                                    firstGroupX = 12;
-                                    firstChanged = firstChanged3;
-                                }
-                            }
-                        }
-                        rowLeft = firstBlockX + firstGroupX +
-                            (vgetq_lane_u32(firstChanged, 0) ? 0 :
-                             vgetq_lane_u32(firstChanged, 1) ? 1 :
-                             vgetq_lane_u32(firstChanged, 2) ? 2 : 3);
-                        uint32x4_t finalChanged = lastChanged3;
-                        int lastGroupX = 12;
-                        if (vmaxvq_u32(lastChanged3) == 0)
-                        {
-                            lastGroupX = 8;
-                            finalChanged = lastChanged2;
-                            if (vmaxvq_u32(lastChanged2) == 0)
-                            {
-                                lastGroupX = 4;
-                                finalChanged = lastChanged1;
-                                if (vmaxvq_u32(lastChanged1) == 0)
-                                {
-                                    lastGroupX = 0;
-                                    finalChanged = lastChanged0;
-                                }
-                            }
-                        }
-                        rowRight = lastBlockX + lastGroupX +
-                            (vgetq_lane_u32(finalChanged, 3) ? 4 :
-                             vgetq_lane_u32(finalChanged, 2) ? 3 :
-                             vgetq_lane_u32(finalChanged, 1) ? 2 : 1);
-                    }
-                }
-#endif
                 uint32x4_t lastChanged = vdupq_n_u32(0);
                 int lastChangedX = -1;
                 for (; x + 4 <= scanRight; x += 4)
@@ -440,13 +332,6 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
             auto identity = EmoteLayerIdentityForView(afterView, copyWidth, copyHeight);
             if (afterView.row0 != destination || afterView.pitch != destinationPitch)
                 identity = {};
-            if (identity && previousIdentity)
-            {
-                const SDL_Rect changed = dirtyLeft < dirtyRight && dirtyTop < dirtyBottom
-                    ? SDL_Rect{dirtyLeft, dirtyTop, dirtyRight - dirtyLeft, dirtyBottom - dirtyTop}
-                    : SDL_Rect{0, 0, 0, 0};
-                krkrns::GetBitmapCompositor().CPUWrittenRegion(beforeView, afterView, changed);
-            }
             damageBackend->CommitLayerDamage(target, identity);
         }
 #endif
@@ -821,34 +706,14 @@ D3DAdaptor::D3DAdaptor(
     krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
     if (renderer)
     {
-        // Official emoteplayer exposes d3dEmoteLowScale for slow GPUs. Full
-        // resolution is the default (sharp); create the marker file
-        // sdmc:/switch/KRKR-ns/emote-halfres.txt to render at half
-        // resolution (4x fewer pixels, softer) on slow systems.
-        tjs_int renderW = width, renderH = height;
-        bool halfRes = false;
-        if (FILE* f = fopen(KRKRNS_BASE_A "/emote-halfres.txt", "rb"))
-        {
-            fclose(f);
-            halfRes = true;
-        }
-        if (halfRes && width >= 2 && height >= 2)
-        {
-            renderW = (width + 1) / 2;
-            renderH = (height + 1) / 2;
-        }
-        _target = renderer->CreateTarget(renderW, renderH);
-        _maskTarget = renderer->CreateTarget(renderW, renderH);
-        // Logical stage stays at the requested size so animation coordinates
-        // and part sizes are unaffected; only pixel density is reduced.
+        _target = renderer->CreateTarget(width, height);
+        _maskTarget = renderer->CreateTarget(width, height);
         _width = width;
         _height = height;
         _orgX = orgX;
         _orgY = orgY;
-        _renderW = renderW;
-        _renderH = renderH;
-        TVPConsoleLog("[emote] D3DAdaptor created w=%d h=%d orgX=%d orgY=%d (requested %dx%d)",
-                      renderW, renderH, _orgX, _orgY, width, height);
+        TVPConsoleLog("[emote] D3DAdaptor created w=%d h=%d orgX=%d orgY=%d",
+                      width, height, _orgX, _orgY);
     }
 }
 D3DAdaptor::~D3DAdaptor()
@@ -882,43 +747,6 @@ void D3DAdaptor::captureCanvas(iTJSDispatch2* targetLayer)
     krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
     if (!renderer)
         return;
-    const tjs_uint layerW = ths->GetImageWidth();
-    const tjs_uint layerH = ths->GetImageHeight();
-    if (_renderW > 0 && _renderH > 0 && layerW != 0 && layerH != 0 &&
-        ((layerW + 1) / 2) == (tjs_uint)_renderW && ((layerH + 1) / 2) == (tjs_uint)_renderH)
-    {
-        // Half-resolution target: read back, then nearest-upscale 2x straight
-        // into the layer with the R/B exchange, avoiding a full-size copy.
-        int sourcePitch = 0;
-        uint8_t* source = renderer->LockTarget(_target, sourcePitch);
-        uint8_t* destination =
-            static_cast<uint8_t*>(ths->GetMainImagePixelBufferForTransientWrite());
-        const int destinationPitch = ths->GetMainImagePixelBufferPitch();
-        if (source && destination)
-        {
-            TVPConsoleLog("[emote] capture upscaled %dx%d -> %ux%u", _renderW, _renderH,
-                          layerW, layerH);
-            for (tjs_uint y = 0; y < layerH; ++y)
-            {
-                const uint8_t* sourceRow =
-                    source + static_cast<std::ptrdiff_t>(y >> 1) * sourcePitch;
-                uint8_t* destinationRow =
-                    destination + static_cast<std::ptrdiff_t>(y) * destinationPitch;
-                for (tjs_uint x = 0; x < layerW; ++x)
-                {
-                    const uint8_t* s = sourceRow + static_cast<std::ptrdiff_t>(x >> 1) * 4;
-                    uint8_t* d = destinationRow + static_cast<std::ptrdiff_t>(x) * 4;
-                    d[0] = s[2];
-                    d[1] = s[1];
-                    d[2] = s[0];
-                    d[3] = s[3];
-                }
-            }
-            ths->Update();
-        }
-        renderer->UnlockTarget(_target);
-        return;
-    }
     tTVPRect dirtyRect;
     const bool copied =
         CopyRenderTargetToLayer(renderer, _target, ths, _width, _height, &dirtyRect);

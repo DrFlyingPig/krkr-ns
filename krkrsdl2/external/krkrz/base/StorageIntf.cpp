@@ -11,9 +11,6 @@
 #include "tjsCommHead.h"
 #include "KrkrNSLog.h"
 #include "KrkrNSPerf.h"
-#ifdef __SWITCH__
-#include "KrkrNSStartupConsole.h"
-#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -3270,9 +3267,6 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 		if(result) *result = false;
 		return TJS_S_OK;
 	}
-#ifdef __SWITCH__
-	krkrns::StartupConsoleLaunchGuard startupConsole;
-#endif
 	const ttstr entry = krkrsdl2_prepare_xp3_game(*param[0], *param[1]);
 
 	// KRKR-ns: Kirikiroid2-compatible per-game XP3 extraction filter.  Titles
@@ -3453,9 +3447,6 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/launchXP3)
 		// The shared game flow preserves reference entry/fallback/AfterStartup
 		// ordering and only marks startup successful after script completion.
 		TVPExecuteGameStartupScript(entry, TVPProjectDir);
-#ifdef __SWITCH__
-		startupConsole.Returned();
-#endif
 		KRKRNS_STAGE("game startup returned");
 		KRKRNS_LOG("[launcher] game startup returned");
 	}

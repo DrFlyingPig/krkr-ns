@@ -25,12 +25,6 @@
 #ifdef __SWITCH__
 #include "ThreadIntf.h"
 #include "KrkrNSProf.h"
-#ifdef KRKRNS_GPU_OPAQUE_CROSSFADE
-#include "SDLBitmapCompletionSource.h"
-#include <new>
-#include <typeinfo>
-#include <vector>
-#endif
 #include <SDL_timer.h>
 #include <algorithm>
 #include <cstdint>
@@ -644,12 +638,6 @@ public:
 	}
 };
 //---------------------------------------------------------------------------
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-bool KrkrIsBuiltinGPUCrossfade(iTVPDivisibleTransHandler *handler)
-{
-	return handler && typeid(*handler) == typeid(tTVPCrossFadeTransHandler);
-}
-#endif
 tjs_error TJS_INTF_METHOD tTVPCrossFadeTransHandler::
 	StartProcess(tjs_uint64 tick)
 {
@@ -747,69 +735,9 @@ tjs_error TJS_INTF_METHOD tTVPCrossFadeTransHandler::Process(
 	return TJS_S_OK;
 }
 //---------------------------------------------------------------------------
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-static bool KrkrTryGPUOpaqueCrossfade(tTVPDivisibleData *data, tjs_int phase)
-{
-	if(!data || !krkrns::GPUCompletionReceiverSlot() ||
-		!krkrns::GPUWindowTransitionProcessSlot() || phase <= 0 || phase >= 255 ||
-		!data->Dest || !data->Src1 || !data->Src2 || data->Width <= 0 || data->Height <= 0)
-		return false;
-	const auto bitmap = [](iTVPScanLineProvider *provider) -> tTVPBaseBitmap * {
-		// Never bypass a custom provider's virtual scanline callbacks.
-		if(typeid(*provider) != typeid(tTVPScanLineProviderForBaseBitmap)) return NULL;
-		return static_cast<tTVPScanLineProviderForBaseBitmap *>(provider)->GetBaseBitmap();
-	};
-	auto *dest = bitmap(data->Dest), *src1 = bitmap(data->Src1), *src2 = bitmap(data->Src2);
-	if(!dest || !src1 || !src2 || dest == src1 || dest == src2 ||
-		!dest->Is32BPP() || !src1->Is32BPP() || !src2->Is32BPP()) return false;
-	const auto fits = [&](const tTVPBaseBitmap *image, tjs_int x, tjs_int y) {
-		return x >= 0 && y >= 0 &&
-			static_cast<tjs_int64>(x) + data->Width <= image->GetWidth() &&
-			static_cast<tjs_int64>(y) + data->Height <= image->GetHeight();
-	};
-	if(!fits(dest, data->DestLeft, data->DestTop) ||
-		!fits(src1, data->Src1Left, data->Src1Top) ||
-		!fits(src2, data->Src2Left, data->Src2Top)) return false;
-	std::vector<krkrns::SceneGroup> scene;
-	try {
-		scene.resize(1);
-		scene[0].draws.resize(2);
-	} catch(const std::bad_alloc &) { return false; }
-	// Match the reference OpenGL ConstAlphaBlend_SD: mix the two inputs by
-	// phase / 255 on the existing SDL renderer. Opaque output ignores alpha.
-	dest->Independ();
-	scene[0].width = dest->GetWidth();
-	scene[0].height = dest->GetHeight();
-	scene[0].opaque = true;
-	const SDL_Rect to{data->DestLeft, data->DestTop, data->Width, data->Height};
-	for(unsigned i = 0; i < 2; ++i) {
-		auto &draw = scene[0].draws[i];
-		draw.kind = krkrns::SceneDrawKind::Bitmap;
-		draw.bitmap = (i ? src2 : src1)->GetBitmap()->GetGPUView();
-		draw.source = SDL_Rect{i ? data->Src2Left : data->Src1Left,
-			i ? data->Src2Top : data->Src1Top, data->Width, data->Height};
-		draw.destination = to;
-		draw.blend = krkrns::BitmapBlend::Copy;
-		draw.opacity = i ? phase : 255;
-	}
-	const auto output = dest->GetBitmap()->GetGPUView();
-	auto &compositor = krkrns::GetBitmapCompositor();
-	if(!compositor.SetOpaqueTarget(output) || !compositor.TryRenderScene(output, scene))
-		return false; // Both operations decline before writing output pixels.
-	static bool reported = false;
-	if(!reported) {
-		KRKRNS_LOG("[gpu-transition] opaque crossfade scene active");
-		reported = true;
-	}
-	return true;
-}
-#endif
 
 void tTVPCrossFadeTransHandler::Blend(tTVPDivisibleData *data)
 {
-#if defined(__SWITCH__) && defined(KRKRNS_GPU_OPAQUE_CROSSFADE)
-	if(DestLayerType == ltOpaque && KrkrTryGPUOpaqueCrossfade(data, Phase)) return;
-#endif
 #ifdef __SWITCH__
 	KrkrTransitionProfile profile(KRKRNS_PROF_BITMAP_CROSSFADE, *data);
 #endif

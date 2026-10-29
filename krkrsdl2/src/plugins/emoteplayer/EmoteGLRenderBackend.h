@@ -44,8 +44,6 @@ public:
     void* GetTargetTexture(void* target) override;
     void UpdateTargetTexture(void* target, const uint8_t* pixels, int width, int height, int pitch) override;
     void* CreateTexture(int width, int height) override;
-    void* CreateTextureWithPixels(int width, int height, const uint8_t* pixels,
-                                 int pitch) override;
     void UpdateTexture(void* texture, const uint8_t* pixels, int width, int height, int pitch) override;
     void DestroyTexture(void* texture) override;
     uint8_t* LockTexture(void* texture, int& pitch) override;

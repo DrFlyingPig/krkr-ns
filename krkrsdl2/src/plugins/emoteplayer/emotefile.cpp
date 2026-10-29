@@ -1541,9 +1541,6 @@ void emoteicon::ensureLoad()
             // the logical icon payload, not summed CPU/GPU transfer traffic.
             KrkrNSPerfScope perfTextureInit(KrkrNSPerfOp::GpuTextureInit,
                 static_cast<std::uint64_t>(width) * static_cast<std::uint64_t>(height) * 4);
-#if defined(KRKRNS_EMOTE_ATOMIC_TEXTURE)
-            texture = renderer->CreateTextureWithPixels(width, height, data, width * 4);
-#else
             texture = renderer->CreateTexture(width, height);
             if (texture)
             {
@@ -1557,7 +1554,6 @@ void emoteicon::ensureLoad()
                     throw;
                 }
             }
-#endif
         }
         if (texture)
         {
