@@ -15,6 +15,9 @@
 #include "tjsError.h"
 #include "tjsGlobalStringMap.h"
 #include "tjsDebug.h"
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+#include "tjsArray.h"
+#endif
 
 namespace TJS
 {
@@ -329,6 +332,10 @@ tTJSNativeClass::FuncCall(tjs_uint32 flag, const tjs_char * membername,
 	// register native instance information to the object;
 	// even if "nativeptr" is null
 	objthis->NativeInstanceSupport(TJS_NIS_REGISTER, _ClassID, &nativeptr);
+
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+	if(TJSArrayTryCopyFactoryMembers(this, objthis)) return TJS_S_OK;
+#endif
 
 	// register members to "objthis"
 

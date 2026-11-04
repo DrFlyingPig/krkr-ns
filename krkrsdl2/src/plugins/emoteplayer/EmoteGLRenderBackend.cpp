@@ -628,6 +628,29 @@ struct EmoteGLRenderBackend::Impl
         // This counter describes GPU-to-GPU payload, not CPU readback bytes.
         perf.Bytes(std::uint64_t(image.width) * image.height * 4);
     }
+    // Refresh only the rectangles that changed. The baseline still matches the
+    // current target everywhere else from an earlier frame, so a full-target
+    // copy would move ~8 MB per E-mote frame purely to re-copy equal pixels.
+    void copyResidentBaselineRects(Image& image,
+                                   const std::vector<krkrns_emote_readback::Rect>& rects)
+    {
+        KrkrNSPerfScope perf(KrkrNSPerfOp::GpuResidentCopy);
+        bind(&image);
+        ActiveTexture(GL_TEXTURE0);
+        BindTexture(GL_TEXTURE_2D, image.previousTexture);
+        std::uint64_t bytes = 0;
+        for (const auto& rect : rects)
+        {
+            // glCopyTexSubImage2D copies from the read framebuffer into the
+            // bound texture; the destination offset is the same rectangle.
+            CopyTexSubImage2D(GL_TEXTURE_2D, 0, rect.x, rect.y, rect.x, rect.y,
+                              rect.w, rect.h);
+            bytes += std::uint64_t(rect.w) * std::uint64_t(rect.h) * 4u;
+        }
+        checkResidentError();
+        ++residentStats.baselineCopies;
+        perf.Bytes(bytes);
+    }
     void readDamageMap(Image& image, GLuint currentTexture = 0)
     {
         if (!currentTexture) currentTexture = image.texture;
@@ -926,10 +949,44 @@ struct EmoteGLRenderBackend::Impl
                 {
                     readDamageMap(image);
                     krkrns_emote_readback::Plan plan;
+                    // The budget bounds glReadPixels call count, not bytes. On
+                    // this driver the first call pays the pipeline sync and the
+                    // rest are cheap, so a low budget is a false economy: it
+                    // pushed the planner into its bounding-box fallback, which
+                    // reads the whole target. Device logs showed exactly that:
+                    // 43 of 60 locks read 1920x1080 in full (~356 MB) while the
+                    // sparse plan needed ~400 KB each. Prefer the sparse plan.
                     if (!krkrns_emote_readback::BuildPlan(image.damagePixels.data(),
                         image.damagePixels.size(), std::size_t(image.damageWidth) * 4,
-                        image.width, image.height, readTileWidth, plan, 8))
+                        image.width, image.height, readTileWidth, plan, 256))
                         throw std::runtime_error("E-mote damage readback plan invalid");
+                    // A fragmented map can need dozens of tiny rectangles, and
+                    // each one costs a full pipeline sync (~0.37 ms regardless
+                    // of size: measured 39 KB per call). Once the sparse plan
+                    // asks for more calls than a single bounding box would, the
+                    // sparse shape is the slower choice, so collapse it.
+                    if (!plan.rects.empty() && plan.readCalls > 24)
+                    {
+                        krkrns_emote_readback::Plan coarse;
+                        // Two clean rows between damaged ones is still one band:
+                        // the sync cost dominates, so a slightly larger box is
+                        // cheaper than another glReadPixels call.
+                        if (krkrns_emote_readback::BuildPlan(image.damagePixels.data(),
+                            image.damagePixels.size(), std::size_t(image.damageWidth) * 4,
+                            image.width, image.height, readTileWidth, coarse, 256, 2))
+                        {
+                            // Merging rows re-reads clean tiles. Below ~24 calls
+                            // the sparse plan is already cheap, so only take the
+                            // coarse shape when it clearly wins on call count
+                            // and keeps the payload within a small multiple.
+                            if (coarse.readCalls * 4 <= plan.readCalls &&
+                                coarse.tilesRead <= plan.tilesRead * 4)
+                            {
+                                plan = std::move(coarse);
+                                ++residentStats.coarsePlans;
+                            }
+                        }
+                    }
                     if (plan.rects.empty())
                     {
                         ++residentStats.cacheHits;
@@ -943,9 +1000,11 @@ struct EmoteGLRenderBackend::Impl
                                 ++residentStats.fullReads;
                             readResidentRect(image, rect);
                         }
-                        // Only publish after all CPU rectangles and the whole
-                        // GPU baseline have reached the same current frame.
-                        copyResidentBaseline(image);
+                        // Only publish after all CPU rectangles and the GPU
+                        // baseline have reached the same current frame. Only
+                        // the changed rectangles need refreshing: everything
+                        // else in the baseline already equals the target.
+                        copyResidentBaselineRects(image, plan.rects);
                         EmoteLayerBounds bounds{image.width, image.height, 0, 0};
                         for (const auto& rect : plan.rects)
                         {
@@ -987,12 +1046,13 @@ struct EmoteGLRenderBackend::Impl
         bind(&image);
         UseProgram(program);
         if (++residentLocks == 1 || residentLocks % 60 == 0)
-            KRKRNS_LOG("[emote-resident] locks=%llu full=%llu map=%llu mapBytes=%llu hits=%llu rects=%llu dataBytes=%llu errors=%llu fallback=%llu copies=%llu gpuBytes=%llu probePass=%llu probeFail=%llu probeMap=%llu probeMapBytes=%llu probeCopy=%llu peakGPUBytes=%llu",
+            KRKRNS_LOG("[emote-resident] locks=%llu full=%llu map=%llu mapBytes=%llu hits=%llu rects=%llu dataBytes=%llu errors=%llu fallback=%llu copies=%llu coarse=%llu gpuBytes=%llu probePass=%llu probeFail=%llu probeMap=%llu probeMapBytes=%llu probeCopy=%llu peakGPUBytes=%llu",
                 (unsigned long long)residentLocks, (unsigned long long)residentStats.fullReads,
                 (unsigned long long)residentStats.mapReads, (unsigned long long)residentStats.mapBytes,
                 (unsigned long long)residentStats.cacheHits, (unsigned long long)residentStats.dataRects,
                 (unsigned long long)residentStats.dataBytes, (unsigned long long)residentStats.errors,
                 (unsigned long long)residentStats.fallbacks, (unsigned long long)residentStats.baselineCopies,
+                (unsigned long long)residentStats.coarsePlans,
                 (unsigned long long)residentStats.liveGPUBytes,
                 (unsigned long long)residentStats.probePasses, (unsigned long long)residentStats.probeFailures,
                 (unsigned long long)residentStats.probeMapReads, (unsigned long long)residentStats.probeMapBytes,

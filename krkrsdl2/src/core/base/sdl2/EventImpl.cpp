@@ -251,8 +251,8 @@ void tTVPContinuousHandlerCallLimitThread::SetEnabled(bool enabled)
 
 //---------------------------------------------------------------------------
 #ifdef __SWITCH__
-// Match Kirikiroid2-NX: the outer frame loop supplies the default 60 Hz
-// cadence. An explicit nonzero -contfreq still selects the limiter thread.
+// The outer frame loop supplies the default 60 Hz cadence. An explicit nonzero
+// -contfreq still selects the limiter thread.
 static tjs_int TVPContinousHandlerLimitFrequency = 0;
 #else
 // Other SDL platforms retain their independent continuous-handler cadence.

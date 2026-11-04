@@ -619,7 +619,7 @@ unsigned copy;
    will return Z_BUF_ERROR if it has not reached the end of the stream.
  */
 
-int ZEXPORT inflate(strm, flush)
+int ZEXPORT krkrns_zlib_inflate_inner(strm, flush)
 z_streamp strm;
 int flush;
 {
@@ -1559,3 +1559,36 @@ z_streamp strm;
     state = (struct inflate_state FAR *)strm->state;
     return (unsigned long)(state->next - state->codes);
 }
+
+/* KRKR-ns: attribution wrapper. The PNG reader drives this function with an
+   8 KB output window per call, so its share of a decode cannot be derived from
+   the codec total. Counters are read by the perf reporter (Switch only). */
+#ifdef __SWITCH__
+#include <switch.h>
+static unsigned long long krkr_inflate_calls, krkr_inflate_in, krkr_inflate_out, krkr_inflate_ticks;
+void krkrns_zlib_inflate_stats(unsigned long long *calls, unsigned long long *in,
+                               unsigned long long *out, unsigned long long *ticks)
+{
+    *calls = krkr_inflate_calls; *in = krkr_inflate_in;
+    *out = krkr_inflate_out; *ticks = krkr_inflate_ticks;
+}
+int ZEXPORT inflate(strm, flush)
+z_streamp strm;
+int flush;
+{
+    u64 t0 = armGetSystemTick();
+    uLong in0 = strm ? strm->total_in : 0, out0 = strm ? strm->total_out : 0;
+    int ret = krkrns_zlib_inflate_inner(strm, flush);
+    krkr_inflate_calls++;
+    krkr_inflate_ticks += armGetSystemTick() - t0;
+    if (strm) { krkr_inflate_in += strm->total_in - in0; krkr_inflate_out += strm->total_out - out0; }
+    return ret;
+}
+#else
+int ZEXPORT inflate(strm, flush)
+z_streamp strm;
+int flush;
+{
+    return krkrns_zlib_inflate_inner(strm, flush);
+}
+#endif

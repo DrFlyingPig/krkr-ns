@@ -20,7 +20,6 @@
 #include "Random.h"
 #include "XP3Archive.h"
 #include "FileSelector.h"
-#include "Random.h"
 
 #include "Application.h"
 #include "StringUtil.h"

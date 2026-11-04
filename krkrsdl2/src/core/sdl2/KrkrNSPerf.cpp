@@ -22,7 +22,7 @@ extern void krkrsdl2_perf_test_log(const char*, ...) noexcept;
 namespace
 {
 constexpr unsigned OpCount = static_cast<unsigned>(KrkrNSPerfOp::Count);
-const char* const names[] = {"graphic-load", "image-decode", "xp3-read", "disk-read",
+const char* const names[] = {"graphic-load", "image-decode", "xp3-read", "disk-read", "disk-write",
     "inflate", "bitmap-detach", "thread-wait", "layer-prepare", "layer-raster",
     "layer-finish", "dispatch", "present", "bitmap-blt", "blend-pixels", "bitmap-copy", "copy-pixels",
     "texture-upload", "psb-parse", "psb-commit", "psb-expand",
@@ -35,7 +35,9 @@ const char* const names[] = {"graphic-load", "image-decode", "xp3-read", "disk-r
     "idle-compact", "idle-rehash", "gpu-texture-init", "autopath-validate", "autopath-rebuild",
     "gpu-damage-compare", "gpu-damage-map", "gpu-resident-copy",
     "gpu-canvas-upload", "gpu-canvas-copy", "gpu-canvas-readback", "gpu-canvas-draw", "gpu-canvas-target-switch",
-    "gpu-canvas-create", "gpu-group-render", "gpu-group-blit", "gpu-source-prepare"};
+    "gpu-canvas-create", "gpu-group-render", "gpu-group-blit", "gpu-source-prepare",
+    "graphic-cache-hit", "graphic-cache-store", "graphic-meta-dict",
+    "gpu-canvas-upload-flip"};
 static_assert(sizeof(names) / sizeof(names[0]) == OpCount, "Every operation needs a report name");
 struct Record
 {
@@ -43,6 +45,11 @@ struct Record
     std::uint64_t n = 0, inclusive = 0, self = 0, bytes = 0;
 };
 Record records[2][OpCount];
+// Frame-entry snapshot used only to attribute a stalled frame. A report drains
+// every record, so a base above the live value means the frame crossed a report
+// boundary and the earlier part of its work cannot be attributed.
+std::uint64_t frameBaseN[2][OpCount];
+std::uint64_t frameBaseSelf[2][OpCount];
 std::atomic<bool> enabled{false};
 std::atomic<std::uint64_t> cacheHit{0}, cacheMiss{0};
 thread_local KrkrNSPerfScope* top = nullptr;
@@ -165,6 +172,16 @@ void krkrsdl2_perf_present() noexcept
         inputStart = 0;
     }
 }
+#ifdef __SWITCH__
+// Defined by the bundled zlib's inflate wrapper.
+extern "C" void krkrns_zlib_inflate_stats(unsigned long long *calls, unsigned long long *in,
+                                          unsigned long long *out, unsigned long long *ticks);
+#endif
+#ifdef __SWITCH__
+// Defined by the TJS interpreter; prints this window's opcode histogram when
+// the opt-in marker file is present.
+extern "C" void krkrns_vm_opcode_dump();
+#endif
 void krkrsdl2_perf_report() noexcept
 {
     if (!krkrsdl2_perf_enabled()) return;
@@ -183,6 +200,28 @@ void krkrsdl2_perf_report() noexcept
     KRKRNS_LOG_DEFERRED("[perf-report] tick=%u phase=%s boundary=%d", SDL_GetTicks(), phase, changed ? 1 : 0);
     std::memcpy(previousPhase, phase, sizeof(phase));
     phaseKnown = true;
+#ifdef __SWITCH__
+    // Opt-in opcode histogram (marker file checked by the interpreter). Emitted
+    // next to the phase report so each window's distribution can be subtracted.
+    krkrns_vm_opcode_dump();
+    {
+        // Share of the decode path taken by the zlib inflate itself, counted
+        // inside the bundled zlib so libpng's per-call window is visible.
+        static unsigned long long prevCalls = 0, prevIn = 0, prevOut = 0, prevTicks = 0;
+        unsigned long long calls = 0, in = 0, out = 0, ticks = 0;
+        krkrns_zlib_inflate_stats(&calls, &in, &out, &ticks);
+        if (calls != prevCalls)
+        {
+            const double hz = 19200000.0; // Switch system tick rate
+            const double ms = double(ticks - prevTicks) * 1000.0 / hz;
+            const double outMb = double(out - prevOut) / (1024.0 * 1024.0);
+            const double inKb = double(in - prevIn) / 1024.0;
+            KRKRNS_LOG_DEFERRED("[zlib-inflate] calls=%llu inKB=%.0f outMB=%.1f ms=%.1f MBps=%.1f",
+                calls - prevCalls, inKb, outMb, ms, ms > 0.0 ? outMb * 1000.0 / ms : 0.0);
+        }
+        prevCalls = calls; prevIn = in; prevOut = out; prevTicks = ticks;
+    }
+#endif
 #endif
     // Worker elapsed time is separate work, not main-thread wall time. Nested scopes
     // subtract children on their own thread only; do not sum it into frame time.
@@ -212,6 +251,59 @@ void krkrsdl2_perf_report() noexcept
     Samples("presenting-loop", frameSamples);
     Samples("present-gap-including-wait", gapSamples);
     Samples("input-to-next-present", inputSamples);
+}
+void krkrsdl2_perf_frame_mark() noexcept
+{
+    if (!krkrsdl2_perf_enabled()) return;
+    for (unsigned domain = 0; domain < 2; ++domain)
+    for (unsigned i = 0; i < OpCount; ++i)
+    {
+        auto& record = records[domain][i];
+        std::lock_guard<std::mutex> lock(record.mutex);
+        frameBaseN[domain][i] = record.n;
+        frameBaseSelf[domain][i] = record.self;
+    }
+}
+void krkrsdl2_perf_stall_dump() noexcept
+{
+    if (!krkrsdl2_perf_enabled()) return;
+    struct Row { double ms; unsigned long long n; unsigned domain; unsigned op; };
+    Row rows[OpCount * 2];
+    unsigned total = 0;
+    const double scale = Scale();
+    for (unsigned domain = 0; domain < 2; ++domain)
+    for (unsigned i = 0; i < OpCount; ++i)
+    {
+        auto& record = records[domain][i];
+        std::uint64_t n, self;
+        {
+            std::lock_guard<std::mutex> lock(record.mutex);
+            n = record.n;
+            self = record.self;
+        }
+        if (n < frameBaseN[domain][i] || self < frameBaseSelf[domain][i]) continue;
+        const unsigned long long dn = n - frameBaseN[domain][i];
+        const double ms = static_cast<double>(self - frameBaseSelf[domain][i]) * scale;
+        if (dn == 0 || ms < 0.5) continue;
+        rows[total++] = Row{ms, dn, domain, i};
+    }
+    constexpr unsigned Shown = 8;
+    const unsigned shown = total < Shown ? total : Shown;
+    for (unsigned a = 0; a < shown; ++a)
+        for (unsigned b = a + 1; b < total; ++b)
+            if (rows[b].ms > rows[a].ms) { const Row swap = rows[a]; rows[a] = rows[b]; rows[b] = swap; }
+    char text[900];
+    int used = 0;
+    for (unsigned r = 0; r < shown; ++r)
+    {
+        const int wrote = std::snprintf(text + used, sizeof(text) - static_cast<size_t>(used),
+            "%s%s:%s=%.1f/%llu", r ? " " : "", rows[r].domain ? "worker" : "main",
+            names[rows[r].op], rows[r].ms, rows[r].n);
+        if (wrote <= 0 || static_cast<size_t>(used + wrote) >= sizeof(text)) { text[used] = 0; break; }
+        used += wrote;
+    }
+    if (!shown) text[0] = 0;
+    KRKRNS_LOG("[stall-ops] %s", shown ? text : "none");
 }
 #ifdef KRKRNS_PERF_TEST
 void krkrsdl2_perf_test_enable(bool value) noexcept { owner = std::this_thread::get_id(); enabled.store(value); }

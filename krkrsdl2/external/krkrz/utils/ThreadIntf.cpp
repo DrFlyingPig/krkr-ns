@@ -349,6 +349,11 @@ void tTVPThread::SetPriority(tTVPThreadPriority pri)
 //---------------------------------------------------------------------------
 
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+// Cores compositing workers may use: the process mask minus whatever the
+// loading thread is allowed on. Computed once by the pool's owning thread.
+static std::atomic<u32> gWorkerCoreMask{0};
+#endif
 tjs_int TVPDrawThreadNum = 1;
 //---------------------------------------------------------------------------
 tjs_int TVPGetProcessorNum( void )
@@ -363,9 +368,8 @@ tjs_int TVPGetProcessorNum( void )
 		const Result rc = svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
 		if (R_SUCCEEDED(rc) && mask)
 			return static_cast<tjs_int>(__builtin_popcountll(mask));
-		// Kirikiroid2-NX falls back to the three application cores when its
-		// hardware-concurrency query is unavailable. Draw partitions remain
-		// sequential on Switch and do not set thread affinity.
+		// Fall back to the three application cores when the hardware-
+		// concurrency query is unavailable.
 		return 3;
 	}();
 	return processors;
@@ -386,14 +390,9 @@ tjs_int TVPGetThreadNum( void )
 #ifdef KRKRZ_USE_SDL_THREADS
 	const tjs_int processors = std::max<tjs_int>(1, TVPGetProcessorNum());
 	const tjs_int threadNum = TVPDrawThreadNum ? TVPDrawThreadNum : processors;
-	#ifdef __SWITCH__
-	// Switch draw tasks run as ordered partitions on the caller, matching
-	// the reference's OpenMP-disabled build. An explicit partition count may
-	// therefore exceed the process core count; it does not spawn workers.
-	return std::max<tjs_int>(1, std::min(threadNum, TVPMaxThreadNum));
-	#else
+	// Draw partitions become real worker threads again on Switch, so the
+	// partition count must not exceed the cores this process actually holds.
 	return std::max<tjs_int>(1, std::min(threadNum, std::min(processors, TVPMaxThreadNum)));
-	#endif
 #else
 #if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
 	return 1;
@@ -584,6 +583,14 @@ void DrawThread::Execute() {
 	KRKRNS_LOG("[pool] worker core=%u preferred=%d affinity=%llx priority=%d maskRc=%x priorityRc=%x",
 		svcGetCurrentProcessorNumber(), preferred, (unsigned long long)affinity,
 		priority, maskRc, priorityRc);
+	// Keep compositing workers off the cores the loading thread may run on, so a
+	// decode or script burst is never preempted by draw work. Horizon reports the
+	// process mask (usually cores 0-2; core 3 belongs to the system).
+	if (const u32 workerMask = gWorkerCoreMask.load(std::memory_order_acquire))
+	{
+		if (R_SUCCEEDED(svcSetThreadCoreMask(handle, -1, workerMask)))
+			KRKRNS_LOG("[pool] worker pinned mask=%x", workerMask);
+	}
 #endif
 #ifdef KRKRZ_USE_SDL_THREADS
 	while( !GetTerminated() ) {
@@ -629,6 +636,16 @@ void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 			svcGetCurrentProcessorNumber(), preferred, (unsigned long long)affinity,
 			(unsigned long long)allowed, priority, TVPGetProcessorNum(),
 			allowedRc, maskRc, priorityRc);
+		// Plan: the loading thread keeps the cores it is allowed on (core 0 on
+		// Horizon); compositing workers take the rest of the process mask, so the
+		// two never contend for the same core.
+		u32 workerMask = static_cast<u32>(allowed);
+		if (R_SUCCEEDED(maskRc) && affinity)
+			workerMask &= ~static_cast<u32>(affinity);
+		if (!workerMask) workerMask = static_cast<u32>(allowed);
+		gWorkerCoreMask.store(workerMask, std::memory_order_release);
+		KRKRNS_LOG("[pool] worker plan: allowed=%llx caller=%llx workers=%x",
+			(unsigned long long)allowed, (unsigned long long)affinity, workerMask);
 	}
 #endif
 
@@ -711,9 +728,7 @@ void DrawThreadPool::PoolThread( tjs_int taskNum ) {
 	// session instead; 3 idle threads are cheap on the Switch.
 	}
 //---------------------------------------------------------------------------
-#ifndef __SWITCH__
 static DrawThreadPool TVPTheadPool;
-#endif
 //---------------------------------------------------------------------------
 // KRKR-ns Phase 2: lifetime pool counters for the [prof] emitter in
 // SDLApplication.cpp (per-window task counts reveal E-mote scene layer-op
@@ -739,26 +754,17 @@ void TVPBeginThreadTask( tjs_int taskNum ) {
 			poolBegins, (double)poolTaskSum / poolBegins, poolTaskMax);
 	}
 	#endif
-#ifndef __SWITCH__
 	TVPTheadPool.BeginTask( taskNum );
-#endif
 }
 //---------------------------------------------------------------------------
 void TVPExecThreadTask( TVP_THREAD_TASK_FUNC func, TVP_THREAD_PARAM param ) {
-#ifdef __SWITCH__
-	// Kirikiroid2-NX's Switch build leaves OpenMP disabled, so its drawing
-	// partitions execute in order on the caller. Keep the same partitioning
-	// and completion semantics without creating or waking SDL draw workers.
-	func( param );
-#else
+	// ExecTask runs the last task of every batch on the caller, so a
+	// single-task batch never touches a worker at all.
 	TVPTheadPool.ExecTask( func, param );
-#endif
 }
 //---------------------------------------------------------------------------
 void TVPEndThreadTask( void ) {
-#ifndef __SWITCH__
 	TVPTheadPool.WaitForTask();
-#endif
 }
 //---------------------------------------------------------------------------
 //---------------------------------------------------------------------------

@@ -11,6 +11,8 @@
 #include "tjsCommHead.h"
 
 #include "tjsObject.h"
+#include "proof_registry.h"
+#include "KrkrNSLog.h"
 #include "tjsUtils.h"
 #include "tjsNative.h"
 #include "tjsHashSearch.h"
@@ -101,6 +103,7 @@ tTJSDispatch::tTJSDispatch()
 //---------------------------------------------------------------------------
 tTJSDispatch::~tTJSDispatch()
 {
+	::krkr_exact_proof::ObserveDestruction(this);
 	if(!BeforeDestructionCalled)
 	{
 		BeforeDestructionCalled = true;
@@ -431,6 +434,8 @@ tTJSCustomObject::~tTJSCustomObject()
 void tTJSCustomObject::_Finalize(void)
 {
 	if(IsInvalidating) return; // to avoid re-entrance
+	if (CallFinalize) ::krkr_exact_proof::Access(this);
+	else ::krkr_exact_proof::Forget(this);
 	IsInvalidating = true;
 	try
 	{
@@ -741,13 +746,53 @@ tTJSCustomObject::tTJSSymbolData * tTJSCustomObject::AddTo(tTJSVariantString *na
 //---------------------------------------------------------------------------
 #define GetValue(x) (*((tTJSVariant *)(&(x->Value))))
 //---------------------------------------------------------------------------
+// Isolated proof: duplicate the original target-size calculation, keeping
+// the old barrier for unsupported or actually changing rehashes.
+static bool UnsafePredictRebuildSize(tjs_int requestcount, tjs_int &size) {
+	if (requestcount < 0 || TJSObjectHashBitsLimit < 0) return false;
+	tjs_int r, v = requestcount;
+	if(v & 0xffff0000) r = 16, v >>= 16; else r = 0;
+	if(v & 0xff00) r += 8, v >>= 8;
+	if(v & 0xf0) r += 4, v >>= 4;
+	v <<= 1;
+	tjs_int bits = r + ((0xffffaa50 >> v) & 0x03) + 2;
+	if(bits > TJSObjectHashBitsLimit) bits = TJSObjectHashBitsLimit;
+	if(bits < 0 || bits >= 31) return false;
+	size = 1 << bits;
+	return true;
+}
 void tTJSCustomObject::RebuildHash()
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,nullptr);
+	::krkr_exact_proof::Access(this);
+	tjs_int predicted = 0;
+	if (!UnsafePredictRebuildSize(Count, predicted) || predicted != HashSize)
+		::krkr_exact_proof::BeforeClassMutation(this);
+	// Preserve evaluation of Count after a required outer barrier.
 	RebuildHash( Count );
 }
 //---------------------------------------------------------------------------
 void tTJSCustomObject::RebuildHash( tjs_int requestcount )
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,nullptr);
+	::krkr_exact_proof::Access(this);
+	tjs_int predicted = 0;
+	const bool known = UnsafePredictRebuildSize(requestcount, predicted);
+	const tjs_int oldSize = HashSize;
+	bool flushed = false;
+	if (!known || predicted != HashSize)
+		flushed = ::krkr_exact_proof::BeforeClassMutation(this);
+	// Name-based diagnostics may also match another native class with the same
+	// name; the pointer and whether a real factory barrier ran are reported.
+	auto *nativeClass = dynamic_cast<tTJSNativeClass *>(this);
+	if (nativeClass) {
+		const ttstr &name = nativeClass->GetClassName();
+		const char *label = name == TJS_W("Array") ? "Array" :
+			(name == TJS_W("Dictionary") ? "Dictionary" : nullptr);
+		if (label) KRKRNS_LOG("[factory-rehash-size-proof] name=%s object=%p count=%d old=%d predicted=%d known=%d no-op=%d barrier=%d after=%d",
+			label, static_cast<void *>(this), requestcount, oldSize, predicted, known ? 1 : 0,
+			(known && predicted == oldSize) ? 1 : 0, flushed ? 1 : 0, HashSize);
+	}
 	// rebuild hash table
 	RebuildHashMagic = TJSGlobalRebuildHashMagic;
 
@@ -897,6 +942,8 @@ bool tTJSCustomObject::DeleteByName(const tjs_char * name, tjs_uint32 *hint)
 static const tjs_int TJSDeleteAllMembersStackLimit = 32;
 void tTJSCustomObject::DeleteAllMembers(void)
 {
+	::krkr_exact_proof::DispatchHold proofHold(IsInvalidating ? nullptr : this,nullptr);
+	::krkr_exact_proof::BeforeClassMutation(this); if (!IsInvalidating) ::krkr_exact_proof::Access(this);
 	KrkrNSVMProfScope profile;
 	profile.Begin(TJS_W("Object.DeleteAllMembers"), -1, TJS_W("<native>"), 0, 0);
 	// delete all members
@@ -1115,6 +1162,7 @@ tTJSCustomObject::tTJSSymbolData * tTJSCustomObject::Find(const tjs_char * name,
 				{
 					if(cnt>2)
 					{
+						if (::krkr_exact_proof::BeforeClassMutation(this)) return Find(name, hint);
 						// move to first
 						prevd->Next = d->Next;
 						d->Next = lv1->Next;
@@ -1161,6 +1209,7 @@ tTJSCustomObject::tTJSSymbolData * tTJSCustomObject::Find(const tjs_char * name,
 			{
 				if(cnt>2)
 				{
+					if (::krkr_exact_proof::BeforeClassMutation(this)) return Find(name, hint);
 					// move to first
 					prevd->Next = d->Next;
 					d->Next = lv1->Next;
@@ -1329,6 +1378,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::FuncCall(tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint,
 	tTJSVariant *result, tjs_int numparams, tTJSVariant **param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1401,11 +1452,14 @@ tjs_error TJSDefaultPropGet(tjs_uint32 flag, tTJSVariant &targ, tTJSVariant *res
 	return TJS_S_OK;
 }
 //---------------------------------------------------------------------------
+//---------------------------------------------------------------------------
 tjs_error TJS_INTF_METHOD
 tTJSCustomObject::PropGet(tjs_uint32 flag, const tjs_char * membername, tjs_uint32 *hint,
 	tTJSVariant *result,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	if(RebuildHashMagic != TJSGlobalRebuildHashMagic)
 	{
 		RebuildHash();
@@ -1489,6 +1543,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::PropSet(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::BeforeClassMutation(this); if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1570,6 +1626,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::GetCount(tjs_int *result, const tjs_char *membername, tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1584,6 +1642,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::PropSetByVS(tjs_uint32 flag, tTJSVariantString *membername,
 	const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::BeforeClassMutation(this); if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1664,6 +1724,8 @@ tTJSCustomObject::PropSetByVS(tjs_uint32 flag, tTJSVariantString *membername,
 tjs_error TJS_INTF_METHOD
 tTJSCustomObject::EnumMembers(tjs_uint32 flag, tTJSVariantClosure *callback, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this);
 	if(!GetValidity()) return TJS_E_INVALIDOBJECT;
 
 	InternalEnumMembers(flag, callback, objthis);
@@ -1675,6 +1737,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::DeleteMember(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::BeforeClassMutation(this); if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1710,6 +1774,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::Invalidate(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::BeforeClassMutation(this); if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1760,6 +1826,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::IsValid(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	if(membername == NULL)
 	{
 		if(IsInvalidated) return TJS_S_FALSE;
@@ -1808,6 +1876,8 @@ tTJSCustomObject::CreateNew(tjs_uint32 flag, const tjs_char * membername, tjs_ui
 	iTJSDispatch2 **result, tjs_int numparams, tTJSVariant **param,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1902,6 +1972,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::IsInstanceOf(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	const tjs_char *classname, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -2000,6 +2072,8 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::Operation(tjs_uint32 flag, const tjs_char *membername, tjs_uint32 *hint,
 	tTJSVariant *result, const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::BeforeClassMutation(this); if (membername) ::krkr_exact_proof::Access(this);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -2088,6 +2162,17 @@ tjs_error TJS_INTF_METHOD
 tTJSCustomObject::NativeInstanceSupport(tjs_uint32 flag, tjs_int32 classid,
 		iTJSNativeInstance **pointer)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,nullptr);
+	// A native instance may execute arbitrary callbacks on invalidation. Do
+	// not allow one to be attached to a still-pending lazy receiver. Preserve
+	// the original immediate failure for a REGISTER with no available slot.
+	if (flag == TJS_NIS_REGISTER && !IsInvalidating) {
+		bool available=false;
+		for (tjs_int i=0; i<TJS_MAX_NATIVE_CLASS; ++i) if (ClassIDs[i]==-1) { available=true; break; }
+		if (!available) return TJS_E_FAIL;
+		::krkr_exact_proof::Access(this);
+	}
+	if (flag == TJS_NIS_GETINSTANCE && !IsInvalidating) ::krkr_exact_proof::Access(this);
 	if(flag == TJS_NIS_GETINSTANCE)
 	{
 		// search "classid"
@@ -2095,7 +2180,15 @@ tTJSCustomObject::NativeInstanceSupport(tjs_uint32 flag, tjs_int32 classid,
 		{
 			if(ClassIDs[i] == classid)
 			{
-				*pointer = ClassInstances[i];
+				auto *borrowed = ClassInstances[i];
+				// Release may destroy the receiver, or run invalidation and
+				// resurrect it. In either case the borrowed NI is not usable.
+				// Keep ordinary non-pending GET behavior unchanged.
+				const bool heldReceiver = proofHold.receiver != nullptr;
+				*pointer = nullptr;
+				if (!proofHold.ReleaseReceiver()) return TJS_E_FAIL;
+				if (heldReceiver && (IsInvalidated || IsInvalidating)) return TJS_E_INVALIDOBJECT;
+				*pointer = borrowed;
 				return TJS_S_OK;
 			}
 		}
@@ -2124,6 +2217,8 @@ tTJSCustomObject::NativeInstanceSupport(tjs_uint32 flag, tjs_int32 classid,
 tjs_error TJS_INTF_METHOD 
 tTJSCustomObject::ClassInstanceInfo(tjs_uint32 flag, tjs_uint num, tTJSVariant *value)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,nullptr);
+	::krkr_exact_proof::BeforeClassMutation(this); ::krkr_exact_proof::Access(this);
 	switch(flag)
 	{
 	case TJS_CII_ADD:

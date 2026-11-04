@@ -42,6 +42,7 @@
 #endif
 #ifdef __SWITCH__
 #include "KrkrNSLog.h"
+#include "KrkrNSBitmapProbe.h"
 #endif
 //---------------------------------------------------------------------------
 
@@ -840,6 +841,11 @@ void TVPLoadBMP(void* formatdata, void *callbackdata, tTVPGraphicSizeCallback si
 //---------------------------------------------------------------------------
 // BMP saving handler
 //---------------------------------------------------------------------------
+#ifdef __SWITCH__
+// Defined with the graphic cache below; saving a bitmap must not drop every
+// decoded image (see TVPSaveAsBMP).
+static void TVPTrimGraphicCache();
+#endif
 static void TVPWriteLE16(tTJSBinaryStream * stream, tjs_uint16 number)
 {
 	tjs_uint8 data[2];
@@ -892,7 +898,15 @@ void TVPSaveAsBMP( void* formatdata, tTJSBinaryStream* dst, const tTVPBaseBitmap
 
 	try
 	{
+#ifdef __SWITCH__
+		// A save writes a couple of megabytes, while the graphic cache holds
+		// every decoded image of the current scene: q quick save used to wipe
+		// it (66 MB measured), which made the following load re-decode the
+		// same art. Keep the cached images and only enforce the memory bound.
+		TVPTrimGraphicCache();
+#else
 		TVPClearGraphicCache();
+#endif
 
 		// prepare header
 		tjs_uint bmppitch = bmp->GetWidth() * pixelbytes;
@@ -1528,6 +1542,7 @@ bool TVPPrepareLoadedGraphic(tTVPBaseBitmap *bitmap)
 	// Callers use this only for completed BGRA loads; heap entries may be
 	// upgraded after a synchronous hit. The physical API handles eligibility.
 	if (!bitmap || !bitmap->Is32BPP()) return false;
+	// A deferred decode promotes its own object once the rows are complete;
 	return bitmap->GetBitmap()->PromoteLoadedSource();
 }
 #endif
@@ -1571,9 +1586,45 @@ static void TVPCheckGraphicCacheLimit()
 void TVPClearGraphicCache()
 {
 	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+#ifdef __SWITCH__
+	if (krkrsdl2_perf_enabled() && TVPGraphicCacheTotalBytes)
+		KRKRNS_LOG_DEFERRED("[image-cache] clear bytes=%llu limit=%llu",
+			static_cast<unsigned long long>(TVPGraphicCacheTotalBytes),
+			static_cast<unsigned long long>(TVPGraphicCacheLimit));
+#endif
 	++TVPGraphicCacheEpoch;
 	TVPGraphicCache.Clear();
 	TVPGraphicCacheTotalBytes = 0;
+}
+
+//---------------------------------------------------------------------------
+// KRKR-ns: bounded trim for script-requested compacts (see the compact hook).
+// Drops least-recently-used entries until the cache is back under the
+// retention bound, without bumping the cache epoch: entries below the bound
+// stay valid, so an in-flight async decode for one of them can still attach.
+static const tjs_uint64 TVPGraphicCacheCompactRetention = 64ull * 1024 * 1024;
+static void TVPTrimGraphicCache()
+{
+	std::lock_guard<std::recursive_mutex> lock(gGraphicCacheLock);
+	tjs_uint64 keep = TVPGraphicCacheCompactRetention;
+	if (TVPGraphicCacheLimit && TVPGraphicCacheLimit < keep) keep = TVPGraphicCacheLimit / 2;
+	if (TVPGraphicCacheTotalBytes <= keep) return;
+	const tjs_uint64 before = TVPGraphicCacheTotalBytes;
+	while (TVPGraphicCacheTotalBytes > keep)
+	{
+		tTVPGraphicCache::tIterator i = TVPGraphicCache.GetLast();
+		if (i.IsNull()) break;
+		const tjs_uint size = i.GetValue().GetObjectNoAddRef()->GetSize();
+		TVPGraphicCacheTotalBytes -= size;
+		TVPGraphicCache.ChopLast(1);
+	}
+#ifdef __SWITCH__
+	if (krkrsdl2_perf_enabled())
+		KRKRNS_LOG_DEFERRED("[image-cache] trim bytes=%llu kept=%llu limit=%llu",
+			static_cast<unsigned long long>(before - TVPGraphicCacheTotalBytes),
+			static_cast<unsigned long long>(TVPGraphicCacheTotalBytes),
+			static_cast<unsigned long long>(TVPGraphicCacheLimit));
+#endif
 }
 
 // Caller holds gGraphicCacheLock. Kirikiroid2 trims the previous contents
@@ -1601,6 +1652,18 @@ struct tTVPClearGraphicCacheCallback : public tTVPCompactEventCallbackIntf
 	{
 		if(level >= TVP_COMPACT_LEVEL_MINIMIZE)
 		{
+			// A script-requested compact (System.doCompact, level MAX) happens
+			// while the game keeps running: dropping every decoded image means
+			// the next scene re-decodes the same art. In one measured session
+			// 663 ms of 1827 ms of logged decode time was re-decoding images
+			// that had just been dropped this way. Keep a bounded,
+			// most-recently-used set instead; the bound is still a hard memory
+			// limit, and minimize/critical keep releasing everything.
+			if(level == TVP_COMPACT_LEVEL_MAX)
+			{
+				TVPTrimGraphicCache();
+				return;
+			}
 			// clear the font cache on application minimize
 			TVPClearGraphicCache();
 		}
@@ -1771,7 +1834,16 @@ static bool TVPInternalLoadGraphic(tTVPBaseBitmap *dest, const ttstr &_name,
 	if(!handler) TVPThrowExceptionMessage(TVPUnknownGraphicFormat, name);
 
 
+	// Splitting open from decode says which half of a slow image load is
+	// storage (XP3 lookup, segment inflate, disk read) and which is format
+	// decoding. The two need different remedies, so measure before choosing.
+#ifdef __SWITCH__
+	const Uint64 loadStarted = SDL_GetPerformanceCounter();
+#endif
 	tTVPStreamHolder holder(name); // open a storage named "name"
+#ifdef __SWITCH__
+	const Uint64 openFinished = SDL_GetPerformanceCounter();
+#endif
 
 	// load the image
 	tTVPLoadGraphicData data;
@@ -1809,6 +1881,62 @@ static bool TVPInternalLoadGraphic(tTVPBaseBitmap *dest, const ttstr &_name,
 		(handler->Load)(handler->FormatData, (void*)&data, TVPLoadGraphic_SizeCallback,
 			TVPLoadGraphic_ScanLineCallback, TVPLoadGraphic_MetaInfoPushCallback,
 			holder.Get(), keyidx, mode);
+	}
+#endif
+
+#ifdef __SWITCH__
+	// Report only loads worth splitting. A slow one is the case this exists
+	// for; logging every decode would flood the SD-card log during preloads.
+	{
+		const Uint64 finished = SDL_GetPerformanceCounter();
+		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
+		const double totalMs = (finished - loadStarted) * 1000.0 / frequency;
+		if (totalMs >= 50.0)
+		{
+			std::string u8;
+			for (tjs_uint i = 0; i < name.GetLen() && i < 120; ++i)
+			{
+				tjs_uint32 ch = static_cast<tjs_uint32>(name[i]);
+				if (ch < 0x80) u8 += static_cast<char>(ch);
+				else if (ch < 0x800)
+				{
+					u8 += static_cast<char>(0xC0 | (ch >> 6));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+				else
+				{
+					u8 += static_cast<char>(0xE0 | (ch >> 12));
+					u8 += static_cast<char>(0x80 | ((ch >> 6) & 0x3F));
+					u8 += static_cast<char>(0x80 | (ch & 0x3F));
+				}
+			}
+			// The write path runs once per decoded row; its three parts are
+			// what a slow codec would otherwise hide inside one total. The
+			// stream total isolates byte supply from libpng's own filtering.
+			const KrkrNSBitmapProbeTicks probe = krkrns::TakeBitmapProbe();
+			KRKRNS_LOG("[img-split] total=%.1fms open=%.1fms decode=%.1fms %dx%d "
+				"rows=%llu detach=%.1fms cpuwrite=%.1fms alloc=%.1fms "
+				"stream=%.1fms streamKB=%llu golomb=%.1fms tlgline=%.1fms "
+				"lzss=%.1fms compose=%.1fms %s",
+				totalMs, (openFinished - loadStarted) * 1000.0 / frequency,
+				(finished - openFinished) * 1000.0 / frequency,
+				int(data.BufW), int(data.BufH),
+				static_cast<unsigned long long>(probe.scanlines),
+				probe.detach * 1000.0 / frequency,
+				probe.cpuWrite * 1000.0 / frequency,
+				probe.alloc * 1000.0 / frequency,
+				probe.streamRead * 1000.0 / frequency,
+				static_cast<unsigned long long>(probe.streamBytes / 1024),
+				probe.golomb * 1000.0 / frequency,
+				probe.tlgLine * 1000.0 / frequency,
+				probe.tlgLzss * 1000.0 / frequency,
+				probe.tlgCompose * 1000.0 / frequency, u8.c_str());
+		}
+		else
+		{
+			// Discard partial counters so the next slow load starts clean.
+			(void)krkrns::TakeBitmapProbe();
+		}
 	}
 #endif
 
@@ -1986,7 +2114,13 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	}
 	if (auto* data = cached.Get()) {
 		krkrsdl2_perf_cache(true);
-		cached.AssignToBitmap(dest);
+		{
+			// Attribution only: a cache hit still has to hand the pixels to the
+			// caller's bitmap, and that copy is the whole reason a hit is not
+			// free.
+			KrkrNSPerfScope perfHit(KrkrNSPerfOp::GraphicCacheHit);
+			cached.AssignToBitmap(dest);
+		}
 		iTJSDispatch2* metadata = nullptr;
 		try {
 			if (metainfo) metadata = TVPMetaInfoPairsToDictionary(data->MetaInfo);
@@ -2048,6 +2182,8 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	// not found
 	krkrsdl2_perf_cache(false);
 
+
+
 	// load into dest
 	KrkrNSSlowOperation slow("image-decode", &nname);
 	tTVPGraphicImageData * data = NULL;
@@ -2059,7 +2195,12 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 	{
 		TVPInternalLoadGraphic(dest, nname, keyidx, desw, desh, &mi, mode, &pn, unpadding);
 		if(provincename) *provincename = pn;
-		if(metainfo) metadata = TVPMetaInfoPairsToDictionary(mi);
+		// Attribution: a cache miss still has bookkeeping after the codec, and
+		// the outer graphic-load figure hides where it goes.
+		{
+			KrkrNSPerfScope perfMeta(KrkrNSPerfOp::GraphicMetaDict);
+			if(metainfo) metadata = TVPMetaInfoPairsToDictionary(mi);
+		}
 		bool sharedSource = false;
 #ifdef __SWITCH__
 		if (mode == glmNormal) sharedSource = TVPPrepareLoadedGraphic(dest);
@@ -2067,6 +2208,7 @@ void TVPLoadGraphic(tTVPBaseBitmap *dest, const ttstr &name, tjs_int32 keyidx,
 
 		if(cacheInitiallyEnabled)
 		{
+			KrkrNSPerfScope perfStore(KrkrNSPerfOp::GraphicCacheStore);
 			data = new tTVPGraphicImageData();
 			data->AssignBitmap(dest, sharedSource);
 			data->ProvinceName = pn;
@@ -2258,6 +2400,13 @@ void TVPSetGraphicCacheLimit(tjs_uint64 limit)
 	}
 
 	TVPCheckGraphicCacheLimit();
+#ifdef __SWITCH__
+	if (krkrsdl2_perf_enabled())
+		KRKRNS_LOG_DEFERRED("[image-cache] limit=%llu system=%llu enabled=%d",
+			static_cast<unsigned long long>(TVPGraphicCacheLimit),
+			static_cast<unsigned long long>(TVPGraphicCacheSystemLimit),
+			int(TVPGraphicCacheEnabled));
+#endif
 }
 //---------------------------------------------------------------------------
 tjs_uint64 TVPGetGraphicCacheLimit()

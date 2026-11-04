@@ -984,13 +984,16 @@ if (typeof(System.inputString) == "undefined") {
 // raised anywhere (checked against the same build with and without this
 // wrapper -- with it, savedata019.bmp left the disk, without it the engine's
 // deleteFile entry log never fired).  So the member is re-published as a plain
-// TJS function that forwards to the native one, and every call is logged.
+// TJS function that forwards to the native one.  The wrapper used to call
+// System.inform() on every call as a diagnostic; that raised an information
+// dialog (and its TJS stack dump) for each of the dozen rotate/delete steps a
+// quick save performs, so the forwarding is now silent and the engine's own
+// [fstat] log carries the evidence.
 if (typeof(Storages.deleteFile) != "undefined" && typeof(global.__krkrns_deletefile_wrapped) == "undefined")
 {
 	global.__krkrns_deletefile_wrapped = true;
 	global.__krkrns_deletefile_native = Storages.deleteFile;
 	&Storages.deleteFile = function (name) {
-		System.inform("Storages.deleteFile(" + name + ")");
 		return global.__krkrns_deletefile_native(name);
 	} incontextof global;
 }

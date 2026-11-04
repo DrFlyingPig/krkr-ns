@@ -16,6 +16,10 @@
 #include "DebugIntf.h"
 #include "tjsDictionary.h"
 #include "ScriptMgnIntf.h"
+#ifdef __SWITCH__
+#include "KrkrNSBitmapProbe.h"
+#include "KrkrNSLog.h"
+#endif
 
 bool TVPAcceptSaveAsPNG(void* formatdata, const ttstr & type, class iTJSDispatch2** dic )
 {
@@ -95,7 +99,17 @@ static void PNG_warning (png_structp ps, png_const_charp msg)
 // user_read_data
 static void PNG_read_data(png_structp png_ptr,png_bytep data,png_size_t length)
 {
+#ifdef __SWITCH__
+	// Compressed bytes arrive through this callback, so its total is the
+	// stream/decompress side of a PNG load. Whatever a slow load spends
+	// outside it is libpng's own filtering and colour conversion.
+	const std::uint64_t probeStart = krkrns::BitmapProbeCounter();
 	((tTJSBinaryStream *)png_get_io_ptr(png_ptr))->ReadBuffer((void*)data, (tjs_uint)length);
+	krkrns::AddBitmapProbeStreamRead(krkrns::BitmapProbeCounter() - probeStart,
+		static_cast<std::uint64_t>(length));
+#else
+	((tTJSBinaryStream *)png_get_io_ptr(png_ptr))->ReadBuffer((void*)data, (tjs_uint)length);
+#endif
 }
 //---------------------------------------------------------------------------
 // read_row_callback
@@ -431,7 +445,12 @@ void TVPLoadPNG(void* formatdata, void *callbackdata, tTVPGraphicSizeCallback si
 			}
 
 			// loads image
+			// KRKR-ns diagnostic: split the decoder cost into the libpng call
+			// (inflate + unfilter + format transforms) and our copy into the
+			// destination bitmap. Printed only for loads slow enough to matter.
+			const std::uint64_t pngReadStart = krkrns::BitmapProbeCounter();
 			png_read_image(png_ptr, row_pointers);
+			const std::uint64_t pngReadEnd = krkrns::BitmapProbeCounter();
 
 			// finish loading
 			png_read_end(png_ptr, info_ptr);
@@ -453,6 +472,19 @@ void TVPLoadPNG(void* formatdata, void *callbackdata, tTVPGraphicSizeCallback si
 				}
 				scanlinecallback(callbackdata, -1);
 			}
+#ifdef __SWITCH__
+			{
+				const double readMs = krkrns::BitmapProbeMilliseconds(pngReadEnd - pngReadStart);
+				const double writeMs = krkrns::BitmapProbeMilliseconds(
+					krkrns::BitmapProbeCounter() - pngReadEnd);
+				if (readMs + writeMs >= 20.0)
+				{
+					KRKRNS_LOG("[png-split] read=%.1fms write=%.1fms %ux%u rowbytes=%u",
+						readMs, writeMs, (unsigned)width, (unsigned)height,
+						(unsigned)rowbytes);
+				}
+			}
+#endif
 		}
 	}
 	catch(...)

@@ -14,12 +14,21 @@
 
 #include <algorithm>
 #include <functional>
+#include <type_traits>
 #include "tjsArray.h"
+#include "proof_registry.h"
 #include "tjsDictionary.h"
 #include "tjsUtils.h"
 #include "tjsBinarySerializer.h"
 #include "KrkrNSVMProf.h"
 #include "tjsOctPack.h"
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+#include <typeinfo>
+#endif
+#ifdef __SWITCH__
+#include "KrkrNSPerf.h"
+#include "KrkrNSLog.h"
+#endif
 
 #ifndef TJS_NO_REGEXP
 #include "tjsRegExp.h"
@@ -33,11 +42,74 @@
 	/* hash bits for base "Object" hash */
 
 
-
 namespace TJS
 {
 //---------------------------------------------------------------------------
 static tjs_int32 ClassID_Array;
+#ifdef KRKRNS_ARRAY_LEASE_TEST
+static thread_local tjs_uint64 ArrayLeaseHits = 0, ArrayLeaseMisses = 0;
+void TJSGetArrayLeaseCounts(tjs_uint64 &hits, tjs_uint64 &misses) noexcept
+{
+	hits = ArrayLeaseHits; misses = ArrayLeaseMisses;
+}
+#endif
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+namespace
+{
+struct NativeArrayFactoryContext
+{
+	tTJSNativeClass *source;
+	iTJSDispatch2 *destination = nullptr;
+	bool awaitingBase = true;
+};
+thread_local NativeArrayFactoryContext *NativeArrayFactory = nullptr;
+thread_local tTJSNativeArrayFactoryStatistics NativeArrayFactoryStatistics;
+class NativeArrayFactoryScope
+{
+	NativeArrayFactoryContext context;
+	NativeArrayFactoryContext *previous;
+public:
+	explicit NativeArrayFactoryScope(tTJSNativeClass *source)
+		: context{source}, previous(NativeArrayFactory) { NativeArrayFactory = &context; }
+	~NativeArrayFactoryScope() { NativeArrayFactory = previous; }
+};
+}
+
+tTJSNativeArrayFactoryStatistics TJSGetNativeArrayFactoryStatistics()
+{
+	return NativeArrayFactoryStatistics;
+}
+
+bool TJSArrayTryCopyFactoryMembers(tTJSNativeClass *source, iTJSDispatch2 *destination)
+{
+	auto *context = NativeArrayFactory;
+	if(!context || context->source != source || context->destination != destination) return false;
+	// Consume the permission before copying or calling a user-replaced
+	// constructor. Nested factories get their own independently restored scope.
+	context->destination = nullptr;
+	const bool copied = typeid(*source) == typeid(tTJSArrayClass) &&
+		static_cast<tTJSArrayClass *>(source)->CopyFactoryMembersToFreshArray(destination);
+#ifdef KRKRNS_NATIVE_ARRAY_FACTORY_TEST
+	const bool profiling = true;
+#else
+	const bool profiling = krkrsdl2_perf_enabled();
+#endif
+	if(profiling)
+	{
+		auto &statistics = NativeArrayFactoryStatistics;
+		++statistics.attempts;
+		if(copied) ++statistics.fast; else ++statistics.fallback;
+#ifdef __SWITCH__
+		if(!(statistics.attempts & 65535))
+			KRKRNS_LOG("[array-factory] attempts=%llu fast=%llu fallback=%llu",
+				static_cast<unsigned long long>(statistics.attempts),
+				static_cast<unsigned long long>(statistics.fast),
+				static_cast<unsigned long long>(statistics.fallback));
+#endif
+	}
+	return copied;
+}
+#endif
 //---------------------------------------------------------------------------
 // Utility Function(s)
 //---------------------------------------------------------------------------
@@ -1159,8 +1231,123 @@ tTJSNativeInstance *tTJSArrayClass::CreateNativeInstance()
 //---------------------------------------------------------------------------
 iTJSDispatch2 *tTJSArrayClass::CreateBaseTJSObject()
 {
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+	auto *context = NativeArrayFactory;
+	const bool claim = context && context->source == this && context->awaitingBase;
+	// Consume before allocation: a new_handler can construct another Array.
+	if(claim) context->awaitingBase = false;
+	auto *array = new tTJSArrayObject();
+	if(claim) context->destination = array;
+	return array;
+#else
 	return new tTJSArrayObject();
+#endif
 }
+
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+bool tTJSArrayClass::CopyFactoryMembersToFreshArray(iTJSDispatch2 *destination)
+{
+	if(!GetValidity() || GetSuper() || !destination ||
+		typeid(*destination) != typeid(tTJSArrayObject)) return false;
+	auto *target = static_cast<tTJSArrayObject *>(destination);
+	if(!target->GetValidity() || target->IsInvalidating || target->Count || target->CallMissing)
+		return false;
+	tTJSArrayNI *native = nullptr;
+	if(TJS_FAILED(target->NativeInstanceSupport(TJS_NIS_GETINSTANCE, ClassID_Array,
+		reinterpret_cast<iTJSNativeInstance **>(&native))) || !native || !native->Items.empty())
+		return false;
+
+	// Preflight without retaining anything or invoking property accessors.
+	// Unknown dispatches and pre-bound owners can reenter through virtual
+	// AddRef/Release, and numeric names have Array-specific index semantics.
+	// Such classes keep the original virtual member-copy path in its entirety.
+	bool safe = true;
+	{
+	::krkr_exact_proof::FactoryScanScope factoryScan(this);
+	EnumStoredMembers([&safe](tTJSVariantString *name, tjs_uint32 flags,
+		const tTJSVariant &value) {
+		if(!safe || (flags & TJS_STATICMEMBER)) return;
+		tjs_int index;
+		if(!name || IsNumber(static_cast<const tjs_char *>(*name), index))
+		{
+			safe = false;
+			return;
+		}
+		if(value.Type() == tvtObject)
+		{
+			const auto closure = value.AsObjectClosureNoAddRef();
+			if(closure.ObjThis) { safe = false; return; }
+			if(closure.Object)
+			{
+				const auto &type = typeid(*closure.Object);
+				if(type != typeid(tTJSNativeClassMethod) &&
+					type != typeid(tTJSNativeClassConstructor) &&
+					type != typeid(tTJSNativeClassProperty)) safe = false;
+			}
+		}
+	});
+	}
+	if(!safe) return false;
+
+#ifdef __SWITCH__
+	using ScalarPool = krkrns::SymbolAllocator<sizeof(tTJSSymbolData), alignof(tTJSSymbolData)>;
+	static_assert(std::is_trivially_default_constructible<tTJSSymbolData>::value,
+		"Leased placement construction must not throw");
+	ScalarPool::Lease lease((Count >= 16 && Count <= 32 && target->HashSize <= 8) ? Count : 0);
+#ifdef KRKRNS_ARRAY_LEASE_TEST
+	if(lease) ++ArrayLeaseHits; else ++ArrayLeaseMisses;
+#endif
+#endif
+
+	// The source is a regular unique-key symbol table, and the destination
+	// is empty. Reproduce Add's insertion order exactly, without its failed
+	// key search, Array's numeric-name test or temporary closure/name copies.
+#ifdef __SWITCH__
+	auto copy = [target, &lease](const tTJSSymbolData *source) {
+#else
+	auto copy = [target](const tTJSSymbolData *source) {
+#endif
+		if(!(source->SymFlags & TJS_SYMBOL_USING) || (source->SymFlags & TJS_SYMBOL_STATIC)) return;
+		auto *base = target->Symbols + (source->Hash & target->HashMask);
+		tTJSSymbolData *data;
+		if(base->SymFlags & TJS_SYMBOL_USING)
+		{
+#ifdef __SWITCH__
+			if(lease) data = ::new(lease.Allocate()) tTJSSymbolData;
+			else data = new tTJSSymbolData;
+#else
+			data = new tTJSSymbolData;
+#endif
+			data->SelfClear();
+			data->Next = base->Next;
+			base->Next = data;
+		}
+		else
+		{
+			if(!(base->SymFlags & TJS_SYMBOL_INIT)) base->SelfClear();
+			data = base;
+		}
+		data->SetName(source->Name, source->Hash);
+		data->SymFlags |= TJS_SYMBOL_USING | (source->SymFlags & TJS_SYMBOL_HIDDEN);
+		++target->Count;
+		auto &value = *reinterpret_cast<tTJSVariant *>(&data->Value);
+		value.CopyRef(*reinterpret_cast<const tTJSVariant *>(&source->Value));
+		if(value.Type() == tvtObject)
+		{
+			// Preflight proved a null source owner and an exact fresh native
+			// target. Store its already-compensated self owner directly: the
+			// former AddRef/CheckObjectClosureAdd pair had no observable effect.
+			value.AsObjectClosureNoAddRef().ObjThis = target;
+		}
+	};
+	for(const auto *bucket = Symbols, *end = Symbols + HashSize; bucket != end; ++bucket)
+	{
+		for(const auto *data = bucket->Next; data; data = data->Next) copy(data);
+		copy(bucket);
+	}
+	return true;
+}
+#endif
 //---------------------------------------------------------------------------
 
 
@@ -1714,6 +1901,8 @@ tjs_error TJS_INTF_METHOD
 		tTJSVariant *result, tjs_int numparams, tTJSVariant **param,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return FuncCallByNum(flag, idx, result, numparams, param, objthis);
@@ -1725,6 +1914,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::FuncCallByNum(tjs_uint32 flag, tjs_int num, tTJSVariant *result,
 		tjs_int numparams, tTJSVariant **param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1737,6 +1928,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::PropGet(tjs_uint32 flag, const tjs_char * membername,
 	tjs_uint32*hint, tTJSVariant *result, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return PropGetByNum(flag, idx, result, objthis);
@@ -1747,6 +1940,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::PropGetByNum(tjs_uint32 flag, tjs_int num,
 		tTJSVariant *result, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1760,6 +1955,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return PropSetByNum(flag, idx, param, objthis);
@@ -1770,6 +1967,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::PropSetByNum(tjs_uint32 flag, tjs_int num,
 		const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1801,6 +2000,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::PropSetByVS(tjs_uint32 flag, tTJSVariantString *membername,
 		const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber((const tjs_char*)(*membername), idx))
 		return PropSetByNum(flag, idx, param, objthis);
@@ -1812,6 +2013,8 @@ tjs_error TJS_INTF_METHOD
 	tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return DeleteMemberByNum(flag, idx, objthis);
@@ -1822,6 +2025,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::DeleteMemberByNum(tjs_uint32 flag, tjs_int num,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1839,6 +2044,8 @@ tjs_error TJS_INTF_METHOD
 	tjs_uint32 *hint,
 	iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return InvalidateByNum(flag, idx, objthis);
@@ -1849,6 +2056,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::InvalidateByNum(tjs_uint32 flag, tjs_int num,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1862,6 +2071,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return IsValidByNum(flag, idx, objthis);
@@ -1872,6 +2083,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::IsValidByNum(tjs_uint32 flag, tjs_int num,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1886,6 +2099,8 @@ tjs_error TJS_INTF_METHOD
 		iTJSDispatch2 **result, tjs_int numparams, tTJSVariant **param,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return CreateNewByNum(flag, idx, result, numparams, param, objthis);
@@ -1896,6 +2111,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::CreateNewByNum(tjs_uint32 flag, tjs_int num, iTJSDispatch2 **result,
 		tjs_int numparams, tTJSVariant **param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1909,6 +2126,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		const tjs_char *classname, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return IsInstanceOfByNum(flag, idx, classname, objthis);
@@ -1919,6 +2138,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::IsInstanceOfByNum(tjs_uint32 flag, tjs_int num,
 		const tjs_char *classname, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1932,6 +2153,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		tTJSVariant *result, const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) { ::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis); }
 	tjs_int idx;
 	if(membername && IsNumber(membername, idx))
 		return OperationByNum(flag, idx, result, param, objthis);
@@ -1942,6 +2165,8 @@ tjs_error TJS_INTF_METHOD
 	tTJSArrayObject::OperationByNum(tjs_uint32 flag, tjs_int num,
 		tTJSVariant *result, const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	::krkr_exact_proof::Access(this); if (objthis != this) ::krkr_exact_proof::Access(objthis);
 	if(!GetValidity())
 		return TJS_E_INVALIDOBJECT;
 
@@ -1986,17 +2211,28 @@ tjs_int32 TJSGetArrayClassID()
 //---------------------------------------------------------------------------
 // TJSCreateArrayObject
 //---------------------------------------------------------------------------
+struct UnsafeArrayFactoryHolder {
+	iTJSDispatch2 *Obj;
+	UnsafeArrayFactoryHolder() { Obj = new tTJSArrayClass();
+		::krkr_exact_proof::CaptureFactory(Obj, true); }
+	~UnsafeArrayFactoryHolder() { ::krkr_exact_proof::ForgetFactory(Obj); Obj->Release(); }
+};
+static UnsafeArrayFactoryHolder &UnsafeArrayFactoryHolderInstance() {
+	static UnsafeArrayFactoryHolder holder; return holder;
+}
+iTJSDispatch2 *UnsafeArrayFactoryNoCreateImpl() {
+	return UnsafeArrayFactoryHolderInstance().Obj;
+}
 iTJSDispatch2 * TJSCreateArrayObject(iTJSDispatch2 **classout)
 {
 	// create an Array object
-	struct tHolder
-	{
-		iTJSDispatch2 * Obj;
-		tHolder() { Obj = new tTJSArrayClass(); }
-		~tHolder() { Obj->Release(); }
-	} static arrayclass;
+	auto &arrayclass = UnsafeArrayFactoryHolderInstance();
 
 	if(classout) *classout = arrayclass.Obj, arrayclass.Obj->AddRef();
+
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+	NativeArrayFactoryScope factoryScope(static_cast<tTJSArrayClass *>(arrayclass.Obj));
+#endif
 
 	tTJSArrayObject *arrayobj;
 	(arrayclass.Obj)->CreateNew(0, NULL, NULL, 

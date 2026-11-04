@@ -2,6 +2,9 @@
 #include "GraphicsLoaderIntf.h"
 #include "MsgIntf.h"
 #include "tjsDictionary.h"
+#ifdef __SWITCH__
+#include "ThreadIntf.h"
+#endif
 
 #include <algorithm>
 #include <cstdint>
@@ -45,20 +48,51 @@ void TVPLoadWEBP(void *, void *callbackdata,
 		TVPThrowExceptionMessage(TVPImageLoadError, TJS_W("WebP does not support palettized loading"));
 
 	const size_t stride = static_cast<size_t>(width) * 4;
-	std::vector<uint8_t> decoded(stride * static_cast<size_t>(height));
-	uint8_t *decodeResult = nullptr;
-	if (mode == glmNormalRGBA)
-		decodeResult = WebPDecodeRGBAInto(data.data(), data.size(), decoded.data(), decoded.size(), static_cast<int>(stride));
-	else
-		decodeResult = WebPDecodeBGRAInto(data.data(), data.size(), decoded.data(), decoded.size(), static_cast<int>(stride));
-	if (!decodeResult)
+	if (static_cast<size_t>(height) > std::numeric_limits<size_t>::max() / stride)
+		TVPThrowExceptionMessage(TVPImageLoadError, TJS_W("Invalid WebP output size"));
+	const size_t decodedBytes = stride * static_cast<size_t>(height);
+	// libwebp fills every output pixel before we expose a scanline. Avoid a
+	// redundant full-image zero pass, but retain the tight temporary: callback
+	// rows are not required to be contiguous or to have a particular pitch.
+	std::unique_ptr<uint8_t[]> decoded(new uint8_t[decodedBytes]);
+	const auto decode = [&](bool threaded) {
+		WebPDecoderConfig config;
+		if (!WebPInitDecoderConfig(&config))
+			TVPThrowExceptionMessage(TVPImageLoadError, TJS_W("WebP decoder initialization failed"));
+		struct DecoderBufferScope {
+			WebPDecBuffer *buffer;
+			~DecoderBufferScope() { WebPFreeDecBuffer(buffer); }
+		} decoderBufferScope{&config.output};
+		config.output.colorspace = mode == glmNormalRGBA ? MODE_RGBA : MODE_BGRA;
+		config.output.is_external_memory = 1;
+		config.output.u.RGBA.rgba = decoded.get();
+		config.output.u.RGBA.stride = static_cast<int>(stride);
+		config.output.u.RGBA.size = decodedBytes;
+		config.options.use_threads = threaded;
+		return WebPDecode(data.data(), data.size(), &config);
+	};
+	bool threaded = false;
+#ifdef __SWITCH__
+	// The Switch SDL port reports one CPU; the engine queries the process's
+	// actual usable cores. Small UI chips retain single-thread decoding so a
+	// worker launch cannot dominate their codec work. libwebp bounds its own
+	// decoder worker count; do not add another engine thread pool around it.
+	threaded = width >= 512 && decodedBytes >= 1024 * 1024 &&
+		TVPGetProcessorNum() > 1;
+#endif
+	VP8StatusCode status = decode(threaded);
+	// A worker cannot always be created under memory/thread pressure. Retain
+	// the old single-thread decoder as recovery, with fresh decoder state and
+	// the same private output. No partial pixels reach callbacks on failure.
+	if (threaded && status == VP8_STATUS_OUT_OF_MEMORY) status = decode(false);
+	if (status != VP8_STATUS_OK)
 		TVPThrowExceptionMessage(TVPImageLoadError, TJS_W("WebP decode failed"));
 
 	for (int y = 0; y < height; ++y)
 	{
 		void *destination = scanlinecallback(callbackdata, y);
 		if (!destination) break;
-		const uint8_t *row = decoded.data() + static_cast<size_t>(y) * stride;
+		const uint8_t *row = decoded.get() + static_cast<size_t>(y) * stride;
 		if (mode == glmGrayscale)
 		{
 			uint8_t *gray = static_cast<uint8_t *>(destination);

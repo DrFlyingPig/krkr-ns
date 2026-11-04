@@ -12,7 +12,7 @@ struct EmoteResidentReadbackStats
 {
     std::uint64_t fullReads = 0, mapReads = 0, mapBytes = 0, cacheHits = 0;
     std::uint64_t dataRects = 0, dataBytes = 0, errors = 0, fallbacks = 0;
-    std::uint64_t baselineCopies = 0, liveGPUBytes = 0;
+    std::uint64_t baselineCopies = 0, coarsePlans = 0, liveGPUBytes = 0;
     std::uint64_t probePasses = 0, probeFailures = 0, probeMapReads = 0;
     std::uint64_t probeMapBytes = 0, probeCopies = 0, peakGPUBytes = 0;
 };

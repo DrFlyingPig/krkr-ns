@@ -73,7 +73,10 @@ protected:
 	iTJSDispatch2 *CreateBaseTJSObject();
 
 private:
-
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+	bool CopyFactoryMembersToFreshArray(iTJSDispatch2 *destination);
+	friend bool TJSArrayTryCopyFactoryMembers(tTJSNativeClass *, iTJSDispatch2 *);
+#endif
 	static tjs_uint32 ClassID;
 
 protected:
@@ -281,6 +284,16 @@ extern tjs_int32 TJSGetArrayClassID();
 // TJSCreateArrayObject
 //---------------------------------------------------------------------------
 TJS_EXP_FUNC_DEF(iTJSDispatch2 *, TJSCreateArrayObject, (iTJSDispatch2 **classout = NULL));
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+// Internal native initialization hook; ordinary/custom class construction
+// remains on the normal member copier outside the private factory's scope.
+bool TJSArrayTryCopyFactoryMembers(tTJSNativeClass *source, iTJSDispatch2 *destination);
+struct tTJSNativeArrayFactoryStatistics
+{
+	tjs_uint64 attempts = 0, fast = 0, fallback = 0;
+};
+tTJSNativeArrayFactoryStatistics TJSGetNativeArrayFactoryStatistics();
+#endif
 //---------------------------------------------------------------------------
 
 

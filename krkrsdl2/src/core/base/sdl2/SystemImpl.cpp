@@ -991,6 +991,10 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/system)
 	int ret = 0;
 #endif
 
+	// KRKR-ns: this entry drains every cache because a spawned Windows process
+	// used to justify it. No process is spawned here, so record the caller's
+	// target before the compact below clears the image cache.
+	KRKRNS_LOG("[compact] source=System.system target='%s'", target.AsStdString().empty() ? "" : "<nonempty>");
 	TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_MAX); // this should clear all caches
 
 	if(result) *result = (tjs_int)ret;

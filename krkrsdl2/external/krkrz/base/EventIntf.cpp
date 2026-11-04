@@ -11,6 +11,9 @@
 #include "tjsCommHead.h"
 #include "KrkrNSProf.h" // KRKR-ns: [prof] tjs delivery/call counters
 #include "KrkrNSPerf.h"
+#ifdef __SWITCH__
+#include "KrkrNSLog.h" // KRKR-ns: [compact] cache-drain attribution
+#endif
 
 #include <algorithm>
 #include "SysInitIntf.h"
@@ -1189,6 +1192,13 @@ void TVPRemoveCompactEventHook(tTVPCompactEventCallbackIntf *cb)
 //---------------------------------------------------------------------------
 void TVPDeliverCompactEvent(tjs_int level)
 {
+	// KRKR-ns: a compact request drains every registered cache, so the level and
+	// the frequency are what decide whether decoded images survive a transition.
+	// Keep this line: it is the only place that can say who asked for it.
+#ifdef __SWITCH__
+	KRKRNS_LOG("[compact] level=%d hooks=%u", static_cast<int>(level),
+		static_cast<unsigned>(TVPCompactEventVector.size()));
+#endif
 	// must be called by each platforms's implementation
 	//std::vector<tTVPCompactEventCallbackIntf *>::iterator i;
 	if(TVPCompactEventVector.size())

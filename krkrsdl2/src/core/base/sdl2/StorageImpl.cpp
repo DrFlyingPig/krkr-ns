@@ -1179,6 +1179,9 @@ tjs_uint TJS_INTF_METHOD tTVPLocalFileStream::Read(void *buffer, tjs_uint read_s
 //---------------------------------------------------------------------------
 tjs_uint TJS_INTF_METHOD tTVPLocalFileStream::Write(const void *buffer, tjs_uint write_size)
 {
+#ifdef __SWITCH__
+	KrkrNSPerfScope perfWrite(KrkrNSPerfOp::DiskWrite, write_size);
+#endif
 	written = true;
 	size_t ret = SDL_RWwrite(io_handle, buffer, 1, write_size);
 	return (tjs_uint)ret;

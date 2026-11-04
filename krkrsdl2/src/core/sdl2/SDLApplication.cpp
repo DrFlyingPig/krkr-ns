@@ -1815,11 +1815,19 @@ else
 #ifdef __SWITCH__
 				// Phase 0 baseline: one-time environment facts so every log
 				// run is self-describing (CPU count, vsync, refresh rate).
+				// SDL_GetCPUCount() is 1 on Horizon (its sysconf fallback), so
+				// report the process core mask instead: the console has four
+				// A57 cores, but HOS keeps core 3 and grants an application
+				// cores 0..2 (mask 0x7). Draw partitions and workers are sized
+				// from that mask, not from the hardware core count.
 				SDL_DisplayMode dm;
 				SDL_zero(dm);
 				SDL_GetCurrentDisplayMode(0, &dm);
-				KRKRNS_LOG("[ns] env: cpus=%d drawT=%d vsync=%d refresh=%d pos=%dx%d",
-					SDL_GetCPUCount(), TVPGetThreadNum(),
+				u64 coreMask = 0;
+				svcGetInfo(&coreMask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0);
+				KRKRNS_LOG("[ns] env: granted-cores=%d mask=%llx drawT=%d vsync=%d refresh=%d pos=%dx%d",
+					TVPGetProcessorNum(), (unsigned long long)coreMask,
+					TVPGetThreadNum(),
 					(renderer_info.flags & SDL_RENDERER_PRESENTVSYNC) != 0,
 					dm.refresh_rate, new_window_w, new_window_h);
 #endif

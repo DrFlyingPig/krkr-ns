@@ -30,8 +30,37 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include "libdeflate.h"
 
 bool TVPAllowExtractProtectedStorage = true;
+
+// KRKR-ns: XP3 index blocks and compressed segments are one-shot zlib streams.
+// libdeflate decodes those several times faster than zlib's streaming
+// uncompress() wrapper, at the cost of not accepting truncated/additional
+// trailing bytes. Anything it rejects is retried with zlib below, so the set of
+// accepted inputs and the produced bytes are unchanged; only the decoder that
+// wins the race changes. Returns the zlib status the call sites already check.
+static int TVPXP3ZlibDecompress(unsigned char *dest, unsigned long *destlen,
+	const unsigned char *source, unsigned long sourcelen)
+{
+	if (dest && destlen && source && sourcelen)
+	{
+		struct libdeflate_decompressor *decompressor = libdeflate_alloc_decompressor();
+		if (decompressor)
+		{
+			size_t actual = 0;
+			const enum libdeflate_result result = libdeflate_zlib_decompress(decompressor,
+				source, (size_t)sourcelen, dest, (size_t)*destlen, &actual);
+			libdeflate_free_decompressor(decompressor);
+			if (result == LIBDEFLATE_SUCCESS)
+			{
+				*destlen = (unsigned long)actual;
+				return Z_OK;
+			}
+		}
+	}
+	return uncompress(dest, destlen, source, sourcelen);
+}
 
 
 //---------------------------------------------------------------------------
@@ -413,7 +442,7 @@ tTVPXP3Archive::tTVPXP3Archive(const ttstr & name) : tTVPArchive(name)
 					unsigned long destlen = (unsigned long)index_size;
 
 					KrkrNSPerfScope perfInflate(KrkrNSPerfOp::Inflate);
-					int result = uncompress(  /* uncompress from zlib */
+					int result = TVPXP3ZlibDecompress(
 						(unsigned char *)indexdata,
 						&destlen, (unsigned char*)compressed,
 							(unsigned long)compressed_size);
@@ -614,9 +643,9 @@ tTJSBinaryStream * tTVPXP3Archive::CreateStreamByIndex(tjs_uint idx)
 			}
 		}
 #ifdef __SWITCH__
-		// Match Kirikiroid2-NX: decoders may issue many small reads, each of
-		// which invokes the extraction filter. Materialize this opened item
-		// through the original filtered stream once; large items stay streamed.
+		// Decoders may issue many small reads, each of which invokes the
+		// extraction filter. Materialize this opened item through the original
+		// filtered stream once; large items stay streamed.
 		if(TVPXP3ArchiveExtractionFilter && item.OrgSize > 0 &&
 			item.OrgSize <= 8 * 1024 * 1024)
 		{
@@ -768,7 +797,7 @@ public:
 			Data = new tjs_uint8 [outsize];
 			unsigned long destlen = outsize;
 			KrkrNSPerfScope perfInflate(KrkrNSPerfOp::Inflate, outsize);
-			int result = uncompress( (unsigned char*)Data, &outsize,
+			int result = TVPXP3ZlibDecompress( (unsigned char*)Data, &outsize,
 				(unsigned char*)indata, insize);
 			perfInflate.Bytes(outsize);
 			perfInflate.Finish();

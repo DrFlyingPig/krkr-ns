@@ -25,9 +25,9 @@ inline bool krkrsdl2_resource_policy_acquire_gpu() noexcept { return true; }
 inline void krkrsdl2_resource_policy_release_gpu() noexcept {}
 #endif
 
-// Kirikiroid2-NX uses FastLoad only with its software render manager. GPU
-// composition is allowed only by the selected OpenGL mode, and live resources
-// also prevent lowering the GPU clock during renderer/session transitions.
+// FastLoad applies only with the software render manager. GPU composition is
+// allowed only by the selected OpenGL mode, and live resources also prevent
+// lowering the GPU clock during renderer/session transitions.
 class KrkrNSGpuResourceLease
 {
     bool held_ = false;

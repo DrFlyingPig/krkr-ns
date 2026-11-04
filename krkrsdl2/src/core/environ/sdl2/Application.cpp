@@ -850,6 +850,9 @@ void tTVPApplication::Run() {
 #endif
 	const Uint64 prof_t0 = SDL_GetPerformanceCounter();
 	krkrsdl2_perf_init();
+	// KRKR-ns: remember the per-operation counters at frame entry so a stalled
+	// frame can report what actually consumed it instead of only "dispatch".
+	krkrsdl2_perf_frame_mark();
 #ifdef __SWITCH__
 	extern tjs_uint64 krkrsdl2_frame_counter();
 	const auto presentedBefore = krkrsdl2_frame_counter();
@@ -935,16 +938,25 @@ void tTVPApplication::Run() {
 		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
 		const double active = (prof_t3 - prof_t0) * 1000.0 / frequency;
 		krkrsdl2_perf_loop(active, krkrsdl2_frame_counter() != presentedBefore);
-		static Uint64 lastPerfReport = 0;
-		if (prof_t3 - lastPerfReport >= SDL_GetPerformanceFrequency() * 2) {
-			krkrsdl2_perf_report();
-			lastPerfReport = prof_t3;
-		}
+		// Attribute the stalled frame before the report drains and rebases the
+		// per-operation counters, otherwise a frame that crosses the 2 s report
+		// boundary reports no operations at all.
 		if (active >= 100.0)
+		{
 			KRKRNS_LOG("[stall] active=%.1fms events=%.1f dispatch=%.1f draw=%.1f",
 				active, (prof_t1 - prof_t0) * 1000.0 / frequency,
 				(prof_t2 - prof_t1) * 1000.0 / frequency,
 				(prof_t3 - prof_t2) * 1000.0 / frequency);
+			krkrsdl2_perf_stall_dump();
+		}
+		static Uint64 lastPerfReport = 0;
+		if (prof_t3 - lastPerfReport >= SDL_GetPerformanceFrequency() * 2) {
+			krkrsdl2_perf_report();
+			lastPerfReport = prof_t3;
+			// The report drains every record; rebase so the next frame's delta
+			// cannot underflow against pre-report totals.
+			krkrsdl2_perf_frame_mark();
+		}
 	}
 #endif
 	if (should_sync_savedata_ && syncfs_is_finished_)
@@ -956,25 +968,46 @@ void tTVPApplication::Run() {
 #endif
 	}
 #ifdef __SWITCH__
-	// Match Cocos' frame-driven main loop: all work, including a blocking
-	// present, consumes this frame's budget. Sleep only the remainder, so
-	// vsync does not gain another fixed delay and an overrun does not wait.
-	// Modal loops also call Run(); pacing each call keeps those loops bounded
-	// while their enclosing call naturally has no remaining budget on return.
-	(void)done;
+	// Match Cocos' frame-driven main loop. The frame budget belongs to the
+	// presented frame, not to every Run() call: a KAG title can tick its
+	// script several times before a window asks for a graphic update, and
+	// charging each of those ticks a full 1/fps sleep multiplied the frame
+	// time by that tick count (measured 3 Run() calls per presented frame,
+	// 19.4 fps on a 60 fps budget). Pace only after a frame was actually
+	// presented, measuring from the previous pacing point so the work done
+	// across the intermediate ticks is part of the same budget.
+	// A run that presents nothing and has nothing pending still yields, so an
+	// idle scene does not spin a core.
 	{
 		KRKRNS_STAGE("main: frame wait");
 		krkrsdl2_heartbeat_main_progress();
+		static Uint64 lastPaceTick = 0;
 		const Uint64 waitStart = SDL_GetPerformanceCounter();
 		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
-		const double remainingSeconds = 1.0 / krkrsdl2_resource_policy_frame_rate() -
-			static_cast<double>(waitStart - prof_t0) / frequency;
-		if (remainingSeconds > 0.0)
+		const bool presented = krkrsdl2_frame_counter() != presentedBefore;
+		if (presented)
 		{
-			const unsigned int sleepMicroseconds =
-				static_cast<unsigned int>(remainingSeconds * 1000000.0);
-			if (sleepMicroseconds) usleep(sleepMicroseconds);
+			const double budgetSeconds =
+				1.0 / krkrsdl2_resource_policy_frame_rate();
+			const double elapsedSeconds =
+				static_cast<double>(waitStart - lastPaceTick) / frequency;
+			const double remainingSeconds = budgetSeconds - elapsedSeconds;
+			if (remainingSeconds > 0.0)
+			{
+				const unsigned int sleepMicroseconds =
+					static_cast<unsigned int>(remainingSeconds * 1000000.0);
+				if (sleepMicroseconds) usleep(sleepMicroseconds);
+			}
+			lastPaceTick = SDL_GetPerformanceCounter();
 		}
+		else if (done)
+		{
+			// No frame to pace and no continuous event pending: yield briefly
+			// instead of sleeping a whole frame, so the next Script tick is not
+			// delayed by a budget that no present consumed.
+			usleep(1000);
+		}
+		if (!lastPaceTick) lastPaceTick = waitStart;
 	}
 #else
 	if (done)

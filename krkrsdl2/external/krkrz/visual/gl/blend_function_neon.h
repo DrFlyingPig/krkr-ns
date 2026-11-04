@@ -10,7 +10,7 @@
 #include "simde/arm/neon.h"
 #endif
 
-// Kirikiroid2-NX processes eight ARGB pixels per NEON instruction group for
+// Process eight ARGB pixels per NEON instruction group for
 // ConstAlphaBlend_SD. Keep this engine's existing scalar function for tails
 // and unusual opacity values, and do not change the order of overlapping rows.
 template<typename Functor>

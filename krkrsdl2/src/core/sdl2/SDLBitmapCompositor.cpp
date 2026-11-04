@@ -52,6 +52,8 @@ struct ResidentFrameState
     std::shared_ptr<RendererEpoch> epoch;
     int width = 0, height = 0;
     std::uint64_t bytes = 0;
+    bool streaming = false; // SDL_TEXTUREACCESS_STREAMING (upload destination)
+    bool opaque = false;    // SDL_PIXELFORMAT_RGB888 instead of ARGB8888
     ResidentFrameState* allPrevious = nullptr;
     ResidentFrameState* allNext = nullptr;
     ResidentFrameState* retiredNext = nullptr;
@@ -189,7 +191,47 @@ struct RendererEpoch
     std::mutex mutex;
     ResidentFrameState* resources = nullptr;
     ResidentFrameState* retired = nullptr;
+    // Recycled upload textures. SDL_CreateTexture for a full-size layer costs
+    // ~2.9 ms on the device and every scene transition builds a dozen of them,
+    // so the GL objects are kept for the next layer of the same shape. The
+    // retained bytes stay counted in 'bytes', so the texture budget still sees
+    // them; only the owner thread touches this list.
+    struct PooledTexture
+    {
+        SDL_Texture* texture = nullptr;
+        int width = 0, height = 0;
+        bool opaque = false;
+        std::uint64_t bytes = 0;
+    };
+    std::vector<PooledTexture> pool;
+    std::uint64_t poolBytes = 0;
 };
+
+// Bounded so the recycled set cannot crowd live layers out of the texture
+// budget: the largest observed layer shapes are ~11 MiB each.
+constexpr std::size_t TexturePoolMaxEntries = 6;
+constexpr std::uint64_t TexturePoolMaxBytes = 64ull * 1024 * 1024;
+
+SDL_Texture* TakePooledTexture(RendererEpoch& epoch, int width, int height, bool opaque)
+{
+    for (auto it = epoch.pool.begin(); it != epoch.pool.end(); ++it)
+    {
+        if (it->width != width || it->height != height || it->opaque != opaque) continue;
+        SDL_Texture* texture = it->texture;
+        epoch.poolBytes -= it->bytes;
+        epoch.pool.erase(it);
+        return texture;
+    }
+    return nullptr;
+}
+
+void DrainTexturePool(RendererEpoch& epoch)
+{
+    for (auto& pooled : epoch.pool) SDL_DestroyTexture(pooled.texture);
+    epoch.pool.clear();
+    epoch.bytes.fetch_sub(epoch.poolBytes, std::memory_order_relaxed);
+    epoch.poolBytes = 0;
+}
 
 void Unlink(RendererEpoch& epoch, ResidentFrameState* state)
 {
@@ -201,6 +243,13 @@ void Unlink(RendererEpoch& epoch, ResidentFrameState* state)
 void DestroyTexture(RendererEpoch& epoch, ResidentFrameState& state)
 {
     if (auto* texture = state.texture.exchange(nullptr)) {
+        if (state.streaming && epoch.alive.load(std::memory_order_relaxed) &&
+            epoch.pool.size() < TexturePoolMaxEntries &&
+            epoch.poolBytes + state.bytes <= TexturePoolMaxBytes) {
+            epoch.pool.push_back({texture, state.width, state.height, state.opaque, state.bytes});
+            epoch.poolBytes += state.bytes;
+            return; // Its bytes stay counted in epoch.bytes.
+        }
         SDL_DestroyTexture(texture);
         epoch.bytes.fetch_sub(state.bytes, std::memory_order_relaxed);
     }
@@ -513,10 +562,17 @@ struct SDLBitmapCompositor::Impl
         if (!Reserve(bytes, protect)) return {};
         if (!lease.Acquire()) return {};
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasCreate, bytes);
-        SDL_Texture* texture = SDL_CreateTexture(renderer,
-            opaque ? SDL_PIXELFORMAT_RGB888 : SDL_PIXELFORMAT_ARGB8888,
-            target ? SDL_TEXTUREACCESS_TARGET : SDL_TEXTUREACCESS_STREAMING,
-            view.width, view.height);
+        // Upload textures of a matching shape come from the recycle pool; a
+        // render target is never pooled (its contents are assumed undefined).
+        SDL_Texture* texture = target ? nullptr : TakePooledTexture(*epoch, view.width, view.height, opaque);
+        const bool recycled = texture != nullptr;
+        if (!texture)
+        {
+            texture = SDL_CreateTexture(renderer,
+                opaque ? SDL_PIXELFORMAT_RGB888 : SDL_PIXELFORMAT_ARGB8888,
+                target ? SDL_TEXTUREACCESS_TARGET : SDL_TEXTUREACCESS_STREAMING,
+                view.width, view.height);
+        }
         if (!texture) {
             if (!epoch->bytes.load()) lease.Release();
             return {};
@@ -526,12 +582,15 @@ struct SDLBitmapCompositor::Impl
         state->texture.store(texture);
         state->epoch = epoch; state->width = view.width; state->height = view.height;
         state->bytes = bytes;
+        state->streaming = !target;
+        state->opaque = opaque;
         {
             std::lock_guard<std::mutex> lock(epoch->mutex);
             state->allNext = epoch->resources;
             if (state->allNext) state->allNext->allPrevious = state;
             epoch->resources = state;
-            epoch->bytes.fetch_add(bytes);
+            // A recycled texture's bytes are already part of the total.
+            if (!recycled) epoch->bytes.fetch_add(bytes);
         }
         std::shared_ptr<ResidentFrameState> result;
         try { result = std::shared_ptr<ResidentFrameState>(state, RetireResource); }
@@ -548,6 +607,10 @@ struct SDLBitmapCompositor::Impl
         const void* pixels = view.row0;
         int pitch = view.pitch;
         if (pitch < 0) {
+            // Attribution: a bottom-up source has to be re-packed before the
+            // upload, which copies the whole layer a second time.
+            KrkrNSPerfScope perfFlip(KrkrNSPerfOp::GpuCanvasUploadFlip,
+                std::uint64_t(view.width) * view.height * 4);
             const std::size_t rowBytes = std::size_t(view.width) * 4;
             scratch.resize(rowBytes * view.height);
             for (int y = 0; y < view.height; ++y)
@@ -804,6 +867,9 @@ bool SDLBitmapCompositor::ResetRenderer()
             std::lock_guard<std::mutex> epochLock(impl_->epoch->mutex);
             for (auto* state = impl_->epoch->resources; state; state = state->allNext)
                 DestroyTexture(*impl_->epoch, *state);
+            // Pooled textures are no longer owner-thread resources; the
+            // renderer is about to go away with them.
+            DrainTexturePool(*impl_->epoch);
             impl_->epoch->alive.store(false, std::memory_order_release);
         }
         // A worker may have retired a frame between the first drain and the
@@ -832,6 +898,7 @@ void SDLBitmapCompositor::DiscardRenderer() noexcept
                 if (owner) DestroyTexture(*impl_->epoch, *state);
                 else state->texture.store(nullptr);
             }
+            if (owner) DrainTexturePool(*impl_->epoch);
             impl_->epoch->alive.store(false, std::memory_order_release);
         }
         // All retired textures have been destroyed (or left owned by SDL for
@@ -897,25 +964,18 @@ LoadedBitmapSource SDLBitmapCompositor::CreateLoadedSource(const BitmapView& vie
         asset->width = view.width; asset->height = view.height; asset->pitch = view.pitch;
         asset->bytes = static_cast<std::uint32_t>(bytes);
         asset->allocate = allocate; asset->release = release;
-        // Compression is an exact device-loss recovery representation. Never
-        // require it for success: incompressible/OOM inputs retain raw pixels.
-        if (allowCPURelease) {
-            try {
-                // Keep startup peak bounded to the original decode buffer
-                // plus at most 3/4 of its bytes. Weak compression is not worth
-                // another near-full allocation: Z_BUF_ERROR uses raw recovery.
-                const auto capacity = static_cast<uLongf>((bytes * 3) / 4);
-                if (capacity) {
-                    uLongf count = capacity;
-                    std::vector<std::uint8_t> temporary(capacity);
-                    if (compress2(temporary.data(), &count, base, asset->bytes,
-                            Z_BEST_SPEED) == Z_OK && count <= capacity && count < bytes) {
-                        temporary.resize(count);
-                        asset->compressed = std::make_shared<const std::vector<std::uint8_t>>(std::move(temporary));
-                    }
-                }
-            } catch (...) { asset->compressed.reset(); }
-        }
+        // The decoded pixels themselves are the recovery source: they are
+        // already handed over just below (cpuAllocation -> asset->cpu), so a
+        // device reset or texture eviction can re-upload them without a copy.
+        //
+        // This used to build a zlib-compressed copy on every load so the raw
+        // pixels could be freed afterwards. That compression ran inside the
+        // load path the engine reports as image decoding and cost ~60ms per
+        // background image; on a 1920x263 title the codec itself needed 8ms of
+        // the 68ms measured. Keeping the raw pixels trades memory for that
+        // time, and the call sites do not release the CPU mirror while their
+        // texture is live.
+        (void)allowCPURelease;
         {
             std::lock_guard<std::mutex> lock(impl_->mutex);
             auto* entry = impl_->Get(view);

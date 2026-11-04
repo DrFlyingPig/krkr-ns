@@ -4,6 +4,7 @@
 #include "tjsCommHead.h"
 
 #include "tjsObjectExtendable.h"
+#include "proof_registry.h"
 
 namespace TJS
 {
@@ -15,6 +16,7 @@ tTJSExtendableObject::~tTJSExtendableObject() {
 	}
 }
 void tTJSExtendableObject::SetSuper( iTJSDispatch2* dsp ) {
+	::krkr_exact_proof::BeforeClassMutation(this);
 	if( SuperClass ) {
 		SuperClass->Release();
 		SuperClass = NULL;

@@ -15,6 +15,10 @@
 #include "tjsUtils.h"
 #include "tvpgl.h"
 #include "tjsDictionary.h"
+#ifdef __SWITCH__
+#include "KrkrNSBitmapProbe.h"
+#include "KrkrNSLog.h"
+#endif
 
 #include <stdlib.h>
 
@@ -47,6 +51,14 @@ void TVPLoadTLG5(void* formatdata, void *callbackdata,
 	tjs_int keyidx,
 	tTVPGraphicLoadMode mode)
 {
+#ifdef __SWITCH__
+	// TLG5 reaches this function through several outer paths, and some never
+	// pass the file-level loader that prints [img-split]. Time the two hot
+	// stages here so the split is visible for every TLG5 load.
+	const std::uint64_t tlg5Start = krkrns::BitmapProbeCounter();
+	std::uint64_t tlg5DecompressTicks = 0, tlg5ComposeTicks = 0;
+	KRKRNS_LOG("[tlg5-enter]");
+#endif
 	// load TLG v5.0 lossless compressed graphic
 	if(mode != glmNormal && mode != glmNormalRGBA)
 		TVPThrowExceptionMessage(TVPTLGLoadError, (const tjs_char*)TVPTlgUnsupportedUniversalTransitionRule );
@@ -99,7 +111,15 @@ void TVPLoadTLG5(void* formatdata, void *callbackdata,
 				{
 					// modified LZSS compressed data
 					src->ReadBuffer(inbuf, size);
+#ifdef __SWITCH__
+					{
+						const std::uint64_t probeStart = krkrns::BitmapProbeCounter();
+						r = TVPTLG5DecompressSlide(outbuf[c], inbuf, size, text, r);
+						tlg5DecompressTicks += krkrns::BitmapProbeCounter() - probeStart;
+					}
+#else
 					r = TVPTLG5DecompressSlide(outbuf[c], inbuf, size, text, r);
+#endif
 				}
 				else
 				{
@@ -120,6 +140,9 @@ void TVPLoadTLG5(void* formatdata, void *callbackdata,
 				if(prevline)
 				{
 					// not first line
+#ifdef __SWITCH__
+					const std::uint64_t composeStart = krkrns::BitmapProbeCounter();
+#endif
 					switch(colors)
 					{
 					case 3:
@@ -133,6 +156,9 @@ void TVPLoadTLG5(void* formatdata, void *callbackdata,
 						outbufp[2] += width; outbufp[3] += width;
 						break;
 					}
+#ifdef __SWITCH__
+					tlg5ComposeTicks += krkrns::BitmapProbeCounter() - composeStart;
+#endif
 				}
 				else
 				{
@@ -205,6 +231,17 @@ void TVPLoadTLG5(void* formatdata, void *callbackdata,
 	if(text) TJSAlignedDealloc(text);
 	for(tjs_int i = 0; i < colors; i++)
 		if(outbuf[i]) TJSAlignedDealloc(outbuf[i]);
+#ifdef __SWITCH__
+	{
+		const double frequency = static_cast<double>(SDL_GetPerformanceFrequency());
+		const std::uint64_t elapsed = krkrns::BitmapProbeCounter() - tlg5Start;
+		const double totalMs = elapsed * 1000.0 / frequency;
+		KRKRNS_LOG("[tlg5-done] total=%.1fms decompress=%.1fms compose=%.1fms %dx%d colors=%d",
+			totalMs, tlg5DecompressTicks * 1000.0 / frequency,
+			tlg5ComposeTicks * 1000.0 / frequency,
+			int(width), int(height), int(colors));
+	}
+#endif
 }
 //---------------------------------------------------------------------------
 
@@ -351,12 +388,31 @@ void TVPLoadTLG6(void* formatdata, void *callbackdata,
 				switch(method)
 				{
 				case 0:
+#ifdef __SWITCH__
+					{
+						// TLG6 has two candidate hot spots: entropy unpacking
+						// and the serial predictor. Measure both before
+						// optimising either.
+						const std::uint64_t probeStart = krkrns::BitmapProbeCounter();
+						struct GolombProbe {
+							std::uint64_t start;
+							~GolombProbe() { krkrns::AddBitmapProbeGolomb(krkrns::BitmapProbeCounter() - start); }
+						} golombProbe{probeStart};
+						if(c == 0 && colors != 1)
+							TVPTLG6DecodeGolombValuesForFirst((tjs_int8*)pixelbuf,
+								pixel_count, bit_pool);
+						else
+							TVPTLG6DecodeGolombValues((tjs_int8*)pixelbuf + c,
+								pixel_count, bit_pool);
+					}
+#else
 					if(c == 0 && colors != 1)
 						TVPTLG6DecodeGolombValuesForFirst((tjs_int8*)pixelbuf,
 							pixel_count, bit_pool);
 					else
 						TVPTLG6DecodeGolombValues((tjs_int8*)pixelbuf + c,
 							pixel_count, bit_pool);
+#endif
 					break;
 				default:
 					TVPThrowExceptionMessage(TVPTLGLoadError, (const tjs_char*)TVPUnsupportedEntropyCodingMethod );
@@ -379,6 +435,8 @@ void TVPLoadTLG6(void* formatdata, void *callbackdata,
 					int start =
 						((width < TVP_TLG6_W_BLOCK_SIZE) ? width : TVP_TLG6_W_BLOCK_SIZE) *
 							(yy - y);
+#ifdef __SWITCH__
+					const std::uint64_t lineStart = krkrns::BitmapProbeCounter();
 					TVPTLG6DecodeLine(
 						prevline,
 						curline,
@@ -387,6 +445,17 @@ void TVPLoadTLG6(void* formatdata, void *callbackdata,
 						ft,
 						skipbytes,
 						pixelbuf + start, colors==3?0xff000000:0, oddskip, dir);
+					krkrns::AddBitmapProbeTlgLine(krkrns::BitmapProbeCounter() - lineStart);
+#else
+					TVPTLG6DecodeLine(
+						prevline,
+						curline,
+						width,
+						main_count,
+						ft,
+						skipbytes,
+						pixelbuf + start, colors==3?0xff000000:0, oddskip, dir);
+#endif
 				}
 
 				if(main_count != x_block_count)
@@ -454,11 +523,17 @@ static void TVPInternalLoadTLG(void* formatdata, void *callbackdata, tTVPGraphic
 	// check for TLG raw data
 	if(!memcmp("TLG5.0\x00raw\x1a\x00", mark, 11))
 	{
+#ifdef __SWITCH__
+		KRKRNS_LOG("[tlg-fmt] TLG5");
+#endif
 		TVPLoadTLG5(formatdata, callbackdata, sizecallback,
 			scanlinecallback, src, keyidx, mode);
 	}
 	else if(!memcmp("TLG6.0\x00raw\x1a\x00", mark, 11))
 	{
+#ifdef __SWITCH__
+		KRKRNS_LOG("[tlg-fmt] TLG6");
+#endif
 		TVPLoadTLG6(formatdata, callbackdata, sizecallback,
 			scanlinecallback, src, keyidx, mode);
 	}

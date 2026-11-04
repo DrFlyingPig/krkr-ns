@@ -162,8 +162,8 @@ list(APPEND KRKRSDL2COMMON_SRC ${KIRIKIRISDL2_AVX2_SRC})
 list(APPEND KRKRSDL2COMMON_INCLUDES ${KIRIKIRISDL2_INCLUDES})
 
 if(NINTENDO_SWITCH)
-# Use the same portlibs PNG implementation as Kirikiroid2-NX, including its
-# native ARM row filters.  Keep the bundled implementation for other targets.
+# Use the portlibs PNG implementation, including its native ARM row filters.
+# Keep the bundled implementation for other targets.
 list(FILTER KRKRSDL2COMMON_SRC EXCLUDE REGEX "^external/krkrz/external/lpng/")
 list(REMOVE_ITEM KRKRSDL2COMMON_INCLUDES external/krkrz/external/lpng)
 endif()
@@ -176,8 +176,30 @@ set_source_files_properties(${KRKRSDL2OPUS_SRC} PROPERTIES INCLUDE_DIRECTORIES "
 list(APPEND KRKRSDL2COMMON_SRC src/support/roundevenf.c)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSPerf.cpp)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSBitmapProbe.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSResourcePolicy.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/SDLBitmapCompositor.cpp)
+# libdeflate supplies the one-shot zlib inflate used for XP3 index blocks and
+# segments; zlib stays linked as the fallback for streams it rejects. Only the
+# decompression half of the library is compiled.
+list(APPEND KRKRSDL2COMMON_SRC
+    external/libdeflate/lib/adler32.c
+    external/libdeflate/lib/deflate_decompress.c
+    external/libdeflate/lib/utils.c
+    external/libdeflate/lib/zlib_decompress.c)
+list(APPEND KRKRSDL2COMMON_INCLUDES external/libdeflate)
+if(NINTENDO_SWITCH)
+    # GCC auto-vectorizes libdeflate's byte-swap loops into saturating vector
+    # shifts (SQSHL), which the emulator's JIT rejects as an undefined
+    # instruction. The decoder's throughput comes from its algorithm rather than
+    # those loops, so keep this translation unit scalar.
+    set_source_files_properties(
+        external/libdeflate/lib/adler32.c
+        external/libdeflate/lib/deflate_decompress.c
+        external/libdeflate/lib/utils.c
+        external/libdeflate/lib/zlib_decompress.c
+        PROPERTIES COMPILE_OPTIONS "-fno-tree-vectorize;-fno-tree-slp-vectorize")
+endif()
 
 option(KRKRNS_ALPHA_NEON "Use the native Switch alpha loops" ON)
 option(KRKRNS_CROSSFADE_NEON "Use the native Switch crossfade loops" ON)
@@ -797,8 +819,8 @@ target_compile_definitions(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2_DEFINITIONS}
 target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<COMPILE_LANGUAGE:C>:${KRKRSDL2_CFLAGS}>)
 target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<COMPILE_LANGUAGE:CXX>:${KRKRSDL2_CXXFLAGS}>)
 if(NINTENDO_SWITCH)
-# Kirikiroid2-NX builds its software renderer/plugins with -O3. Keep debug
-# builds unchanged and retain symbols in RelWithDebInfo packages.
+# The software renderer and plugins are CPU-bound, so build them with -O3.
+# Keep debug builds unchanged and retain symbols in RelWithDebInfo packages.
 target_compile_options(${KRKRSDL2COMMON_NAME} PUBLIC $<$<NOT:$<CONFIG:Debug>>:-O3>)
 endif()
 target_include_directories(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2COMMON_INCLUDES})

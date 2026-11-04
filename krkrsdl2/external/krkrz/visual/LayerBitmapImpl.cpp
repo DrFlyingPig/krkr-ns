@@ -13,6 +13,9 @@
 #include "GLCompositeBridge.h"
 #include "KrkrNSPerf.h"
 #ifdef __SWITCH__
+#include "KrkrNSBitmapProbe.h"
+#endif
+#ifdef __SWITCH__
 #include "SDLBitmapCompositor.h"
 #include <atomic>
 #endif
@@ -487,7 +490,16 @@ tTVPBitmap::tTVPBitmap(const tTVPBitmap & r)
 	r.SyncForCPURead();
 #endif
 	// allocate bitmap which has the same metrics to r
+#ifdef __SWITCH__
+	// This allocation plus the memcpy below is the whole-image copy a shared
+	// bitmap pays on its first write. Time only the allocation here; the copy
+	// shows up in the caller's detach total.
+	const std::uint64_t probeAllocStart = krkrns::BitmapProbeCounter();
 	Allocate(r.GetWidth(), r.GetHeight(), r.GetBPP());
+	krkrns::AddBitmapProbeAlloc(krkrns::BitmapProbeCounter() - probeAllocStart);
+#else
+	Allocate(r.GetWidth(), r.GetHeight(), r.GetBPP());
+#endif
 
 	// copy BitmapInfo
 	*BitmapInfo = *r.BitmapInfo;
@@ -577,10 +589,13 @@ bool tTVPBitmap::PromoteLoadedSource()
 		[](void* pixels) { tTVPBitmapBitsAlloc::Free(pixels); }, !CPUReadBufferExposed);
 	if (!source) return false;
 	LoadedSource = std::move(source);
-	LoadedSource.ReleaseDecodedCPU();
+	// The raw decoded pixels stay resident as the recovery mirror. Releasing
+	// them only paid off when a compressed copy existed to restore from, and
+	// building that copy cost more than it saved on every load.
 	return true;
 }
 
+//---------------------------------------------------------------------------
 void tTVPBitmap::SyncForCPURead() const
 {
 	if (LoadedSource && !LoadedSource.CPUBuffer())
@@ -594,6 +609,16 @@ void tTVPBitmap::SyncForCPURead() const
 
 void tTVPBitmap::BeforeCPUWrite(bool exposeBuffer) const
 {
+#ifdef __SWITCH__
+	// Decoding writes one scanline at a time, so this runs once per row. Time
+	// it to tell a slow write path from a slow codec.
+	const std::uint64_t probeStart = krkrns::BitmapProbeCounter();
+	struct ProbeScope {
+		std::uint64_t start;
+		~ProbeScope() { krkrns::AddBitmapProbeCPUWrite(krkrns::BitmapProbeCounter() - start); }
+	} probeScope{probeStart};
+	krkrns::AddBitmapProbeScanline();
+#endif
 	SyncForCPURead();
 	if (LoadedSource)
 	{
@@ -847,7 +872,16 @@ const void * tTVPNativeBaseBitmap::GetScanLine(tjs_uint l) const
 void * tTVPNativeBaseBitmap::GetScanLineForWrite(tjs_uint l)
 {
 	Bitmap->CheckScanLine(l);
+#ifdef __SWITCH__
+	// Called once per decoded row. Independ() deep-copies the whole bitmap when
+	// it is still shared, so this probes where a slow decode actually goes.
+	const std::uint64_t probeStart = krkrns::BitmapProbeCounter();
+	const bool shared = !Bitmap->IsIndependent();
 	Independ();
+	krkrns::AddBitmapProbeDetach(krkrns::BitmapProbeCounter() - probeStart, shared);
+#else
+	Independ();
+#endif
 	return Bitmap->GetScanLineForWrite(l);
 }
 //---------------------------------------------------------------------------

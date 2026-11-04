@@ -1326,7 +1326,14 @@ static void TVPInvalidateWrittenStorageName(const ttstr &name, const ttstr &reso
 #endif
 	}
 #ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
-	TVPDeferAutoPathFolderValidation(0);
+	// Folder membership can only change for a folder the auto-path index
+	// enumerates. A save file written under the save directory (or any other
+	// folder outside TVPAutoPathList) cannot add or remove an indexed entry, so
+	// deferring the expensive "list every indexed folder" validation for such a
+	// write only made the next lookup pay ~12 ms for nothing. KAG rotates a
+	// dozen save files per quick save, which made that the dominant cost of the
+	// phase.
+	if (indexedFolder) TVPDeferAutoPathFolderValidation(0);
 #endif
 }
 //---------------------------------------------------------------------------
@@ -1342,7 +1349,15 @@ struct tTVPClearAutoPathCacheCallback : public tTVPCompactEventCallbackIntf
 			if (level < TVP_COMPACT_LEVEL_CRITICAL)
 			{
 				TVPClearAutoPathLookupCache();
-				TVPDeferAutoPathFolderValidation(level);
+				// Loose-folder membership can only change while this process is
+				// not running, which is what the deactivate event reports. A
+				// script-requested compact (level MAX, which KAG issues after
+				// every scene teardown -- about a dozen times per session)
+				// happens mid-game and cannot have changed the SD contents, so
+				// it must not schedule the ~12 ms "list every indexed folder"
+				// validation for the next lookup.
+				if (level <= TVP_COMPACT_LEVEL_DEACTIVATE)
+					TVPDeferAutoPathFolderValidation(level);
 			}
 			else
 #endif
@@ -2296,6 +2311,33 @@ void TVPClearStorageCaches()
 	TVPDeferAutoPathFolderValidation(0);
 #endif
 }
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+// A write can only change the membership of a folder the auto-path index
+// enumerates. A save thumbnail, configuration file or any other name outside
+// TVPAutoPathList must not schedule the "list every indexed folder" validation
+// that the next lookup would then pay for: a quick save rotates a dozen
+// thumbnails and each write used to cost one full validation (~12 ms each over
+// ~60 folders).
+static bool TVPWriteTouchesIndexedFolder(const ttstr &storageName)
+{
+	if (TVPAutoPathList.empty() || storageName.IsEmpty()) return true;
+	const ttstr directory = TVPExtractStoragePath(TVPNormalizeStorageName(storageName));
+	for (auto it = TVPAutoPathList.begin(); it != TVPAutoPathList.end(); ++it)
+		if (*it == directory) return true;
+	return false;
+}
+
+// Write-side invalidation for the storage operations that know their target
+// name. TVPClearStorageCaches() itself stays conservative for the callers that
+// have no name (plugins, directory changes).
+static void TVPClearStorageCachesForWrite(const ttstr &storageName)
+{
+	tTJSCriticalSectionHolder cs_holder(TVPCreateStreamCS);
+	TVPClearXP3SegmentCache();
+	TVPClearAutoPathLookupCache();
+	if (TVPWriteTouchesIndexedFolder(storageName)) TVPDeferAutoPathFolderValidation(0);
+}
+#endif
 //---------------------------------------------------------------------------
 
 
@@ -2470,7 +2512,11 @@ static bool TVPStoragesDeleteFile(const ttstr & file)
 		return false;
 	}
 	KRKRNS_LOG("[fstat] deleteFile: removed %s", path8.c_str());
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+	TVPClearStorageCachesForWrite(placed);
+#else
 	TVPClearStorageCaches();
+#endif
 	return true;
 }
 
@@ -2510,7 +2556,11 @@ static bool TVPStoragesMoveFile(const ttstr & from, const ttstr & to)
 				src8.c_str(), dst8.c_str(), err);
 			return false;
 		}
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+		TVPClearStorageCachesForWrite(dst);
+#else
 		TVPClearStorageCaches();
+#endif
 		KRKRNS_LOG("[fstat] moveFile: moved %s -> %s", src8.c_str(), dst8.c_str());
 		return true;
 	}
@@ -2548,15 +2598,23 @@ static bool TVPStoragesCopyFile(const ttstr & from, const ttstr & to)
 			delete in;
 			return false;
 		}
-		tjs_uint8 buffer[1024 * 16];
+		// Save thumbnails are a couple of megabytes each and KAG copies a dozen
+		// of them per quick save. A 256 KB staging buffer keeps the loop out of
+		// the per-call stream path without putting it on the stack (Switch
+		// thread stacks are small).
+		std::unique_ptr<tjs_uint8[]> buffer(new tjs_uint8[256 * 1024]);
 		tjs_int32 size;
-		while((size = in->Read(buffer, sizeof buffer)) > 0)
+		while((size = in->Read(buffer.get(), 256 * 1024)) > 0)
 		{
-			out->Write(buffer, size);
+			out->Write(buffer.get(), size);
 		}
 		delete out;
 		delete in;
+#ifdef KRKRNS_RETAIN_AUTOPATH_INDEX
+		TVPClearStorageCachesForWrite(dst);
+#else
 		TVPClearStorageCaches();
+#endif
 		return true;
 	}
 	catch(...)

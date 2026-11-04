@@ -335,9 +335,9 @@ bool SwitchMovieOverlay::OpenStream(const ttstr & name,
         return false;
     }
 #ifdef __SWITCH__
-    // Kirikiroid2-NX's software movie decoder requests 1.5 threads per
-    // available processor, bounded to 1..16. Horizon's generic CPU detection
-    // can report one core, so use the engine's process-capability count.
+    // The software movie decoder requests 1.5 threads per available processor,
+    // bounded to 1..16. Horizon's generic CPU detection can report one core, so
+    // use the engine's process-capability count.
     const int requestedVideoThreads = std::max(1, std::min(TVPGetProcessorNum() * 3 / 2, 16));
     videoCodec_->thread_count = requestedVideoThreads;
 #endif

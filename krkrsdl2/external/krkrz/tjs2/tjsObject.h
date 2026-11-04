@@ -12,10 +12,18 @@
 #define tjsObjectH
 
 #include <vector>
+#include <utility>
 #include "tjsInterface.h"
 #include "tjsVariant.h"
 #include "tjsUtils.h"
 #include "tjsError.h"
+#include "proof_registry.h"
+
+// Isolated lazy experiment only; this header is not installed.
+namespace krkr_exact_proof { void BeforeStoredEnum(TJS::iTJSDispatch2 *); }
+#ifdef __SWITCH__
+#include "KrkrNSSymbolAllocator.h"
+#endif
 
 namespace TJS
 {
@@ -401,6 +409,11 @@ public:
 class tTJSCustomObject : public tTJSDispatch
 {
 	typedef tTJSDispatch inherited;
+#if defined(__SWITCH__) || defined(KRKRNS_NATIVE_ARRAY_FACTORY_TEST)
+	// The private native Array factory can initialize a fresh symbol table
+	// after checking the exact source/destination and reference types.
+	friend class tTJSArrayClass;
+#endif
 
 	// tTJSSymbolData -----------------------------------------------------
 public:
@@ -418,6 +431,54 @@ public:
 			*/
 
 		tTJSSymbolData * Next; // next chain
+
+#ifdef __SWITCH__
+		// Pool scalar collision nodes without changing their layout or the
+		// ordinary new[] path used by the base hash table. Ownership remains
+		// with each object and existing deletion/enumeration order is preserved.
+		static void *operator new(std::size_t size)
+		{
+			if(size != sizeof(tTJSSymbolData)) throw std::bad_alloc();
+			return krkrns::SymbolAllocator<sizeof(tTJSSymbolData),
+				alignof(tTJSSymbolData)>::Allocate();
+		}
+		static void operator delete(void *pointer) noexcept
+		{
+			krkrns::SymbolAllocator<sizeof(tTJSSymbolData),
+				alignof(tTJSSymbolData)>::Deallocate(pointer);
+		}
+		static void operator delete(void *pointer, std::size_t) noexcept
+		{
+			operator delete(pointer);
+		}
+		static void *operator new(std::size_t size, const std::nothrow_t&) noexcept
+		{
+			try { return operator new(size); }
+			catch(...) { return nullptr; }
+		}
+		static void operator delete(void *pointer, const std::nothrow_t&) noexcept
+		{
+			operator delete(pointer);
+		}
+		static void *operator new(std::size_t, void *pointer) noexcept { return pointer; }
+		static void operator delete(void *, void *) noexcept {}
+
+		// The compiler owns the array cookie and supplies the same total size
+		// to these two functions. Keep only the usual sized array deallocator
+		// so trivial Symbol arrays still receive that compiler-managed cookie.
+		static void *operator new[](std::size_t bytes)
+		{
+			static_assert(alignof(tTJSSymbolData) <= alignof(void*),
+				"Symbol array pool must satisfy the element alignment");
+			return krkrns::SymbolArrayAllocator::Allocate(bytes);
+		}
+		static void operator delete[](void *pointer, std::size_t bytes) noexcept
+		{
+			krkrns::SymbolArrayAllocator::Deallocate(pointer, bytes);
+		}
+		static void *operator new[](std::size_t, void *pointer) noexcept { return pointer; }
+		static void operator delete[](void *, void *) noexcept {}
+#endif
 
 		void SelfClear(void)
 		{
@@ -573,10 +634,90 @@ private:
 		iTJSDispatch2 *objthis);
 	//---------------------------------------------------------------------
 public:
+	// Isolated transaction experiment: these helpers bypass every dispatch hook.
+	// Caller must own both exact native objects and run on the TJS thread.
+	tjs_int UnsafeTxnCount() const noexcept { return Count; }
+	bool UnsafeTxnEmptyStorage() const noexcept {
+		if (Count || !Symbols) return false;
+		for (tjs_int i=0; i<HashSize; ++i)
+			if ((Symbols[i].SymFlags & TJS_SYMBOL_USING) || Symbols[i].Next) return false;
+		return true;
+	}
+	tjs_int UnsafeTxnHashSize() const noexcept { return HashSize; }
+	tjs_int UnsafeTxnHashMask() const noexcept { return HashMask; }
+	tjs_uint UnsafeTxnHashMagic() const noexcept { return RebuildHashMagic; }
+	const void *UnsafeTxnSymbols() const noexcept { return Symbols; }
+	bool UnsafeTxnReadMember(const tjs_char *name, tTJSVariant &out) const {
+		for (const tTJSSymbolData *b=Symbols; b<Symbols+HashSize; ++b)
+			for (const tTJSSymbolData *d=b; d; d=d->Next)
+				if ((d->SymFlags & TJS_SYMBOL_USING) && !TJS_strcmp((const tjs_char *)(*d->Name),name)) {
+					out.CopyRef(*reinterpret_cast<const tTJSVariant *>(&d->Value)); return true;
+				}
+		return false;
+	}
+	// Test-only bypass to model legacy/foreign code that installed a native
+	// instance before the REGISTER barrier. Never use in production.
+	bool UnsafeTxnTestInstallNative(tjs_int32 id, iTJSNativeInstance *native) noexcept {
+		if (id==-1 || !native) return false;
+		for (tjs_int i=0; i<TJS_MAX_NATIVE_CLASS; ++i) if (ClassIDs[i]==id) return false;
+		for (tjs_int i=0; i<TJS_MAX_NATIVE_CLASS; ++i) if (ClassIDs[i]==-1) {
+			ClassIDs[i]=id; ClassInstances[i]=native; return true;
+		}
+		return false;
+	}
+	iTJSNativeInstance *UnsafeTxnNative(tjs_int32 id) const noexcept {
+		for (tjs_int i=0; i<TJS_MAX_NATIVE_CLASS; ++i)
+			if (ClassIDs[i]==id) return ClassInstances[i];
+		return nullptr;
+	}
+	bool UnsafeTxnNoBoundValues(const tTJSCustomObject *target) const noexcept {
+		for (const tTJSSymbolData *b=Symbols; b<Symbols+HashSize; ++b) {
+			for (const tTJSSymbolData *d=b; d; d=d->Next) {
+				if (!(d->SymFlags & TJS_SYMBOL_USING)) continue;
+				const auto &v=*reinterpret_cast<const tTJSVariant *>(&d->Value);
+				if (v.Type()!=tvtObject) continue;
+				const auto c=v.AsObjectClosureNoAddRef();
+				if (c.Object==this || c.ObjThis==this || c.Object==target || c.ObjThis==target)
+					return false;
+			}
+		}
+		return true;
+	}
+	// Non-owning by design: on any uncertain teardown the holder and its table
+	// are quarantined together; its destructor must never implicitly release TJS
+	// values during exception unwinding.
+	struct UnsafeTxnTable {
+		tjs_int count=0, mask=0, size=0;
+		tjs_uint magic=0;
+		tTJSSymbolData *symbols=nullptr;
+	};
+	bool UnsafeTxnDetachDictionary(UnsafeTxnTable &out, const tTJSCustomObject &target) {
+		if (out.symbols || IsInvalidated || !UnsafeTxnNoBoundValues(&target)) return false;
+		// Allocate before changing stage, so allocation failure leaves it intact.
+		auto *empty=new tTJSSymbolData[HashSize];
+		memset(empty,0,sizeof(tTJSSymbolData)*HashSize);
+		out.count=Count; out.mask=HashMask; out.size=HashSize;
+		out.magic=RebuildHashMagic; out.symbols=Symbols;
+		Count=0; Symbols=empty;
+		return true;
+	}
+	bool UnsafeTxnCommitDictionary(UnsafeTxnTable &in) noexcept {
+		if (!UnsafeTxnEmptyStorage() || IsInvalidated || !in.symbols) return false;
+		auto *oldEmpty=Symbols;
+		Count=in.count; HashMask=in.mask; HashSize=in.size;
+		RebuildHashMagic=in.magic; Symbols=in.symbols;
+		in.symbols=nullptr;
+		// Count==0 implies no constructed values or collision chains here.
+		delete [] oldEmpty;
+		return true;
+	}
+
 	// Raw, chain-first iteration for the typed native member copier. Property
 	// access remains in EnumMembers; callers here only copy stored values.
 	template<typename Consumer> void EnumStoredMembers(Consumer consumer) const
 	{
+		::krkr_exact_proof::DispatchHold proofHold(const_cast<tTJSCustomObject *>(this),nullptr);
+		::krkr_exact_proof::BeforeStoredEnum(const_cast<tTJSCustomObject *>(this));
 		auto call = [&consumer](const tTJSSymbolData *data) {
 			if (!(data->SymFlags & TJS_SYMBOL_USING)) return;
 			tjs_uint32 flags = 0;

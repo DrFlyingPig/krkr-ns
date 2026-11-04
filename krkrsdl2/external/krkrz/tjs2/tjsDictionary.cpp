@@ -12,6 +12,7 @@
 #include "tjsCommHead.h"
 
 #include "tjsDictionary.h"
+#include "proof_registry.h"
 #include "tjsArray.h"
 #include "tjsBinarySerializer.h"
 #include "tjsDebug.h"
@@ -958,6 +959,8 @@ tjs_error TJS_INTF_METHOD
 		tTJSVariant *result, tjs_int numparams, tTJSVariant **param,
 		iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	tjs_error hr = inherited::FuncCall(flag, membername, hint, result, numparams,
 		param, objthis);
 //	if(hr == TJS_E_MEMBERNOTFOUND)
@@ -970,6 +973,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		tTJSVariant *result, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	tjs_error hr;
 	hr = inherited::PropGet(flag, membername, hint, result, objthis);
 	if(hr == TJS_E_MEMBERNOTFOUND && !(flag & TJS_MEMBERMUSTEXIST))
@@ -986,6 +991,8 @@ tjs_error TJS_INTF_METHOD
 		iTJSDispatch2 **result, tjs_int numparams, tTJSVariant **param,
 			iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	tjs_error hr = inherited::CreateNew(flag, membername, hint, result, numparams,
 		param, objthis);
 	if(hr == TJS_E_MEMBERNOTFOUND && !(flag & TJS_MEMBERMUSTEXIST))
@@ -998,6 +1005,8 @@ tjs_error TJS_INTF_METHOD
 		tjs_uint32 *hint,
 		tTJSVariant *result, const tTJSVariant *param, iTJSDispatch2 *objthis)
 {
+	::krkr_exact_proof::DispatchHold proofHold(this,objthis);
+	if (membername) ::krkr_exact_proof::Access(this);
 	tjs_error hr = inherited::Operation(flag, membername, hint, result, param, objthis);
 	if(hr == TJS_E_MEMBERNOTFOUND && !(flag & TJS_MEMBERMUSTEXIST))
 	{
@@ -1027,15 +1036,22 @@ tjs_int32 TJSGetDictionaryClassID()
 //---------------------------------------------------------------------------
 // TJSCreateDictionaryObject
 //---------------------------------------------------------------------------
+struct UnsafeDictionaryFactoryHolder {
+	iTJSDispatch2 *Obj;
+	UnsafeDictionaryFactoryHolder() { Obj = new tTJSDictionaryClass();
+		::krkr_exact_proof::CaptureFactory(Obj, false); }
+	~UnsafeDictionaryFactoryHolder() { ::krkr_exact_proof::ForgetFactory(Obj); Obj->Release(); }
+};
+static UnsafeDictionaryFactoryHolder &UnsafeDictionaryFactoryHolderInstance() {
+	static UnsafeDictionaryFactoryHolder holder; return holder;
+}
+iTJSDispatch2 *UnsafeDictionaryFactoryNoCreateImpl() {
+	return UnsafeDictionaryFactoryHolderInstance().Obj;
+}
 iTJSDispatch2 * TJSCreateDictionaryObject(iTJSDispatch2 **classout)
 {
 	// create a Dictionary object
-	struct tHolder
-	{
-		iTJSDispatch2 * Obj;
-		tHolder() { Obj = new tTJSDictionaryClass(); }
-		~tHolder() { Obj->Release(); }
-	} static dictionaryclass;
+	auto &dictionaryclass = UnsafeDictionaryFactoryHolderInstance();
 
 	if(classout) *classout = dictionaryclass.Obj, dictionaryclass.Obj->AddRef();
 

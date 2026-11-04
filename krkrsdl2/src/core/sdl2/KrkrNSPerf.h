@@ -4,7 +4,7 @@
 
 enum class KrkrNSPerfOp : unsigned
 {
-    GraphicLoad, ImageDecode, XP3Read, DiskRead, Inflate, BitmapDetach,
+    GraphicLoad, ImageDecode, XP3Read, DiskRead, DiskWrite, Inflate, BitmapDetach,
     ThreadWait, LayerPrepare, LayerRaster, LayerFinish, Dispatch, Present,
     BitmapBlt, BlendPixels, BitmapCopy, CopyPixels,
     TextureUpload, PsbParse, PsbCommit, PsbExpand,
@@ -24,6 +24,10 @@ enum class KrkrNSPerfOp : unsigned
     GpuCanvasCreate,
     GpuGroupRender, GpuGroupBlit,
     GpuSourcePrepare,
+    GraphicCacheHit,
+    GraphicCacheStore,
+    GraphicMetaDict,
+    GpuCanvasUploadFlip,
     Count
 };
 
@@ -36,6 +40,11 @@ void krkrsdl2_perf_present() noexcept;
 void krkrsdl2_perf_report() noexcept;
 void krkrsdl2_perf_cache(bool hit) noexcept;
 void krkrsdl2_perf_bytes(KrkrNSPerfOp operation, std::uint64_t bytes) noexcept;
+// Per-frame attribution: mark() snapshots the counters at frame entry, and
+// stall_dump() logs the operations that consumed the stalled frame. Both are
+// inert unless the perf marker is present.
+void krkrsdl2_perf_frame_mark() noexcept;
+void krkrsdl2_perf_stall_dump() noexcept;
 
 class KrkrNSPerfScope
 {
@@ -67,6 +76,8 @@ inline void krkrsdl2_perf_present() noexcept {}
 inline void krkrsdl2_perf_report() noexcept {}
 inline void krkrsdl2_perf_cache(bool) noexcept {}
 inline void krkrsdl2_perf_bytes(KrkrNSPerfOp, std::uint64_t) noexcept {}
+inline void krkrsdl2_perf_frame_mark() noexcept {}
+inline void krkrsdl2_perf_stall_dump() noexcept {}
 class KrkrNSPerfScope
 {
 public:

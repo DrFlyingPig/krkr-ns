@@ -32,6 +32,30 @@
 
 namespace TJS
 {
+#ifdef __SWITCH__
+// Opt-in opcode histogram: which bytecodes the real game actually executes.
+// Enabled by the marker file; the counter costs one increment per opcode, so it
+// only runs while the marker exists.
+namespace
+{
+unsigned long long VMHistogram[__VM_LAST];
+bool VMHistogramEnabled()
+{
+	static int enabled = -1;
+	if (enabled < 0)
+	{
+		enabled = 0;
+		if (FILE * marker = std::fopen("sdmc:/switch/KRKR-ns/vm-opcode.txt", "rb"))
+		{
+			std::fclose(marker);
+			enabled = 1;
+			KRKRNS_LOG("[vm-ops] histogram enabled");
+		}
+	}
+	return enabled == 1;
+}
+}
+#endif	// __SWITCH__
 //---------------------------------------------------------------------------
 // utility functions
 //---------------------------------------------------------------------------
@@ -1134,6 +1158,9 @@ tjs_int tTJSInterCodeContext::ExecuteCode(tTJSVariant *ra_org, tjs_int startip,
 	}
 	// execute VM codes
 	tjs_int32 *codesave;
+#ifdef __SWITCH__
+	const bool opcodeHistogram = VMHistogramEnabled();
+#endif
 	try
 	{
 		tjs_int32 *code = codesave = CodeArea + startip;
@@ -1156,6 +1183,9 @@ tjs_int tTJSInterCodeContext::ExecuteCode(tTJSVariant *ra_org, tjs_int startip,
 #endif	// ENABLE_DEBUGGER
 		while(true)
 		{
+#ifdef __SWITCH__
+			if (opcodeHistogram) ++VMHistogram[*code];
+#endif
 #ifdef ENABLE_DEBUGGER
 			if( is_enable_debugger ) {
 				tjs_int next_line_no = Block->SrcPosToLine( CodePosToSrcPos(code-CodeArea) );
@@ -3642,3 +3672,21 @@ tjs_error TJS_INTF_METHOD
 //---------------------------------------------------------------------------
 
 }
+
+#ifdef __SWITCH__
+// Called from the perf reporter; prints the opcode histogram accumulated since
+// the previous report so each window can be derived by subtraction.
+extern "C" void krkrns_vm_opcode_dump()
+{
+	if (!TJS::VMHistogramEnabled()) return;
+	char buffer[2048];
+	int len = 0;
+	for (int i = 0; i < (int)__VM_LAST && len < 1900; ++i)
+	{
+		using namespace TJS;
+		if (!VMHistogram[i]) continue;
+		len += std::snprintf(buffer + len, sizeof(buffer) - (std::size_t)len, " %d=%llu", i, VMHistogram[i]);
+	}
+	if (len) KRKRNS_LOG("[vm-ops]%s", buffer);
+}
+#endif

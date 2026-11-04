@@ -6248,9 +6248,9 @@ bool tTJSNI_BaseLayer::RenderDirectGPUScene(tTVPDrawable *target,
 void tTJSNI_BaseLayer::DrawDirectGPU(tTVPDrawable *target, tjs_int x, tjs_int y,
 	const tTVPRect &r, bool visiblecheck)
 {
-	// Kirikiroid2-NX LayerIntf.cpp::Draw_GPU, the full-opacity group branch:
-	// draw this layer first, then its children directly onto the same opaque
-	// window canvas. Keep CPU/cache completion and script bitmaps untouched.
+	// Full-opacity group branch: draw this layer first, then its children
+	// directly onto the same opaque window canvas. Keep CPU/cache completion
+	// and script bitmaps untouched.
 	if(visiblecheck && !IsSeen()) return;
 	tTVPRect rect;
 	if(!TVPIntersectRect(&rect, r, Rect)) return;
