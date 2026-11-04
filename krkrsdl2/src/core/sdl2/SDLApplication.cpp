@@ -6620,6 +6620,13 @@ void krkrsdl2_return_to_launcher()
 	// real device before the chain restart could happen.  The in-process
 	// rebuild clears this again once the fresh engine is up.
 	krkrsdl2_engine_teardown_active = true;
+	// The game window is still alive here, which is the only safe moment to
+	// destroy E-mote's private GL context.  SDL keeps a destroyed window
+	// referenced until the contexts built for it are gone, so leaving it alive
+	// made the next session block while creating its window (the emulator hung
+	// right after "drop plugin-side session caches" on every exit once E-mote
+	// was running on the GPU).
+	krkrsdl3::TVPReleaseRenderBackendForSessionEnd();
 
 	// Preferred: restart the application.  Re-using one process/TJS engine
 	// across games is fragile — game boot scripts define classes and globals
@@ -6922,6 +6929,13 @@ static void krkrsdl2_reinitialize_engine()
 	krkrsdl2_resource_policy_end_session();
 	KRKRNS_STAGE("reinit: begin");
 	KRKRNS_LOG("[reinit] ===== restarting engine in-process =====");
+	// The game window and its GL context are already gone here.  Guard the whole
+	// restart, not just one step: any plugin call that reaches a GPU backend while
+	// this is false makes the context current on a dead window and the process
+	// hangs (observed right after "drop plugin-side session caches" when an
+	// E-mote target or a layer completion touched the retired context).
+	// Cleared again at the end of the restart, before the new engine runs.
+	krkrsdl2_engine_teardown_active = true;
 
 	// KRKR-ns: Application is NOT destroyed here.  It owns the window list,
 	// but the windows are script objects of the engine that is still alive, and

@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <set>
 #ifdef __SWITCH__
 #include <arm_neon.h>
@@ -18,6 +19,7 @@
 
 #include "tjsCommHead.h"
 #include "LayerIntf.h"
+#include "EventIntf.h"
 #include "KrkrNSProf.h"
 #include "KrkrNSPerf.h"
 #include <SDL.h>
@@ -25,6 +27,10 @@
 #include "EmoteGLRenderBackend.h"
 #include "SDLBitmapCompositor.h"
 #endif
+
+// Set while the engine tears a session down (SDLApplication.cpp): the window and
+// its GL context are already gone, so calling into a GPU backend there hangs.
+extern volatile bool krkrsdl2_engine_teardown_active;
 
 namespace emoteplayer
 {
@@ -52,6 +58,132 @@ static std::string EmoteToUtf8(const tTJSString& value)
     TVPUtf16ToUtf8(result, value.AsStdString());
     return result;
 }
+
+// KRKR-ns (2026-11-04): reuse E-mote render targets instead of churning malloc.//
+// A 1920x1440 E-mote target is an 11 MB allocation and this game creates and
+// destroys whole E-mote players constantly (428 targets in a 9-minute session).
+// Returning those to malloc and asking for them again fragments the heap until
+// the arena sits at the process ceiling (3.3 GB with under 1 GB live) and an
+// unrelated allocation -- the pre-rendered font atlas, in the crash that
+// prompted this -- fails with std::bad_alloc.
+//
+// Keep the most recently released targets per size and hand them back out.  The
+// pool is bounded, flushed whenever the render backend is rebuilt (engine
+// restart) and never mixes targets from two different renderers.
+namespace
+{
+struct EmotePooledTarget
+{
+    krkrsdl3::iTVPRenderBackend* renderer;
+    void* target;
+    tjs_int width;
+    tjs_int height;
+};
+const size_t EMOTE_TARGET_POOL_LIMIT = 6; // ~66 MB of 1920x1440 targets
+std::vector<EmotePooledTarget> _targetPool;
+
+void EmoteDiscardTarget(const EmotePooledTarget& entry)
+{
+    if (!entry.renderer || !entry.target) return;
+    // TVPGetRenderBackend() serves the CPU backend while teardown is active, so
+    // a mismatch identifies targets whose GPU context has been destroyed.
+    krkrsdl3::iTVPRenderBackend* live = krkrsdl3::TVPGetRenderBackend();
+    if (krkrsdl2_engine_teardown_active && entry.renderer != live) return;
+    entry.renderer->DestroyTarget(entry.target);
+}
+
+void EmoteFlushTargetPool(const char* reason)
+{
+    if (_targetPool.empty()) return;
+    TVPConsoleLog("emote: dropping %u pooled render target(s) for %s",
+                  (unsigned)_targetPool.size(), reason);
+    for (size_t i = 0; i < _targetPool.size(); ++i)
+        EmoteDiscardTarget(_targetPool[i]);
+    _targetPool.clear();
+}
+
+void* EmoteTakePooledTarget(krkrsdl3::iTVPRenderBackend* renderer,
+                            tjs_int width, tjs_int height)
+{
+    for (size_t i = 0; i < _targetPool.size(); ++i)
+    {
+        EmotePooledTarget& entry = _targetPool[i];
+        if (entry.renderer != renderer) continue;
+        if (entry.width != width || entry.height != height) continue;
+        void* target = entry.target;
+        _targetPool.erase(_targetPool.begin() + i);
+        return target;
+    }
+    return nullptr;
+}
+
+void EmoteReturnPooledTarget(krkrsdl3::iTVPRenderBackend* renderer,
+                             void* target, tjs_int width, tjs_int height)
+{
+    if (!renderer || !target || width <= 0 || height <= 0) return;
+    if (!_targetPool.empty() && _targetPool.front().renderer != renderer)
+        EmoteFlushTargetPool("renderer change");
+    if (_targetPool.size() >= EMOTE_TARGET_POOL_LIMIT)
+    {
+        EmoteDiscardTarget(_targetPool.front());
+        _targetPool.erase(_targetPool.begin());
+    }
+    EmotePooledTarget entry;
+    entry.renderer = renderer;
+    entry.target = target;
+    entry.width = width;
+    entry.height = height;
+    _targetPool.push_back(entry);
+}
+
+// Allocate a render target, reusing a pooled one and surviving allocation
+// failure: collect once and retry, then let the caller skip the frame instead of
+// letting std::bad_alloc become a fatal script error.
+void* CreateRenderTargetSafe(krkrsdl3::iTVPRenderBackend* renderer,
+                             tjs_int width, tjs_int height)
+{
+    if (!renderer || width <= 0 || height <= 0) return nullptr;
+    if (void* pooled = EmoteTakePooledTarget(renderer, width, height)) return pooled;
+    for (int attempt = 0; attempt < 2; ++attempt)
+    {
+        try
+        {
+            void* target = renderer->CreateTarget(width, height);
+            if (target) return target;
+        }
+        catch (const std::bad_alloc&)
+        {
+        }
+        catch (...)
+        {
+        }
+        if (attempt != 0) break;
+        TVPConsoleLog("[emote] render target %dx%d allocation failed; compacting and retrying",
+                      width, height);
+        TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
+        if (void* pooled = EmoteTakePooledTarget(renderer, width, height)) return pooled;
+    }
+    TVPConsoleLog("[emote] render target %dx%d unavailable; skipping this draw", width, height);
+    return nullptr;
+}
+
+// Give a target back for reuse (when the renderer still owns the pointer).
+void DestroyRenderTargetSafe(krkrsdl3::iTVPRenderBackend* renderer,
+                             void* target, tjs_int width, tjs_int height)
+{
+    if (!target) return;
+    if (!renderer)
+    {
+        // No owner recorded: releasing during teardown would hit a backend whose
+        // context is gone.  Leaving it to that backend's reset is the safe exit.
+        if (krkrsdl2_engine_teardown_active) return;
+        if (krkrsdl3::iTVPRenderBackend* current = krkrsdl3::TVPGetRenderBackend())
+            current->DestroyTarget(target);
+        return;
+    }
+    EmoteReturnPooledTarget(renderer, target, width, height);
+}
+} // namespace
 
 static ttstr EmoteFromUtf8(const std::string& value)
 {
@@ -351,6 +483,94 @@ static bool CopyRenderTargetToLayer(krkrsdl3::iTVPRenderBackend* renderer,
 iTJSDispatch2* ResourceManager::_kagWindow = nullptr;
 static SeparateLayerAdaptor* _motionWorkLayer = nullptr;
 
+// KRKR-ns (2026-11-04): hand parsed motion files from a dead ResourceManager to
+// the next one that asks for the same path.
+//
+// Several KAG E-mote integrations (the Yuzusoft titles among them) build a NEW
+// ResourceManager for every motion they show, so one instance parses one .mtn
+// and dies with it.  The per-instance cache can never hit: an 11-hour session
+// logged 109 ResourceManager.load calls, 108 parses and 0 cache hits, and every
+// motion switch paid for another multi-megabyte parse.  That churn is what
+// shredded the heap into holes too small for the next parse in the crash this
+// fix addresses.
+//
+// Only files released by a DESTROYED manager are parked here, and a parked file
+// is handed over only when no manager holds it, so this never shares a live
+// emotefile between two readers -- emotefile carries per-play state
+// (_metadata->_varList, isMirror, ...) and must stay single-owner.  Explicit
+// unloads (unload / unloadAll / clearCache) still free immediately: those are
+// the game asking for memory back.
+namespace
+{
+struct EmoteParkedFile
+{
+    ttstr path;
+    emotefile* file;
+    tjs_int seed;
+};
+// Enough to cover a motion cycle without holding much memory back.
+const size_t EMOTE_PARKED_FILE_LIMIT = 4;
+std::vector<EmoteParkedFile> _parkedFiles;
+
+void EmoteParkFile(const ttstr& path, emotefile* file, tjs_int seed)
+{
+    if (file == nullptr) return;
+    for (size_t i = 0; i < _parkedFiles.size(); i++)
+    {
+        if (_parkedFiles[i].path == path)
+        {
+            // An identical parse is already reserved; keep that one.
+            delete file;
+            return;
+        }
+    }
+    if (_parkedFiles.size() >= EMOTE_PARKED_FILE_LIMIT)
+    {
+        delete _parkedFiles.front().file;
+        _parkedFiles.erase(_parkedFiles.begin());
+    }
+    EmoteParkedFile parked;
+    parked.path = path;
+    parked.file = file;
+    parked.seed = seed;
+    _parkedFiles.push_back(parked);
+}
+
+emotefile* EmoteTakeParkedFile(const ttstr& path, tjs_int seed)
+{
+    for (size_t i = 0; i < _parkedFiles.size(); i++)
+    {
+        if (_parkedFiles[i].path != path) continue;
+        if (_parkedFiles[i].seed != seed) continue; // parsed under another seed
+        emotefile* file = _parkedFiles[i].file;
+        _parkedFiles.erase(_parkedFiles.begin() + i);
+        return file;
+    }
+    return nullptr;
+}
+
+void EmoteDropParkedFile(const ttstr& path)
+{
+    for (size_t i = 0; i < _parkedFiles.size(); i++)
+    {
+        if (_parkedFiles[i].path != path) continue;
+        delete _parkedFiles[i].file;
+        _parkedFiles.erase(_parkedFiles.begin() + i);
+        return;
+    }
+}
+
+void EmoteClearParkedFiles(const char* reason)
+{
+    if (_parkedFiles.empty()) return;
+    TVPConsoleLog("emote: dropping %u parked motion file(s) for %s",
+                  (unsigned)_parkedFiles.size(), reason);
+    for (size_t i = 0; i < _parkedFiles.size(); i++)
+        delete _parkedFiles[i].file;
+    _parkedFiles.clear();
+}
+} // namespace
+
 // KRKR-ns: drop the cached work layer when the script engine is torn down.
 //
 // _motionWorkLayer is built once, from the KAG window's poolLayer, and cached in
@@ -398,6 +618,11 @@ void krkrsdl2_emote_reset_motion_work_layer()
     // the next game died inside it -- the second game silently lost its
     // E-mote opening animation and title art while loads kept succeeding.
     ResourceManager::resetDecryptStateForEngineRestart();
+    // Parked parses belong to the game whose decrypt state produced them; the
+    // next game must not pick them up.
+    EmoteClearParkedFiles("engine restart");
+    // Pooled render targets belong to the renderer that is being torn down.
+    EmoteFlushTargetPool("engine restart");
 }
 
 // 递归查找 shapeNodeAreas 中指定名称的区域
@@ -497,7 +722,9 @@ ResourceManager::ResourceManager(iTJSDispatch2* kagWindow, tjs_int cacheSize)
 }
 ResourceManager::~ResourceManager()
 {
-    unloadAll();
+    // The manager is going away but nothing asked for the memory back, so park
+    // what it parsed for the next manager of this game (see _parkedFiles).
+    unloadAllInternal(true);
 }
 tTJSVariant ResourceManager::load(tTJSString path)
 {
@@ -518,6 +745,17 @@ tTJSVariant ResourceManager::load(tTJSString path)
         TVPConsoleLog("ResourceManager.load cache hit: %s", placed8.c_str());
         return rst->second->root();
     }
+
+    // KRKR-ns: the manager built for this motion replaces one that parsed the
+    // same path a moment ago; reuse that parse instead of paying for another
+    // multi-megabyte allocation.
+    if (emotefile* parked = EmoteTakeParkedFile(placedPath, _decryptkey))
+    {
+        cacheData.insert(std::pair<ttstr, emotefile*>(placedPath, parked));
+        TVPConsoleLog("ResourceManager.load parked hit: %s", placed8.c_str());
+        return parked->root();
+    }
+
     emotefile* file = new emotefile();
     file->setSeed(_decryptkey);
     file->setFun(_decryptClo);
@@ -547,19 +785,34 @@ void ResourceManager::unload(tTJSString path)
             delete it->second;
         cacheData.erase(it);
     }
+    // An explicit unload means the game wants the file gone, including any
+    // reserved parse of it.
+    EmoteDropParkedFile(TVPGetPlacedPath(trimPath));
 }
 void ResourceManager::unloadAll()
 {
-    for (auto item : cacheData)
+    unloadAllInternal(false);
+}
+void ResourceManager::unloadAllInternal(bool park)
+{
+    for (auto& item : cacheData)
     {
-        if (item.second != nullptr)
+        if (item.second == nullptr) continue;
+        if (park)
+            EmoteParkFile(item.first, item.second, _decryptkey);
+        else
             delete item.second;
     }
     cacheData.clear();
 }
 void ResourceManager::clearCache()
 {
-    
+    // The original emoteplayer.dll frees every cached motion here; the port used
+    // to leave this empty, so a game that clears its motion cache got nothing.
+    if (!cacheData.empty())
+        TVPConsoleLog("ResourceManager.clearCache dropped %u file(s)",
+                      (unsigned)cacheData.size());
+    unloadAllInternal(false);
 }
 emotefile* ResourceManager::GetPlayerByName(const tTJSString& name)
 {
@@ -620,15 +873,17 @@ void SeparateLayerAdaptor::clear()
     {
         if (target)
         {
-            renderer->DestroyTarget(target);
+            DestroyRenderTargetSafe(renderer, target, _targetWidth, _targetHeight);
             target = nullptr;
         }
         if (maskTarget)
         {
-            renderer->DestroyTarget(maskTarget);
+            DestroyRenderTargetSafe(renderer, maskTarget, _targetWidth, _targetHeight);
             maskTarget = nullptr;
         }
     }
+    _targetWidth = 0;
+    _targetHeight = 0;
     if (_this != nullptr)
     {
         _this->Invalidate();
@@ -677,27 +932,51 @@ void SeparateLayerAdaptor::set_parent(tTJSVariant v)
 }
 void SeparateLayerAdaptor::checkDrawArea(tjs_int width, tjs_int height)
 {
-    // 通过 2D 渲染器创建/重建渲染目标（GL 后端= FBO，软渲染后端= CPU 缓冲）
-    if (target == nullptr || _width != width || _height != height)
+    // KRKR-ns (2026-11-04): reuse the targets whenever the requested stage area
+    // still fits.  Rebuilding two 11 MB targets on every size change is what
+    // shredded the heap: a 15-minute tianshi session allocated 507 targets and
+    // drove the malloc arena to 3.2 GB with only ~1.5 GB live.
+    _width = width;
+    _height = height;
+    if (target != nullptr && maskTarget != nullptr &&
+        _targetWidth >= width && _targetHeight >= height)
+        return;
+
+    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    if (!renderer)
+        return;
+    if (target)
     {
-        krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
-        if (!renderer)
-            return;
-        if (target)
-        {
-            renderer->DestroyTarget(target);
-            target = nullptr;
-        }
+        DestroyRenderTargetSafe(renderer, target, _targetWidth, _targetHeight);
+        target = nullptr;
+    }
+    if (maskTarget)
+    {
+        DestroyRenderTargetSafe(renderer, maskTarget, _targetWidth, _targetHeight);
+        maskTarget = nullptr;
+    }
+    _targetWidth = 0;
+    _targetHeight = 0;
+    target = CreateRenderTargetSafe(renderer, width, height);
+    maskTarget = target ? CreateRenderTargetSafe(renderer, width, height) : nullptr;
+    if (!target || !maskTarget)
+    {
+        // Out of memory for this size: leave the adaptor empty so the caller
+        // skips the frame instead of dying on std::bad_alloc.
         if (maskTarget)
         {
-            renderer->DestroyTarget(maskTarget);
+            DestroyRenderTargetSafe(renderer, maskTarget, width, height);
             maskTarget = nullptr;
         }
-        _width = width;
-        _height = height;
-        target = renderer->CreateTarget(width, height);
-        maskTarget = renderer->CreateTarget(width, height); // 蒙版目标（与主体同尺寸）
+        if (target)
+        {
+            DestroyRenderTargetSafe(renderer, target, width, height);
+            target = nullptr;
+        }
+        return;
     }
+    _targetWidth = width;
+    _targetHeight = height;
 }
 
 D3DAdaptor::D3DAdaptor(
@@ -724,12 +1003,12 @@ D3DAdaptor::~D3DAdaptor()
     {
         if (_target)
         {
-            renderer->DestroyTarget(_target);
+            DestroyRenderTargetSafe(renderer, _target, _width, _height);
             _target = nullptr;
         }
         if (_maskTarget)
         {
-            renderer->DestroyTarget(_maskTarget);
+            DestroyRenderTargetSafe(renderer, _maskTarget, _width, _height);
             _maskTarget = nullptr;
         }
     }
@@ -1001,6 +1280,10 @@ tjs_uint32 TmpMotionObj::ClassID = (tjs_uint32)-1;
 #define getprop(d, p) getprop_t(d, p, )
 EmotePlayer::~EmotePlayer()
 {
+    ReleaseDrawTargets();
+}
+void EmotePlayer::ReleaseDrawTargets()
+{
     // 渲染目标由 core/render 的 2D 渲染器统一管理
     krkrsdl3::iTVPRenderBackend* renderer = (_target || _maskTarget)
         ? krkrsdl3::TVPGetRenderBackend() : nullptr;
@@ -1008,15 +1291,19 @@ EmotePlayer::~EmotePlayer()
     {
         if (_target)
         {
-            renderer->DestroyTarget(_target);
+            DestroyRenderTargetSafe(renderer, _target, _targetWidth, _targetHeight);
             _target = nullptr;
         }
         if (_maskTarget)
         {
-            renderer->DestroyTarget(_maskTarget);
+            DestroyRenderTargetSafe(renderer, _maskTarget, _targetWidth, _targetHeight);
             _maskTarget = nullptr;
         }
     }
+    _target = nullptr;
+    _maskTarget = nullptr;
+    _targetWidth = 0;
+    _targetHeight = 0;
 }
 int32_t EmotePlayer::get_loopTime()
 {
@@ -1304,6 +1591,11 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
     EmoteProfTimer profTimer(krkrsdl2_prof_emote_draw);
     (void)profTimer;
     krkrsdl2_prof_emote_draw_call(); // KRKR-ns: draw call rate
+    // KRKR-ns (2026-11-04): a stopped player still paints its last resolved
+    // frame -- stop() only freezes progress, exactly like progress() above
+    // returning early.  Skipping the draw made titles whose background is an
+    // E-mote motion (Cafe Stella's yuzulogo/title_bg) go black after the game
+    // called stop(), so only skip while the engine has nothing to show.
     auto* self = ncbInstanceAdaptor<SeparateLayerAdaptor>::GetNativeInstance(objthis);
     tTJSNI_BaseLayer* ths = NULL;
     D3DAdaptor* d3dAdaptor = NULL;
@@ -1382,22 +1674,35 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
             renderer->ClearTarget(isSelfClear);
         }
         // 使用emoteengine::draw进行绘制(使用progress阶段缓存的独立ref树)
-        emtEngine.draw(renderer, target, _limitArea, maskTarget);
-        if (!withD3DAdaptor)
+        try
         {
-            // 回读 CPU 像素并交给图层（GL 后端经 glReadPixels，软渲染后端零拷贝）
-            tTVPRect dirtyRect;
-            if (CopyRenderTargetToLayer(renderer, target, ths, _width, _height,
-                                        &dirtyRect) &&
-                !dirtyRect.is_empty())
-                ths->Update(dirtyRect);
+            emtEngine.draw(renderer, target, _limitArea, maskTarget);
+            if (!withD3DAdaptor)
+            {
+                // 回读 CPU 像素并交给图层（GL 后端经 glReadPixels，软渲染后端零拷贝）
+                tTVPRect dirtyRect;
+                if (CopyRenderTargetToLayer(renderer, target, ths, _width, _height,
+                                            &dirtyRect) &&
+                    !dirtyRect.is_empty())
+                    ths->Update(dirtyRect);
+            }
+            else
+            {
+                // Drawing borrowed the window's SDL renderer.  Restore its target
+                // and viewport before returning to the normal Kirikiri compositor;
+                // captureCanvas starts its own short readback session later.
+                renderer->UnlockTarget(target);
+            }
         }
-        else
+        catch (const std::bad_alloc&)
         {
-            // Drawing borrowed the window's SDL renderer.  Restore its target
-            // and viewport before returning to the normal Kirikiri compositor;
-            // captureCanvas starts its own short readback session later.
-            renderer->UnlockTarget(target);
+            // KRKR-ns (2026-11-04): the engine's scratch/mask surfaces are also
+            // multi-megabyte.  A failed frame must not become a fatal script
+            // error: release what we can, ask for a compaction and drop the frame.
+            TVPConsoleLog("[emote] draw allocation failed; skipping this frame");
+            TVPDeliverCompactEvent(TVP_COMPACT_LEVEL_CRITICAL);
+            ReleaseDrawTargets();
+            return;
         }
     }
     else if (!loggedDrawMissingState)
@@ -1548,7 +1853,11 @@ void EmotePlayer::stop()
     _isStop = true;
     _playing = false;
     _allplaying = false;
-    TVPConsoleLog("EmotePlayer::stop TODO");
+    // A stopped player keeps drawing nothing until play() clears _isStop, so its
+    // two 11 MB targets can go back to the allocator now instead of being held
+    // for the whole scene.
+    ReleaseDrawTargets();
+    TVPConsoleLog("EmotePlayer::stop released draw targets");
 }
 void EmotePlayer::playTimeline(tTJSString name, tjs_int flags)
 {
@@ -1840,40 +2149,54 @@ void EmotePlayer::updateTransMat()
 }
 void EmotePlayer::ResetDrawArea(tjs_int width, tjs_int height)
 {
-    if (_width != width || _height != height)
+    if (_width == width && _height == height && _target != nullptr && _maskTarget != nullptr)
+        return;
+    // limit
+    _limitArea.originX = 0;
+    _limitArea.originY = 0;
+    _width = width;
+    _height = height;
+    _limitArea.width = width;
+    _limitArea.height = height;
+    if (emtEngine._mainfile != nullptr)
     {
-        // limit
-        _limitArea.originX = 0;
-        _limitArea.originY = 0;
-        _width = width;
-        _height = height;
-        _limitArea.width = width;
-        _limitArea.height = height;
-        if (emtEngine._mainfile != nullptr)
+        _limitArea.zMax = emtEngine.getZMax() * 2;
+    }
+    if (_limitArea.zMax < 30.0f)
+        _limitArea.zMax = 30.0f;
+    // transForm
+    updateTransMat();
+    // KRKR-ns (2026-11-04): only (re)allocate when the current targets cannot
+    // serve the new area.  Destroying and recreating two 11 MB surfaces on any
+    // size wobble was the main source of heap fragmentation.
+    if (_target != nullptr && _maskTarget != nullptr &&
+        _targetWidth >= width && _targetHeight >= height)
+        return;
+    // 渲染目标（主体 + 蒙版）由 core/render 的 2D 渲染器统一管理
+    krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
+    if (renderer)
+    {
+        ReleaseDrawTargets();
+        _target = CreateRenderTargetSafe(renderer, width, height);
+        _maskTarget = _target ? CreateRenderTargetSafe(renderer, width, height) : nullptr;
+        if (!_target || !_maskTarget)
         {
-            _limitArea.zMax = emtEngine.getZMax() * 2;
-        }
-        if (_limitArea.zMax < 30.0f)
-            _limitArea.zMax = 30.0f;
-        // transForm
-        updateTransMat();
-        // 渲染目标（主体 + 蒙版）由 core/render 的 2D 渲染器统一管理
-        krkrsdl3::iTVPRenderBackend* renderer = krkrsdl3::TVPGetRenderBackend();
-        if (renderer)
-        {
-            if (_target)
-            {
-                renderer->DestroyTarget(_target);
-                _target = nullptr;
-            }
+            // Allocation failed even after a compaction: drop what we got and
+            // let draw() skip this frame rather than ending the session.
             if (_maskTarget)
             {
-                renderer->DestroyTarget(_maskTarget);
+                DestroyRenderTargetSafe(renderer, _maskTarget, width, height);
                 _maskTarget = nullptr;
             }
-            _target = renderer->CreateTarget(_width, _height);
-            _maskTarget = renderer->CreateTarget(_width, _height);
+            if (_target)
+            {
+                DestroyRenderTargetSafe(renderer, _target, width, height);
+                _target = nullptr;
+            }
+            return;
         }
+        _targetWidth = width;
+        _targetHeight = height;
     }
 }
 

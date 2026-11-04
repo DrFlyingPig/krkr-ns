@@ -10,6 +10,9 @@ void krkrsdl2_restore_reference_memory_settings() noexcept;
 void krkrsdl2_apply_reference_split_settings(bool software);
 void krkrsdl2_restore_reference_split_settings() noexcept;
 bool krkrsdl2_force_software_composition() noexcept;
+// KRKR-ns hybrid mode: software composition stays in charge of the final frame,
+// but the E-mote raster may use the GPU (see emote-gl.txt / renderer-gl.txt).
+bool krkrsdl2_emote_gpu_allowed() noexcept;
 unsigned krkrsdl2_resource_policy_frame_rate() noexcept;
 void krkrsdl2_resource_policy_begin_session() noexcept;
 void krkrsdl2_resource_policy_end_session() noexcept;
@@ -18,6 +21,7 @@ void krkrsdl2_resource_policy_release_gpu() noexcept;
 #else
 inline void krkrsdl2_resource_policy_select_renderer(const char*) noexcept {}
 inline bool krkrsdl2_force_software_composition() noexcept { return false; }
+inline bool krkrsdl2_emote_gpu_allowed() noexcept { return false; }
 inline unsigned krkrsdl2_resource_policy_frame_rate() noexcept { return 60; }
 inline void krkrsdl2_resource_policy_begin_session() noexcept {}
 inline void krkrsdl2_resource_policy_end_session() noexcept {}

@@ -56,6 +56,7 @@
 // KRKR-ns patch: declared in SDLApplication.cpp
 extern void switch_game_mount();
 #include "KrkrNSResourcePolicy.h"
+#include "TickCount.h"
 #endif
 #include "EventIntf.h"
 #include "StorageIntf.h"
@@ -866,6 +867,22 @@ void tTVPApplication::Run() {
 		{
 			lastMemoryLog = now;
 			TVPLogBitmapMemorySnapshot();
+		}
+	}
+	{
+		// KRKR-ns: the engine clock freezes across a suspension (see the clamp in
+		// TickCount.cpp), so a resumed session must show this line and no timer
+		// backlog.  Without the clamp the whole gap is delivered as elapsed time
+		// on the first frame after waking, which fast-forwards animations and
+		// every pending wait at once.
+		static tjs_uint64 lastClampSkip = 0;
+		const tjs_uint64 clampSkip = TVPGetTickClampSkippedMs();
+		if (clampSkip != lastClampSkip)
+		{
+			KRKRNS_LOG("[clock] swallowed %.1fms of suspension gap (total %.1fms)",
+				static_cast<double>(clampSkip - lastClampSkip),
+				static_cast<double>(clampSkip));
+			lastClampSkip = clampSkip;
 		}
 	}
 	// A quit request from inside a game is not a process exit: tear the game

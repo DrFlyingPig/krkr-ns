@@ -45,7 +45,7 @@ The built-in light-themed library supports controller and touch input. Each game
 >
 > **Display names:** add `gameAliases["Game01"] = "中文显示名称";` to `sdmc:/switch/KRKR-ns/Names.tjs` to change a library label without changing the directory name.
 
-Renderer settings use Kirikiroid2 XML: values in the game's `Kirikiroid2Preference.xml` take priority over `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`. The defaults are `renderer=software` and `fps_limit=60`. Selecting `opengl` enables the GPU composition paths currently supported, with CPU handling for other drawing operations. Example: `<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`.
+Renderer settings use Kirikiroid2 XML: values in the game's `Kirikiroid2Preference.xml` take priority over `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`. The defaults are `renderer=software` and `fps_limit=60`. Rendering defaults to a **hybrid mode**: frame composition stays on the CPU, while only the E-mote rasterization uses the GPU (the largest win in character scenes, dialogue keeps the CPU compositor, and GPU composition can no longer drop layers). An explicit `renderer=software` or `sdmc:/switch/KRKR-ns/renderer-cpu.txt` returns to a pure CPU path; `renderer-gl.txt` enables full GPU composition with per-draw CPU fallback for unsupported operations. Example: `<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`.
 
 Diagnostic logs are stored in `sdmc:/switch/KRKR-ns/log/`, with the three most recent logs kept automatically.
 

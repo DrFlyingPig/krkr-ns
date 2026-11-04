@@ -211,11 +211,27 @@ struct EmoteGLRenderBackend::Impl
      * own window).  Everything here is bound to the old window's GL context,
      * which is already invalid, so drop it WITHOUT issuing GL calls; the next
      * begin() recreates context/program against the new window. */
+    /* The game session ended while its SDL window is still alive: this is the
+     * last safe moment to destroy the private GL context.  SDL keeps a
+     * destroyed window referenced until the contexts created for it are gone,
+     * and the next session's window creation then blocks (device/emulator hang
+     * right after the plugin caches are dropped at engine restart). */
+    void releaseContextForSessionEnd()
+    {
+        KRKRNS_LOG("[emote] GL backend releasing context for session end");
+        if (context)
+        {
+            const int result = SDL_GL_MakeCurrent(window, nullptr);
+            (void)result;
+            SDL_GL_DeleteContext(context);
+            context = nullptr;
+        }
+        resetForNewWindow();
+    }
     void resetForNewWindow()
     {
         KRKRNS_LOG("[emote] GL backend reset for a new SDL window");
-        program = 0; vbo = 0; ibo = 0;
-        images.clear();
+        program = 0; vbo = 0; ibo = 0;        images.clear();
         target = nullptr; mask = nullptr;
         window = nullptr; context = nullptr;
         resourcePolicy.Release();
@@ -1168,6 +1184,14 @@ void EmoteGLRenderBackend::ResetForEngineRestart()
     // current window.  resetForNewWindow() issues no GL calls, which matters
     // because the old context is already gone here.
     impl->resetForNewWindow();
+}
+void EmoteGLRenderBackend::ReleaseContextForSessionEnd() noexcept
+{
+    // Runs while the game window still exists, which is the only moment the
+    // private context can be destroyed safely: SDL keeps a destroyed window
+    // referenced until every GL context created for it is gone, and the next
+    // session then blocks while creating its own window.
+    impl->releaseContextForSessionEnd();
 }
 bool EmoteGLRenderBackend::IsAvailable()
 {

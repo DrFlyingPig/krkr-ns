@@ -45,7 +45,7 @@ KRKR-ns 是面向 Nintendo Switch 的吉里吉里（KiriKiri / KRKR）视觉小�
 >
 > **显示名称**：可在 `sdmc:/switch/KRKR-ns/Names.tjs` 中设置 `gameAliases["Game01"] = "中文显示名称";`，只改变游戏库中的名称。
 
-渲染配置沿用 Kirikiroid2 的 XML：优先读取游戏目录的 `Kirikiroid2Preference.xml`，未设置的项再读取 `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`。`renderer` 默认 `software`，`fps_limit` 默认 `60`；选择 `opengl` 时启用当前支持的 GPU 合成，未支持的绘制仍由 CPU 处理。配置示例：`<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`。
+渲染配置沿用 Kirikiroid2 的 XML：优先读取游戏目录的 `Kirikiroid2Preference.xml`，未设置的项再读取 `sdmc:/switch/kirikiroid2/.preference/GlobalPreference.xml`。`renderer` 默认 `software`，`fps_limit` 默认 `60`。默认渲染为**混合模式**：帧合成走 CPU，仅 E-mote 立绘改用 GPU 光栅（立绘场景收益最大，对话保持 CPU 合成，也不会有 GPU 合成丢图层的问题）；显式写 `renderer=software` 或放 `sdmc:/switch/KRKR-ns/renderer-cpu.txt` 可退回纯 CPU，放 `renderer-gl.txt` 则启用完整 GPU 合成（未支持的绘制仍回退 CPU）。配置示例：`<Preference><Item key="renderer" value="software"/><Item key="fps_limit" value="60"/></Preference>`。
 
 > 诊断日志保存在 `sdmc:/switch/KRKR-ns/log/`，自动保留最近 3 份。
 >

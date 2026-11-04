@@ -15,12 +15,25 @@ namespace krkrsdl3
 namespace
 {
 iTVPRenderBackend* selectedBackend = nullptr;
+bool gpuBackendLive = false;
+
+EmoteGLRenderBackend& GpuBackend()
+{
+    static EmoteGLRenderBackend gpu;
+    return gpu;
+}
+
+EmoteSWRenderBackend& CpuBackend()
+{
+    static EmoteSWRenderBackend cpu;
+    return cpu;
+}
 }
 
 iTVPRenderBackend* TVPGetRenderBackend()
 {
-    static EmoteGLRenderBackend gpu;
-    static EmoteSWRenderBackend cpu;
+    static EmoteGLRenderBackend& gpu = GpuBackend();
+    static EmoteSWRenderBackend& cpu = CpuBackend();
     iTVPRenderBackend*& selected = selectedBackend;
     static bool selectedForSoftware = true;
     if (!krkrsdl2_engine_teardown_active)
@@ -67,7 +80,10 @@ iTVPRenderBackend* TVPGetRenderBackend()
             fclose(f);
             wantGl = false;
         }
-        if (krkrsdl2_force_software_composition()) wantGl = false;
+        // The hybrid policy keeps the CPU compositor but allows the GPU to own
+        // the E-mote raster, so only an explicit software-only policy disables
+        // the isolated GL backend here.
+        if (krkrsdl2_force_software_composition() && !krkrsdl2_emote_gpu_allowed()) wantGl = false;
 #else
         wantGl = false; // other platforms keep the old opt-in behavior
 #endif
@@ -93,6 +109,7 @@ iTVPRenderBackend* TVPGetRenderBackend()
             if (gpu.IsAvailable())
             {
                 selected = &gpu;
+                gpuBackendLive = true;
             }
             else
             {
@@ -125,6 +142,17 @@ void TVPResetRenderBackendForEngineRestart()
     // Resetting an unused subsystem must not perform its first GL selection.
     if (selectedBackend)
         selectedBackend->ResetForEngineRestart();
+}
+
+// KRKR-ns: the game session ended but its SDL window is still alive.  Destroy
+// the backend's private GL context NOW: SDL keeps a destroyed window referenced
+// until the contexts built for it are gone, so leaving it alive made the next
+// session block while creating its window (observed as a hang right after the
+// plugin caches were dropped on engine restart).
+void TVPReleaseRenderBackendForSessionEnd()
+{
+    if (gpuBackendLive && selectedBackend == &GpuBackend())
+        GpuBackend().ReleaseContextForSessionEnd();
 }
 } // namespace krkrsdl3
 

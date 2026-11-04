@@ -80,6 +80,7 @@ public:
     std::map<ttstr, emotefile*> cacheData;
 
 private:
+    void unloadAllInternal(bool park);
     tjs_int RefCount = 1;
     inline static tjs_int _decryptkey = 0;
     inline static tTJSVariantClosure _decryptClo = NULL;
@@ -117,6 +118,8 @@ public:
     void* target = nullptr;
     void* maskTarget = nullptr;
     tjs_int _width = 0, _height = 0;
+    // Size `target` was allocated with; reused while the requested area fits.
+    tjs_int _targetWidth = 0, _targetHeight = 0;
 
 private:
     tTJSNI_Layer* _this = nullptr;
@@ -272,6 +275,9 @@ private:
     // canvas（渲染目标句柄，由 core/render 的 2D 渲染器管理）
     void* _target = nullptr;
     void* _maskTarget = nullptr;
+    // Size the targets above were actually allocated with; _width/_height stay
+    // the current logical stage size (KRKR-ns target reuse).
+    tjs_int _targetWidth = 0, _targetHeight = 0;
     bool withD3DAdaptor = false;
     bool withoutAdaptor = false;
     bool loggedDrawReady = false;
@@ -280,6 +286,9 @@ private:
     // transform
     void updateTransMat();
     void ResetDrawArea(tjs_int width, tjs_int height);
+    // Drops the owner-allocated render targets (stop / destructor): a stopped
+    // player must not keep two 11 MB surfaces alive.
+    void ReleaseDrawTargets();
     tjs_int _width = 0, _height = 0;
     float currCoordx = 0, currCoordy = 0, currCoordz = 0; // 坐标
     float currCamX = 0, currCamY = 0;

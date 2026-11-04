@@ -27,6 +27,11 @@ namespace krkrsdl3
 // destroyed with the old engine, and the allocator often reuses the same
 // address, so the backend's own "renderer changed" check cannot see it.
 void TVPResetRenderBackendForEngineRestart();
+// Destroys the E-mote private GL context while the game window still exists.
+// Call from the session-end path, before the window is destroyed: SDL keeps a
+// destroyed window referenced until its GL contexts are deleted, and the next
+// session's window creation blocks otherwise.
+void TVPReleaseRenderBackendForSessionEnd();
 }
 
 #endif // KRKRNS_EMOTEPLAYER_RESET_H

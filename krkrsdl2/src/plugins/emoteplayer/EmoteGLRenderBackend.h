@@ -58,6 +58,11 @@ public:
     // art rendered into the left quarter of the screen).  Drop the cached
     // context unconditionally, exactly like the pointer-change path does.
     void ResetForEngineRestart() override;
+    // The game session ended but its SDL window is still alive: destroy the
+    // private GL context now.  Leaving it alive past the window keeps the
+    // retired window referenced, and the next session's window creation then
+    // blocks (observed as a hang right after "drop plugin-side session caches").
+    void ReleaseContextForSessionEnd() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
