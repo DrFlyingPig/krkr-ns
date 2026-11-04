@@ -184,6 +184,15 @@ function childLayer(x, y, width, height) {
     layer.visible = false;
     return layer;
 }
+function childOf(parent, x, y, width, height) {
+    var layer = new Layer(launcherWindow, parent);
+    layer.setSize(width, height);
+    layer.setPos(x, y);
+    layer.type = ltAlpha;
+    layer.font.face = launcherFontFaces[0];
+    layer.visible = false;
+    return layer;
+}
 
 // Bundled logo and artwork are loaded once, without probing game folders.
 // Wrapped in a function: the surfaces are released right before a game starts
@@ -252,6 +261,11 @@ function releaseLauncherArt() {
         }
     }
 }
+// Plain list rows live in their own container below the selection layer, so a
+// page change only repaints the rows that changed instead of re-rasterizing
+// every title on the page.
+var listLayer = childOf(launcherLayer, 32, 130, 340, 500);
+listLayer.visible = true;
 var selectionLayer = childLayer(32, 144, 320, 66);
 var letterLayer = childLayer(784, 231, 190, 164);
 var detailLayer = childLayer(388, 510, 860, 144);
@@ -419,7 +433,7 @@ function loadUIThumbnail(layer, path, width, height, radius) {
         return false;
     }
 }
-function prepareCachedArtwork(entry, game) {
+function prepareCachedArtwork(entry, game, withPreview) {
     if (entry.avatarStamp != game.avatarPath) {
         entry.avatarLoaded = false;
         if (game.avatarPath != "") {
@@ -428,7 +442,9 @@ function prepareCachedArtwork(entry, game) {
         } else if (entry.avatarLayer != null) { invalidate entry.avatarLayer; entry.avatarLayer = null; }
         entry.avatarStamp = game.avatarPath;
     }
-    if (entry.previewStamp != game.previewPath) {
+    // Only the selected game shows its large preview, so decoding it for every
+    // visible row would stall a page change for art nobody sees yet.
+    if (withPreview && entry.previewStamp != game.previewPath) {
         entry.previewLoaded = false;
         if (game.previewPath != "") {
             if (entry.previewLayer == null) { entry.previewLayer = childLayer(388, 132, 860, 358); overlayLayer.bringToFront(); }
@@ -465,14 +481,6 @@ function drawBase() {
     text(1162, 52, memoryOk ? "准备就绪" : "内存受限", 12, C_MUTED, false);
     text(41, 118, "你的游戏", 14, C_FG, true);
     text(281, 116, "" + games.count + " 部作品", 11, C_MUTED, false);
-    for (var i = 0; i < VISIBLE_ROWS && listTop + i < games.count; i++) {
-        var game = games[listTop + i];
-        var y = 144 + i * 78;
-        var tone = TONES[game.seed % TONES.count];
-        drawGameAvatar(launcherLayer, game, 46, y + 11, false);
-        text(104, y + 32, fitText(game.name, 18, false, 222), 18, C_FG, false);
-        text(104, y + 52, "本地游戏", 12, C_MUTED, false);
-    }
     text(46, 635, listTop > 0 ? "‹ 上一页" : "", 12, C_MUTED, false);
     text(260, 635, listTop + VISIBLE_ROWS < games.count ? "下一页 ›" : "", 12, C_MUTED, false);
     text(41, 698, "✚", 20, C_MUTED, false);
@@ -519,6 +527,8 @@ function hideUICacheEntry(entry) {
     entry.row.visible = false;
     entry.letter.visible = false;
     entry.detail.visible = false;
+    // The plain list row belongs to the list, not to the selection highlight:
+    // warmVisibleUICache owns its visibility.
     if (entry.previewLayer != null) entry.previewLayer.visible = false;
     if (!isVoid(entry.rowY)) entry.row.top = entry.rowY;
     entry.letter.setPos(entry.letterX, entry.letterY);
@@ -536,12 +546,15 @@ function resetUICache() {
             invalidate entry.row;
             invalidate entry.letter;
             invalidate entry.detail;
+            if (entry.plain != null) invalidate entry.plain;
             if (entry.avatarLayer != null) invalidate entry.avatarLayer;
             if (entry.previewLayer != null) invalidate entry.previewLayer;
         }
         selectionLayer = childLayer(32, 144, 320, 66);
         letterLayer = childLayer(784, 231, 190, 164);
         detailLayer = childLayer(388, 510, 860, 144);
+        listLayer = childOf(launcherLayer, 32, 130, 340, 500);
+        listLayer.visible = true;
         overlayLayer.bringToFront();
     }
     uiLayerCache = new Array();
@@ -549,7 +562,7 @@ function resetUICache() {
     uiCacheGeneration++;
     drawnTop = -1; drawnCount = -1;
 }
-function cachedUIFor(game, index, status) {
+function cachedUIFor(game, index, status, active) {
     var entry = null;
     for (var i = 0; i < uiLayerCache.count; i++) {
         if (uiLayerCache[i].folder == game.folder) { entry = uiLayerCache[i]; break; }
@@ -557,9 +570,9 @@ function cachedUIFor(game, index, status) {
     if (entry == null) {
         if (uiLayerCache.count < UI_CACHE_LIMIT) {
             if (uiLayerCache.count == 0) {
-                entry = %[row:selectionLayer, letter:letterLayer, detail:detailLayer];
+                entry = %[row:selectionLayer, letter:letterLayer, detail:detailLayer, plain:childOf(listLayer, 0, 14, 320, 66)];
             } else {
-                entry = %[row:childLayer(32,144,320,66), letter:childLayer(784,231,190,164), detail:childLayer(388,510,860,144)];
+                entry = %[row:childLayer(32,144,320,66), letter:childLayer(784,231,190,164), detail:childLayer(388,510,860,144), plain:childOf(listLayer, 0, 14, 320, 66)];
                 overlayLayer.bringToFront();
             }
             entry.avatarLayer = null; entry.previewLayer = null;
@@ -578,34 +591,65 @@ function cachedUIFor(game, index, status) {
             uiCacheEvictions++;
         }
         entry.folder = game.folder;
-        entry.rowStamp = ""; entry.letterStamp = ""; entry.detailStamp = "";
+        entry.rowStamp = ""; entry.letterStamp = ""; entry.detailStamp = ""; entry.plainStamp = "";
         entry.rowY = void;
     }
     entry.used = ++uiCacheClock;
-    prepareCachedArtwork(entry, game);
+    var tEntry = nowMs();
+    prepareCachedArtwork(entry, game, active);
+    var tArt = nowMs();
     var commonStamp = game.folder + "|" + game.name + "|" + game.initial + "|" + game.seed;
     var rowStamp = commonStamp + "|" + game.avatarPath;
-    if (entry.rowStamp != rowStamp) {
+    // The highlighted row, the big initial and the detail card are only ever
+    // displayed for the selected game. Painting them for every visible row made
+    // a page change pay for six cards while showing one.
+    if (active && entry.rowStamp != rowStamp) {
         drawRow(entry.row, game, true);
         uiCachePaints++;
         entry.rowStamp = rowStamp;
     }
-    if (entry.letterStamp != commonStamp) { paintCachedLetter(entry, game); entry.letterStamp = commonStamp; }
+    var tRow = nowMs();
+    if (active && entry.letterStamp != commonStamp) { paintCachedLetter(entry, game); entry.letterStamp = commonStamp; }
+    var tLetter = nowMs();
     var detailStamp = commonStamp + "|" + index + "|" + games.count + "|" + memoryOk + "|" + status;
-    if (entry.detailStamp != detailStamp) {
+    if (active && entry.detailStamp != detailStamp) {
         paintCachedDetail(entry, game, index, status);
         entry.detailStamp = detailStamp;
+    }
+    if (launcherTiming) {
+        Debug.message("[launcher-entry] " + game.folder + " active=" + (active ? 1 : 0) +
+            " art=" + (tArt - tEntry) + " row=" + (tRow - tArt) + " letter=" + (tLetter - tRow) +
+            " detail=" + (nowMs() - tLetter));
     }
     return entry;
 }
 function warmVisibleUICache() {
+    for (var k = 0; k < uiLayerCache.count; k++) uiLayerCache[k].plainShown = false;
     for (var i = 0; i < VISIBLE_ROWS && listTop + i < games.count; i++) {
         var index = listTop + i;
-        cachedUIFor(games[index], index, index == selectedFolder ? statusText : "");
+        var game = games[index];
+        var entry = cachedUIFor(game, index, index == selectedFolder ? statusText : "", index == selectedFolder);
+        if (entry == null || entry.plain == null) continue;
+        // The plain row is painted once per game and then reused by every page
+        // that shows it; only its position changes on a page change.
+        var plainStamp = game.folder + "|" + game.name + "|" + game.initial + "|" + game.seed + "|" + game.avatarPath;
+        if (entry.plainStamp != plainStamp) {
+            clearLayer(entry.plain);
+            drawRow(entry.plain, game, false);
+            entry.plainStamp = plainStamp;
+            uiCachePaints++;
+        }
+        entry.plain.top = 14 + i * 78;
+        entry.plain.visible = true;
+        entry.plainShown = true;
+    }
+    for (var k = 0; k < uiLayerCache.count; k++) {
+        var hidden = uiLayerCache[k];
+        if (!hidden.plainShown && hidden.plain != null) hidden.plain.visible = false;
     }
 }
 function drawDetail(game) {
-    var entry = cachedUIFor(game, selectedFolder, statusText);
+    var entry = cachedUIFor(game, selectedFolder, statusText, true);
     if (uiActiveEntry != entry) {
         if (uiActiveEntry != null) hideUICacheEntry(uiActiveEntry);
         uiActiveEntry = entry;
@@ -680,13 +724,31 @@ function startMotion(oldY) {
     if (uiHandler == null) { uiHandler = function(tick) { motionTick(tick); }; System.addContinuousHandler(uiHandler); }
 }
 var drawnTop = -1, drawnCount = -1, drawnMemory = memoryOk;
+// Paging cost attribution: a marker file keeps the shipped launcher quiet.
+var launcherTiming = false;
+try { launcherTiming = Storages.isExistentStorage("sdmc:/switch/KRKR-ns/launcher-timing.txt"); } catch (e) { launcherTiming = false; }
+function pageMark(label, start, extra) {
+    if (launcherTiming) Debug.message("[launcher-page] " + label + "=" + (nowMs() - start) + "ms" + extra);
+}
 function redraw() {
     if (games.count == 0) drawEmpty();
     else {
         var pageChanged = drawnTop != listTop || drawnCount != games.count || drawnMemory != memoryOk;
-        if (pageChanged) { warmVisibleUICache(); drawBase(); drawnTop = listTop; drawnCount = games.count; drawnMemory = memoryOk; }
+        if (pageChanged) {
+            var tPage = nowMs();
+            warmVisibleUICache();
+            var tWarm = nowMs();
+            drawBase();
+            var tBase = nowMs();
+            pageMark("warm", tPage, " entries=" + uiLayerCache.count);
+            pageMark("base", tWarm, " paints=" + uiCachePaints + " evictions=" + uiCacheEvictions);
+            pageMark("page", tPage, " top=" + listTop + " total=" + (tBase - tPage));
+            drawnTop = listTop; drawnCount = games.count; drawnMemory = memoryOk;
+        }
         var game = currentGame();
+        var tDetail = nowMs();
         drawDetail(game);
+        if (pageChanged) pageMark("detail", tDetail, "");
         selectionLayer.visible = true;
         uiToY = 144 + (selectedFolder - listTop) * 78;
         uiActiveEntry.rowY = uiToY;
