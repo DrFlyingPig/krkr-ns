@@ -14,11 +14,13 @@
 #include <new>
 #ifdef __SWITCH__
 #include <malloc.h>
-#include "BitmapBufferPool.h"
-static KrkrBitmapBufferPool TVPBitmapPool;
+// Implemented in core/sdl2/SwitchHeap.cpp: reports how much memory the
+// size-classed pool currently holds, so hardware logs can attribute usage.
+extern "C" void KrkrNSSwitchHeapStats(size_t *, size_t *, int *);
 #endif
 
 static std::atomic<size_t> TVPBitmapLiveBytes{0};
+
 static std::atomic<size_t> TVPBitmapPeakBytes{0};
 static std::atomic<size_t> TVPBitmapLiveCount{0};
 
@@ -27,18 +29,35 @@ void TVPLogBitmapMemorySnapshot()
 	tTVPBitmapBitsAlloc::LogMemory("periodic");
 }
 
+// Helper used by the PSB reader for its MDF decompression scratch.  It stays a
+// single code path on every platform and now just forwards to the system
+// allocator, so the scratch follows the same lifetime rules as the bitmap it
+// produces instead of keeping a private arena alive.
+extern "C" void *KrkrNSAllocateArenaBuffer(size_t &size)
+{
+	void *result = malloc(size);
+	if (result) size = size; // malloc keeps the requested size
+	return result;
+}
+
+extern "C" void KrkrNSFreeArenaBuffer(void *data, size_t)
+{
+	free(data);
+}
+
 void tTVPBitmapBitsAlloc::LogMemory(const char *reason, size_t requested)
 {
 #ifdef __SWITCH__
 	const auto heap = mallinfo();
-	const auto pool = TVPBitmapPool.GetStats();
-	KRKRNS_LOG("[memory] %s request=%zu bitmap_live=%zu bitmap_peak=%zu bitmaps=%zu heap_used=%zu heap_free=%zu heap_arena=%zu heap_top=%zu pool_idle=%zu pool_blocks=%zu pool_hits=%llu pool_misses=%llu pool_reserved=%zu pool_unused=%zu",
+	size_t tlsfReserved = 0, tlsfChunks = 0;
+	int tlsfActive = 0;
+	KrkrNSSwitchHeapStats(&tlsfReserved, &tlsfChunks, &tlsfActive);
+	KRKRNS_LOG("[memory] %s request=%zu bitmap_live=%zu bitmap_peak=%zu bitmaps=%zu heap_used=%zu heap_free=%zu heap_arena=%zu heap_top=%zu tlsf_active=%d tlsf_reserved=%zu tlsf_chunks=%zu",
 		reason, requested, TVPBitmapLiveBytes.load(std::memory_order_relaxed),
 		TVPBitmapPeakBytes.load(std::memory_order_relaxed),
 		TVPBitmapLiveCount.load(std::memory_order_relaxed),
 		heap.uordblks, heap.fordblks, heap.arena, heap.keepcost,
-		pool.bytes, pool.count, (unsigned long long)pool.hits, (unsigned long long)pool.misses,
-		pool.reserved, pool.unused);
+		tlsfActive, tlsfReserved, tlsfChunks);
 #endif
 }
 
@@ -64,22 +83,25 @@ public:
 	~BasicAllocator() {
 #ifdef __SWITCH__
 		TVPRemoveCompactEventHook(this);
-		TVPBitmapPool.Clear();
 #endif
 	}
 #ifdef __SWITCH__
 	void TJS_INTF_METHOD OnCompact(tjs_int level) override
 	{
-		if (level >= TVP_COMPACT_LEVEL_MINIMIZE) TVPBitmapPool.Clear();
+		// The reference compacts the CRT heap when a maximal compaction runs
+		// (TVPEnableGlobalHeapCompaction). newlib's equivalent is malloc_trim,
+		// which hands the releasable top of the heap back to the system.
+		if (level >= TVP_COMPACT_LEVEL_MAX) ::malloc_trim(0);
 	}
 #endif
 	void* allocate(size_t &size)
 	{
 #ifdef USE_MMAP_FOR_ALLOCATION
 		return mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-#elif defined(__SWITCH__)
-		return TVPBitmapPool.Allocate(size);
 #else
+		// Switch takes this branch: libnx has no mmap, so the mmap strategy the
+		// upstream SDL2 port uses on Apple/Linux/Android is not available here.
+		(void)size;
 		return malloc(size);
 #endif
 	}
@@ -87,9 +109,8 @@ public:
 	{
 #ifdef USE_MMAP_FOR_ALLOCATION
 		munmap(mem, size);
-#elif defined(__SWITCH__)
-		TVPBitmapPool.Free(mem, size);
 #else
+		(void)size;
 		::free( mem );
 #endif
 	}

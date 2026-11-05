@@ -5870,6 +5870,38 @@ bool krkrsdl2_engine_reinit_wanted = false;
 // backend: E-mote destructors call it during script-engine shutdown, and
 // creating a GL context there crashed the real device on exit.
 volatile bool krkrsdl2_engine_teardown_active = false;
+
+// KRKR-ns: record which signal killed the process.
+//
+// Sessions were dying during asset loads with no script exception, no
+// std::bad_alloc and no message box, which leaves nothing in the log.  The
+// handler appends one line to sdmc:/switch/KRKR-ns/log/last-crash.txt; the last
+// log lines plus this marker identify the failing phase.  (This newlib exposes
+// neither sigaction nor ucontext, so no fault address is available here.)
+extern "C" void krkrsdl2_install_crash_handler()
+{
+#if defined(__SWITCH__)
+	static bool installed = false;
+	if (installed) return;
+	installed = true;
+	static const int signals[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+	for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); ++i)
+	{
+		signal(signals[i], [](int sig) {
+			FILE *file = fopen(KRKRNS_BASE_A "/log/last-crash.txt", "a");
+			if (file)
+			{
+				fprintf(file, "signal=%d\n", sig);
+				fflush(file);
+				fclose(file);
+			}
+			signal(sig, SIG_DFL);
+			raise(sig);
+		});
+	}
+	KRKRNS_LOG("[crash] fault handler installed");
+#endif
+}
 bool krkrsdl2_take_return_to_launcher()
 {
 	return krkrsdl2_return_to_launcher_flag.exchange(false);
@@ -6883,6 +6915,9 @@ static void krkrsdl2_init_platform_once()
 static bool krkrsdl2_create_engine()
 {
 	KRKRNS_LOG("[ns] before new tTVPApplication()");
+	// Reserve heap headroom before the first engine allocation so the block is
+	// contiguous: released back to the allocator the first time a session runs
+	krkrsdl2_install_crash_handler();
 	::Application = new tTVPApplication();
 	KRKRNS_LOG("[ns] tTVPApplication created");
 	bool ret;

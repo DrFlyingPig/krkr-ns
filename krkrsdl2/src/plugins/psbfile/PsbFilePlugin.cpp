@@ -29,6 +29,11 @@
 
 #include <zlib.h>
 
+// KRKR-ns: large decode scratch comes from the bitmap arena, not the general heap
+// (defined in core/visual/sdl2/BitmapBitsAlloc.cpp).
+extern "C" void *KrkrNSAllocateArenaBuffer(size_t &size);
+extern "C" void KrkrNSFreeArenaBuffer(void *data, size_t size);
+
 namespace
 {
 using ByteVector = std::vector<tjs_uint8>;
@@ -949,15 +954,26 @@ static ByteVector ExpandMdf(ByteVector input)
 		(static_cast<tjs_uint32>(input[7]) << 24);
 	if (outputSize == 0 || outputSize > 512u * 1024u * 1024u)
 		throw std::runtime_error("Invalid MDF output size");
-	ByteVector output(outputSize);
-	uLongf actual = outputSize;
-	const int status = uncompress(output.data(), &actual, input.data() + 8,
+	// KRKR-ns: the declared size can be hundreds of megabytes and this runs for
+	// every PSB that the game loads, so the decompression scratch must not come
+	// from the general heap -- repeated 100 MB allocations there were what
+	// fragmented the arena in long sessions.  The arena reuses these pages, and
+	// the result is copied out at its exact size below.
+	size_t capacity = outputSize;
+	void *scratch = KrkrNSAllocateArenaBuffer(capacity);
+	if (scratch == nullptr)
+		throw std::bad_alloc();
+	uLongf actual = static_cast<uLongf>(capacity);
+	const int status = uncompress(static_cast<Bytef *>(scratch), &actual, input.data() + 8,
 		static_cast<uLong>(input.size() - 8));
-	if (status != Z_OK) throw std::runtime_error("Unable to decompress MDF-wrapped PSB");
-	output.resize(static_cast<size_t>(actual));
-	// A malformed but historically accepted MDF may declare far more output
-	// than it produces. Do not retain that excess capacity in shared resources.
-	if (actual < outputSize) return ByteVector(output.begin(), output.end());
+	if (status != Z_OK)
+	{
+		KrkrNSFreeArenaBuffer(scratch, capacity);
+		throw std::runtime_error("Unable to decompress MDF-wrapped PSB");
+	}
+	ByteVector output(static_cast<const uint8_t *>(scratch),
+		static_cast<const uint8_t *>(scratch) + actual);
+	KrkrNSFreeArenaBuffer(scratch, capacity);
 	return output;
 }
 } // namespace

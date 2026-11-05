@@ -178,6 +178,13 @@ list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSVMProf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSPerf.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSBitmapProbe.cpp)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/KrkrNSResourcePolicy.cpp)
+# TLSF keeps every allocation in a size-segregated free list. The reference port
+# gets that from the platform allocator (jemalloc/scudo on Android); Switch has no
+# equivalent, and newlib's single-arena dlmalloc fragmented until an 11 MB bitmap
+# could not be allocated with 2.6 GB reported free.
+list(APPEND KRKRSDL2COMMON_SRC external/tlsf/tlsf.c)
+list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/SwitchHeap.cpp)
+list(APPEND KRKRSDL2COMMON_INCLUDES external/tlsf)
 list(APPEND KRKRSDL2COMMON_SRC src/core/sdl2/SDLBitmapCompositor.cpp)
 # libdeflate supplies the one-shot zlib inflate used for XP3 index blocks and
 # segments; zlib stays linked as the fallback for streams it rejects. Only the
@@ -826,6 +833,12 @@ endif()
 target_include_directories(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2COMMON_INCLUDES})
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.13.0")
 target_link_options(${KRKRSDL2COMMON_NAME} PUBLIC ${KRKRSDL2_LDFLAGS})
+endif()
+# Route every malloc/free reference, including those inside static libraries, to
+# the TLSF wrapper; __wrap_* falls back to __real_* for foreign pointers.
+if(NINTENDO_SWITCH)
+  target_link_options(${KRKRSDL2COMMON_NAME} PUBLIC
+    -Wl,--wrap=malloc -Wl,--wrap=free -Wl,--wrap=calloc -Wl,--wrap=realloc)
 endif()
 target_link_libraries(${KRKRSDL2COMMON_NAME} ${KRKRSDL2_LIBS})
 if(${CMAKE_VERSION} VERSION_GREATER_EQUAL "3.16.0")

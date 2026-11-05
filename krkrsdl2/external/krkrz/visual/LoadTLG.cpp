@@ -360,6 +360,7 @@ void TVPLoadTLG6(void* formatdata, void *callbackdata,
 
 			tjs_int pixel_count = (ylim - y) * width;
 
+
 			// decode values
 			for(tjs_int c = 0; c < colors; c++)
 			{
@@ -523,17 +524,11 @@ static void TVPInternalLoadTLG(void* formatdata, void *callbackdata, tTVPGraphic
 	// check for TLG raw data
 	if(!memcmp("TLG5.0\x00raw\x1a\x00", mark, 11))
 	{
-#ifdef __SWITCH__
-		KRKRNS_LOG("[tlg-fmt] TLG5");
-#endif
 		TVPLoadTLG5(formatdata, callbackdata, sizecallback,
 			scanlinecallback, src, keyidx, mode);
 	}
 	else if(!memcmp("TLG6.0\x00raw\x1a\x00", mark, 11))
 	{
-#ifdef __SWITCH__
-		KRKRNS_LOG("[tlg-fmt] TLG6");
-#endif
 		TVPLoadTLG6(formatdata, callbackdata, sizecallback,
 			scanlinecallback, src, keyidx, mode);
 	}

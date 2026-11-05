@@ -305,6 +305,8 @@ private:
     bool _isStop = false;
     bool _playing = false;
     bool _allplaying = false;
+    // Set once a draw() call completed for the current motion: a stopped player
+    // may then keep its layer untouched instead of redrawing every frame.
     bool _finitePlaybackGraph = false;
     int _pipoVal = 0;
     tTJSVariant _tags;

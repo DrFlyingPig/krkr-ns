@@ -3,6 +3,9 @@
 #include "MsgIntf.h"
 #include "tjsDictionary.h"
 #ifdef __SWITCH__
+#include "KrkrNSLog.h"
+#endif
+#ifdef __SWITCH__
 #include "ThreadIntf.h"
 #endif
 
@@ -73,12 +76,14 @@ void TVPLoadWEBP(void *, void *callbackdata,
 	};
 	bool threaded = false;
 #ifdef __SWITCH__
-	// The Switch SDL port reports one CPU; the engine queries the process's
-	// actual usable cores. Small UI chips retain single-thread decoding so a
-	// worker launch cannot dominate their codec work. libwebp bounds its own
-	// decoder worker count; do not add another engine thread pool around it.
-	threaded = width >= 512 && decodedBytes >= 1024 * 1024 &&
-		TVPGetProcessorNum() > 1;
+	// KRKR-ns (2026-11-05): libwebp's decoder worker threads are disabled here.
+	// A deterministic crash in one Yuzusoft title loads a 1 MB WebP character
+	// sheet right after several TLG loads; the log reached the RIFF signature and
+	// then the process died with an invalid guest PC, which is the signature of a
+	// worker thread the engine cannot join safely.  Decoding stays correct and
+	// only a few milliseconds slower per large image.
+	threaded = false;
+	(void)TVPGetProcessorNum();
 #endif
 	VP8StatusCode status = decode(threaded);
 	// A worker cannot always be created under memory/thread pressure. Retain

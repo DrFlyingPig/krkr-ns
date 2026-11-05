@@ -1452,6 +1452,8 @@ void EmotePlayer::play(tTJSString name, int flag)
         isSelfClear = false;
     }
     _isStop = false;
+    // A new motion must reach the layer even if the previous one was stopped
+    // before it ever painted (title backgrounds start the player stopped).
     _finitePlaybackGraph = IsFinitePlaybackGraph(emtEngine._mainmotion,
         [](emotemotion* motion) {
             return IsFiniteMotion(motion);
@@ -1591,11 +1593,11 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
     EmoteProfTimer profTimer(krkrsdl2_prof_emote_draw);
     (void)profTimer;
     krkrsdl2_prof_emote_draw_call(); // KRKR-ns: draw call rate
-    // KRKR-ns (2026-11-04): a stopped player still paints its last resolved
-    // frame -- stop() only freezes progress, exactly like progress() above
-    // returning early.  Skipping the draw made titles whose background is an
-    // E-mote motion (Cafe Stella's yuzulogo/title_bg) go black after the game
-    // called stop(), so only skip while the engine has nothing to show.
+    // Upstream draws unconditionally; only progress() stops advancing when
+    // _isStop.  An earlier "skip drawing once stopped" guard here made a title
+    // whose background is an E-mote motion go black as soon as its render target
+    // was recreated (page switch or Clear), because the new target starts empty
+    // and nothing ever painted into it.
     auto* self = ncbInstanceAdaptor<SeparateLayerAdaptor>::GetNativeInstance(objthis);
     tTJSNI_BaseLayer* ths = NULL;
     D3DAdaptor* d3dAdaptor = NULL;
@@ -1704,6 +1706,8 @@ void EmotePlayer::draw(iTJSDispatch2* objthis)
             ReleaseDrawTargets();
             return;
         }
+        // The layer now holds this player's pixels, so a later stop() can leave it
+        // alone instead of redrawing the same frame every call.
     }
     else if (!loggedDrawMissingState)
     {
@@ -1834,15 +1838,37 @@ bool EmotePlayer::contains(tjs_real x, tjs_real y)
 }
 void EmotePlayer::skip()
 {
-    TVPConsoleLog("EmotePlayer::skip TODO");
+    // Reaching the last frame of the current motion is the same state as a
+    // natural completion: stop advancing and let scripts polling the playing
+    // flags proceed.  Leaving them set made a title that calls skip() wait for
+    // an animation that would never finish, so the screen froze.
+    if (emtEngine._mainmotion != nullptr)
+    {
+        tjs_real last = emtEngine._mainmotion->lastTime;
+        if (last > 0.0)
+        {
+            clockPassed = last;
+            TVPConsoleLog("EmotePlayer::skip frame=%.3f", (double)last);
+        }
+    }
+    _playing = false;
+    _allplaying = false;
+    _pipoVal ^= 1;
 }
 void EmotePlayer::skipToSync()
 {
     if (emtEngine._mainmotion != nullptr)
     {
-        clockPassed = emtEngine._mainfile->getSyncTime();
+        const tjs_real sync = emtEngine._mainfile->getSyncTime();
+        clockPassed = sync;
+        TVPConsoleLog("EmotePlayer::skipToSync frame=%.3f", (double)sync);
     }
-    TVPConsoleLog("EmotePlayer::skipToSync TODO");
+    // Same completion contract as skip(): the pose at the sync frame is final
+    // for this motion, so clear the playing flags.  This used to be a bare TODO
+    // that only moved the clock, which left the title script waiting forever.
+    _playing = false;
+    _allplaying = false;
+    _pipoVal ^= 1;
 }
 void EmotePlayer::pass()
 {
@@ -1853,11 +1879,12 @@ void EmotePlayer::stop()
     _isStop = true;
     _playing = false;
     _allplaying = false;
-    // A stopped player keeps drawing nothing until play() clears _isStop, so its
-    // two 11 MB targets can go back to the allocator now instead of being held
-    // for the whole scene.
-    ReleaseDrawTargets();
-    TVPConsoleLog("EmotePlayer::stop released draw targets");
+    // KRKR-ns (2026-11-05): keep the targets.  Releasing them here made the next
+    // draw() fetch a pooled target again while the title script still round-robins
+    // stop()/draw(), and that combination left the emulator main loop without
+    // updates (frozen picture, live heartbeats).  stop() is a state change, not a
+    // lifetime end: the pool already removes the allocation churn it was meant for.
+    TVPConsoleLog("EmotePlayer::stop");
 }
 void EmotePlayer::playTimeline(tTJSString name, tjs_int flags)
 {
