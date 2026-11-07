@@ -95,6 +95,7 @@ void tTVPThread::StartProc()
 #ifdef __SWITCH__
 	_this->NativeThreadHandle = threadGetCurHandle();
 #endif
+	KRKRNS_THREAD_NAME("tTVPThread");
 	_this->ThreadActive = true;
 	if (_this->PriorityConfigured && !_this->ApplyPriority(_this->_Priority))
 		_this->_Priority = SDL_THREAD_PRIORITY_NORMAL;

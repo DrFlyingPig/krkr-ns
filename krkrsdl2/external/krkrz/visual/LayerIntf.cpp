@@ -6932,6 +6932,7 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 				// safely return to the original CPU/cache completion.
 				try
 				{
+					KRKRNS_STAGE("layer-scene-build");
 					krkrns::SceneGroup root{};
 					root.width = Rect.get_width();
 					root.height = Rect.get_height();
@@ -6947,6 +6948,7 @@ void tTJSNI_BaseLayer::CompleteForWindow(tTVPDrawable *drawable)
 				}
 				if(direct)
 				{
+					KRKRNS_STAGE("layer-scene-render");
 					direct = RenderDirectGPUScene(drawable, scene, directReason);
 					if(!direct && !failedLayer) failedLayer = this;
 				}

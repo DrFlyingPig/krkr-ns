@@ -37,6 +37,7 @@ tTVPSoundDecodeThread::~tTVPSoundDecodeThread() {
 }
 //---------------------------------------------------------------------------
 void tTVPSoundDecodeThread::Execute(void) {
+	KRKRNS_THREAD_NAME("snd-decode");
 	SetPriority(TVPDecodeThreadHighPriority);
 	while( !GetTerminated() ) {
 		tjs_uint32 count = 0;
@@ -49,6 +50,7 @@ void tTVPSoundDecodeThread::Execute(void) {
 			// read here parks the main thread.  Time the cycle and prove
 			// liveness during a stall.
 			const tjs_uint32 krkrns_t0 = TVPGetRoughTickCount32();
+			KRKRNS_STAGE("snd-decode");
 			tTJSCriticalSectionHolder cs_holder(OneLoopCS);
 			// Completion callbacks only wake us. Recycle their buffers here,
 			// using the same decoder -> owner lock order as normal decoding.

@@ -2,6 +2,7 @@
  * 組み込み opus sound decocer
  */
 #include "tjsCommHead.h"
+#include "KrkrNSLog.h"
 #include "DebugIntf.h"
 #include "SysInitIntf.h"
 #include "StorageIntf.h"
@@ -117,6 +118,7 @@ public:
 		should not end until the returned value becomes false.
 	*/
 	bool Render(void *buf, tjs_uint bufsamplelen, tjs_uint& rendered)  override {
+		KRKRNS_STAGE("snd-opus-render");
 		// render output PCM
 		if(!InputFileInit) return false; // InputFile is yet not inited
 
@@ -125,11 +127,13 @@ public:
 		int pos = 0; // decoded PCM (in bytes)
 		const int ch = Format.Channels;
 		int remain = bufsamplelen * ch;
+		int retries = 0;
 		if( FloatExtraction ) {
 			while( remain ) {
 				do {
 					res = op_read_float( InputFile.get(), (float*)((char*)buf + pos), remain, &CurrentSection );
-				} while( res < 0 );
+				} while( res < 0 && ++retries < 1000 );
+				if( res < 0 ) { KRKRNS_LOG("[snd] opus float read failed retries=%d", retries); break; }
 				if( res == 0 ) break;
 				pos += res * ch * pcmsize;
 				remain -= res * ch;
@@ -138,7 +142,8 @@ public:
 			while( remain ) {
 				do {
 					res = op_read( InputFile.get(), (opus_int16*)((char*)buf + pos), remain, &CurrentSection );
-				} while( res < 0 ); // ov_read would return a negative number
+				} while( res < 0 && ++retries < 1000 );
+				if( res < 0 ) { KRKRNS_LOG("[snd] opus read failed retries=%d", retries); break; } // ov_read would return a negative number
 								// if the decoding is not ready
 				if( res == 0 ) break;
 				pos += res * ch * pcmsize;

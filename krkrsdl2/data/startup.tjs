@@ -1309,3 +1309,37 @@ if (Storages.isExistentStorage("sdmc:/switch/KRKR-ns/autocycle.txt") && games.co
     selectFolder(Storages.getAutocycleRound() % games.count);
     requestLaunch();
 }
+// Test harness: a marker file names one game to enter without touching the
+// picker (tools/tenshi_perf_run.ps1 writes it for performance runs).  TJS has
+// no generic text reader, so the marker is a tiny script -- the same mechanism
+// Names.tjs already uses.  Scripts.execStorage evaluates the marker in its own
+// scope, so the marker calls this global entry point instead of assigning
+// variables.  Only the marker's presence changes anything: with no marker this
+// block is skipped and the picker behaves exactly as before.  The marker is
+// consumed before requestLaunch so a failed launch cannot loop.
+global.autolaunchRequest = function(target, index) {
+    try {
+        var pick = -1;
+        if (typeof index != "void" && index >= 0 && index < games.count) pick = index;
+        else if (typeof target == "String" || typeof target == "string") {
+            for (var al = 0; al < games.count; al++) {
+                if (games[al].folder == target) { pick = al; break; }
+            }
+        }
+        try { Storages.deleteFile("sdmc:/switch/KRKR-ns/autolaunch.tjs"); } catch (e2) { }
+        if (pick >= 0) {
+            Debug.message("[autolaunch] launching folder=" + games[pick].folder + " index=" + pick);
+            selectFolder(pick);
+            requestLaunch();
+        } else {
+            Debug.message("[autolaunch] target not found, picker stays: target=" + target + " index=" + index);
+        }
+    } catch (e) {
+        Debug.message("[autolaunch] marker ignored: " + e.message);
+        try { Storages.deleteFile("sdmc:/switch/KRKR-ns/autolaunch.tjs"); } catch (e2) { }
+    }
+};
+if (Storages.isExistentStorage("sdmc:/switch/KRKR-ns/autolaunch.tjs") && games.count > 0) {
+    try { Scripts.execStorage("sdmc:/switch/KRKR-ns/autolaunch.tjs"); }
+    catch (e) { Debug.message("[autolaunch] marker exec failed: " + e.message); }
+}

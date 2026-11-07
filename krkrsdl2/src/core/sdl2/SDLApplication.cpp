@@ -6738,6 +6738,65 @@ unsigned long long krkrsdl2_heartbeat_main_tick() { return krkrsdl2_main_tick_va
 static volatile unsigned krkrsdl2_frozen_version = 0; // last version seen by watchdog
 static volatile int krkrsdl2_frozen_ticks = 0;       // watchdog consecutive same-version beats
 static volatile bool krkrsdl2_watchdog_kick = false;
+// Per-thread breadcrumbs.  The single stage above only remembers the last
+// writer, which is useless when the thread that touches a bad pointer is not
+// the main thread (2026-11-07: LimeLight_lj died with Ryujinx reporting a guest
+// InvalidMemoryRegionException while the stage still read "opened").  Every
+// thread publishes its own stage into a fixed slot table and the heartbeat dumps
+// the table, so the last beats before a crash name the failing thread.
+struct KrkrNSStageSlot
+{
+    std::atomic<unsigned long long> tid{0};
+    std::atomic<unsigned> tick{0};
+    char name[24] = {};
+    char stage[96] = {};
+};
+static KrkrNSStageSlot krkrsdl2_stage_slots[16];
+static thread_local KrkrNSStageSlot* krkrsdl2_stage_slot = nullptr;
+
+static KrkrNSStageSlot* krkrsdl2_claim_stage_slot()
+{
+    const unsigned long long tid = SDL_ThreadID();
+    for (auto& slot : krkrsdl2_stage_slots)
+        if (slot.tid.load(std::memory_order_acquire) == tid) return &slot;
+    for (auto& slot : krkrsdl2_stage_slots)
+    {
+        unsigned long long expected = 0;
+        if (slot.tid.compare_exchange_strong(expected, tid)) return &slot;
+    }
+    // Table full: take the least recently updated slot so live threads keep
+    // their identity instead of every new thread stealing slot 0.
+    KrkrNSStageSlot* oldest = &krkrsdl2_stage_slots[0];
+    for (auto& slot : krkrsdl2_stage_slots)
+        if (slot.tick.load(std::memory_order_relaxed) < oldest->tick.load(std::memory_order_relaxed)) oldest = &slot;
+    oldest->name[0] = 0;
+    oldest->stage[0] = 0;
+    oldest->tid.store(tid, std::memory_order_release);
+    return oldest;
+}
+static KrkrNSStageSlot* krkrsdl2_stage_slot_for_this_thread()
+{
+    if (!krkrsdl2_stage_slot) krkrsdl2_stage_slot = krkrsdl2_claim_stage_slot();
+    return krkrsdl2_stage_slot;
+}
+void krkrsdl2_set_stage_thread_name(const char* name)
+{
+    auto* slot = krkrsdl2_stage_slot_for_this_thread();
+    int i = 0;
+    for (; name[i] && i < (int)sizeof(slot->name) - 1; ++i) slot->name[i] = name[i];
+    slot->name[i] = 0;
+}
+void krkrsdl2_log_stage_table()
+{
+    for (auto& slot : krkrsdl2_stage_slots)
+    {
+        const unsigned long long tid = slot.tid.load(std::memory_order_acquire);
+        if (!tid) continue;
+        const unsigned tick = slot.tick.load(std::memory_order_relaxed);
+        const unsigned age = tick ? (SDL_GetTicks() - tick) / 1000u : 0u;
+        KRKRNS_LOG("[stage] tid=%llu name=%s age=%us stage=%s", tid, slot.name, age, slot.stage);
+    }
+}
 void krkrsdl2_set_stage(const char* stage)
 {
     const int next = krkrsdl2_stage_idx ^ 1;
@@ -6747,11 +6806,19 @@ void krkrsdl2_set_stage(const char* stage)
     dst[i] = 0;
     krkrsdl2_stage_idx = next;
     krkrsdl2_stage_version++;
+    // Publish the same text into this thread's slot for the crash breadcrumb
+    // table (the last global writer says nothing when another thread faults).
+    auto* slot = krkrsdl2_stage_slot_for_this_thread();
+    i = 0;
+    for (; stage[i] && i < (int)sizeof(slot->stage) - 1; ++i) slot->stage[i] = stage[i];
+    slot->stage[i] = 0;
+    slot->tick.store(SDL_GetTicks(), std::memory_order_relaxed);
 }
 const char* krkrsdl2_get_stage() { return krkrsdl2_stage_buf[krkrsdl2_stage_idx]; }
 
 static int krkrsdl2_heartbeat_thread(void* /*unused*/)
 {
+    krkrsdl2_set_stage_thread_name("heartbeat");
     int n = 0;
     unsigned long long lastMain = 0;
     int mainStill = 0;
@@ -6765,6 +6832,10 @@ static int krkrsdl2_heartbeat_thread(void* /*unused*/)
         KRKRNS_LOG("[heartbeat] alive %d stage=[%s] main=%s",
                    ++n, krkrsdl2_get_stage(),
                    mainStill >= 2 ? "STALLED" : "ok");
+        // Name every live thread's current stage: a guest fault on the audio
+        // decode or image thread must be visible in the last beat before the
+        // process dies.
+        krkrsdl2_log_stage_table();
         if (mainStill >= 2)
         {
             KRKRNS_LOG("[heartbeat] MAIN THREAD STALLED for at least %d seconds "

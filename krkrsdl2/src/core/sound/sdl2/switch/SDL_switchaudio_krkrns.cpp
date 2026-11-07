@@ -170,6 +170,19 @@ static int KRKRNS_SWITCHAUDIO_OpenDevice(SDL_AudioDevice *device,
                                         const char *devname)
 {
     (void)devname;
+    // Diagnostic A/B for the 2026-11-07 guest invalid-memory crashes: a marker
+    // makes the audio backend fail to open, so the engine runs without voices
+    // and the crash is either tied to audio or ruled out.  Switch-only file.
+    {
+        static int disabled = -1;
+        if (disabled < 0) {
+            FILE *marker = fopen("sdmc:/switch/KRKR-ns/no-audio.txt", "rb");
+            disabled = marker ? 1 : 0;
+            if (marker) fclose(marker);
+            if (disabled) KRKRNS_LOG("[switch-audio] disabled by no-audio.txt");
+        }
+        if (disabled) { SDL_SetError("audio disabled by no-audio.txt"); return -1; }
+    }
     static const u8 sink_channels[] = {0, 1};
     device->hidden = (SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*device->hidden));
     if (!device->hidden) return SDL_OutOfMemory();

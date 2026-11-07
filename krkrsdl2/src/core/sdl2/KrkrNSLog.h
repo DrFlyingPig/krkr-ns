@@ -21,6 +21,8 @@ extern void krkrsdl2_log_batch_begin();
 extern void krkrsdl2_log_batch_end();
 extern void krkrsdl2_log_flush();
 extern void krkrsdl2_set_stage(const char *stage);
+extern void krkrsdl2_set_stage_thread_name(const char *name);
+extern void krkrsdl2_log_stage_table();
 extern const char * krkrsdl2_get_stage();
 extern void krkrsdl2_heartbeat_main_progress();
 #define KRKRNS_LOG(...) krkrsdl2_logf_impl(__VA_ARGS__)
@@ -36,10 +38,12 @@ public:
 // Publish what the main thread is currently doing; the heartbeat thread
 // reports it periodically, so a hang pinpoints its own stage.
 #define KRKRNS_STAGE(msg) krkrsdl2_set_stage(msg)
+#define KRKRNS_THREAD_NAME(name) krkrsdl2_set_stage_thread_name(name)
 #else
 #define KRKRNS_LOG(...)
 #define KRKRNS_LOG_DEFERRED(...)
 #define KRKRNS_LOG_GAME(...)
+#define KRKRNS_THREAD_NAME(name)
 #define KRKRNS_STAGE(msg)
 class KrkrNSLogBatch {};
 #endif
