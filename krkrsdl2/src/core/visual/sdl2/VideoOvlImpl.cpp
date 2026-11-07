@@ -313,6 +313,9 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 		stream = NULL; // ownership transferred even when OpenStream fails
 		if (!opened)
 		{
+			KRKRNS_LOG("[video] OpenStream FAILED name='%s' -> %dx%d",
+				name.AsNarrowStdString().c_str(), (int)width, (int)height);
+
 			VideoOverlay->Release();
 			VideoOverlay = NULL;
 			TVPThrowExceptionMessage(TVPErrorInKrMovieDLL,
@@ -320,6 +323,9 @@ void tTJSNI_VideoOverlay::Open(const ttstr &_name)
 		}
 		if (width <= 0 || height <= 0)
 		{
+			KRKRNS_LOG("[video] OpenStream invalid size name='%s' -> %dx%d",
+				name.AsNarrowStdString().c_str(), (int)width, (int)height);
+
 			VideoOverlay->Release();
 			VideoOverlay = NULL;
 			TVPThrowExceptionMessage(TVPErrorInKrMovieDLL,

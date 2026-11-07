@@ -7,6 +7,7 @@
 #include <switch.h>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <new>
 
@@ -68,6 +69,33 @@ bool krkrsdl2_force_software_composition() noexcept
     return softwareComposition.load(std::memory_order_acquire);
 }
 
+std::uint64_t krkrsdl2_gpu_cpu_mirror_budget() noexcept
+{
+    // The GPU compositor keeps each loaded image's decoded pixels so a texture
+    // eviction can re-upload without a decode.  That is a per-image cost the
+    // game's own bitmap cache does not see, so a marker can cap the total; the
+    // over-budget mirrors are zlib-compressed (restorable through the existing
+    // CPUBuffer recovery path) instead of staying decoded.
+    static const std::uint64_t budget = []() -> std::uint64_t {
+        FILE* marker = fopen(KRKRNS_BASE_A "/gpu-cpu-mirror-budget.txt", "rb");
+        if (!marker) return 0;
+        char text[32] = {};
+        const std::size_t read = fread(text, 1, sizeof(text) - 1, marker);
+        fclose(marker);
+        unsigned long long mib = 0;
+        if (read > 0) {
+            char* end = nullptr;
+            mib = std::strtoull(text, &end, 10);
+            if (end == text) mib = 0;
+        }
+        if (mib == 0) mib = 192;      // marker without a number: default cap
+        if (mib > 1024) mib = 1024;   // never exceed the process budget by typo
+        KRKRNS_LOG("[gpu-layer] cpu-mirror budget=%llu MiB", mib);
+        return std::uint64_t(mib) * 1024ull * 1024ull;
+    }();
+    return budget;
+}
+
 bool krkrsdl2_emote_gpu_allowed() noexcept
 {
     return emoteGpuAllowed.load(std::memory_order_acquire);
@@ -116,13 +144,26 @@ void krkrsdl2_resource_policy_select_renderer(const char* native_game_dir) noexc
         }
 
         // Stripe splitting matches the reference per-renderer, so it must follow
-        // the resolved renderer, not the raw preference.
-        krkrsdl2_apply_reference_split_settings(renderer == "software");
+        // the effective composition, not the raw preference string.
+        // 2026-11-07: only the explicit renderer-gl.txt marker raises the full
+        // GPU compositor.  A title's own Kirikiroid2Preference.xml frequently
+        // ships renderer=opengl (that is the reference renderer's name for its
+        // standard renderer), and the GPU compositor is still experimental: on
+        // LimeLight_lj it first froze the session and later crashed the emulator.
+        // Such titles keep the proven hybrid path instead.
+        const bool fullGpu = renderer == "opengl" && rendererSource == "renderer-gl.txt";
+        krkrsdl2_apply_reference_split_settings(!fullGpu);
 
-        if (renderer == "opengl") {
+        if (fullGpu) {
             softwareComposition.store(false, std::memory_order_release);
             emoteGpuAllowed.store(true, std::memory_order_release);
-            KRKRNS_LOG("[renderer] renderer=opengl source=%s; available GPU paths with CPU fallback",
+            KRKRNS_LOG("[renderer] renderer=opengl source=%s; full GPU composition",
+                rendererSource.c_str());
+        } else if (renderer == "opengl") {
+            softwareComposition.store(true, std::memory_order_release);
+            emoteGpuAllowed.store(true, std::memory_order_release);
+            KRKRNS_LOG("[renderer] renderer=opengl source=%s; mapped to hybrid software composition + "
+                "E-mote GPU raster (renderer-gl.txt enables full GPU composition)",
                 rendererSource.c_str());
         } else if (renderer == "software") {
             // Hybrid mode (KRKR-ns 2026-11-04) is the default: keep the CPU

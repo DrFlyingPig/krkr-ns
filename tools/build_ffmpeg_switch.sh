@@ -109,8 +109,8 @@ cd "$src"
   --enable-swscale \
   --enable-swresample \
   --enable-demuxer=asf,mov,mpegps,mpegvideo,mp3 \
-  --enable-decoder=wmv3,vc1,wmav1,wmav2,wmapro,wmavoice,h264,aac,mpeg1video,mpeg2video,mp2,mp3 \
-  --enable-parser=vc1,h264,aac,mpegvideo,mpegaudio \
+  --enable-decoder=wmv3,vc1,wmav1,wmav2,wmapro,wmavoice,h264,hevc,aac,mpeg1video,mpeg2video,mp2,mp3 \
+  --enable-parser=vc1,h264,hevc,aac,mpegvideo,mpegaudio \
   --enable-protocol=file \
   --enable-pthreads \
   --enable-asm \

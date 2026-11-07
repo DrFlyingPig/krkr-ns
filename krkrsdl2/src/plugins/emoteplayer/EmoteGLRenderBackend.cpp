@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -135,6 +136,7 @@ struct EmoteGLRenderBackend::Impl
     {
         int width, height;
         bool target;
+        bool primary = false;   // first render target created = the E-mote canvas
         GLuint texture = 0, fbo = 0;
         std::vector<uint8_t> pixels;
         // Region of this render target touched since the last LockTarget.
@@ -182,6 +184,7 @@ struct EmoteGLRenderBackend::Impl
     int blend = 0;
     float color[4] = {};
     bool residentRequested = true;
+    bool primaryAssigned = false;
     EmoteResidentReadbackStats residentStats;
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
     PFNGLCOPYTEXSUBIMAGE2DPROC CopyTexSubImage2D = nullptr;
@@ -417,6 +420,18 @@ struct EmoteGLRenderBackend::Impl
         // transparent), so it zeroes the mirror instead of forcing a full read.
         if (!clearBeforeRead)
         {
+            // KRKR-ns diagnostic: what the incremental read actually did.
+            {
+                static int readLogs = 0;
+                if (readLogs < 10)
+                {
+                    readLogs++;
+                    KRKRNS_LOG("[emote-read] #%d cleared=%d dirtyValid=%d rect=%d,%d-%d,%d dest=%p",
+                        readLogs, image->cleared ? 1 : 0, image->dirtyValid ? 1 : 0,
+                        image->dirtyX0, image->dirtyY0, image->dirtyX1, image->dirtyY1,
+                        (void*)destination);
+                }
+            }
             if (image->cleared)
                 std::memset(destination, 0, rowBytes * size_t(image->height));
             if (!image->dirtyValid)
@@ -498,10 +513,41 @@ struct EmoteGLRenderBackend::Impl
         }
     }
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
-    void checkResidentError()
+    // The resident readback is an optimization, never a correctness
+    // requirement: any GL failure must degrade to the plain read path instead
+    // of escaping into the script VM.  On hardware the Switch GLES driver
+    // raises errors the emulator does not (observed during affine transition
+    // frames), and an escaping exception becomes a KAG fatal error.
+    GLenum lastResidentGlError = GL_NO_ERROR;
+    const char* lastResidentGlStage = nullptr;
+    // Consume whatever the driver queued, reporting a stage only when it
+    // changes.  Callers that cannot tolerate a failure drain at entry so an
+    // error raised by an unrelated earlier call is not blamed on the resident
+    // path (the Switch GLES driver reports some through this queue).
+    void drainResidentErrors(const char* stage)
     {
         const GLenum error = GetError();
         if (error == GL_NO_ERROR) return;
+        if (error != lastResidentGlError || lastResidentGlStage != stage)
+        {
+            lastResidentGlError = error;
+            lastResidentGlStage = stage;
+            KRKRNS_LOG("[emote-resident] GL error=0x%04x stage=%s",
+                static_cast<unsigned>(error), stage);
+        }
+        for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+    }
+    void checkResidentError(const char* stage = "resident")
+    {
+        const GLenum error = GetError();
+        if (error == GL_NO_ERROR) return;
+        if (error != lastResidentGlError || lastResidentGlStage != stage)
+        {
+            lastResidentGlError = error;
+            lastResidentGlStage = stage;
+            KRKRNS_LOG("[emote-resident] GL error=0x%04x stage=%s; plain readback fallback",
+                static_cast<unsigned>(error), stage);
+        }
         // A candidate failure must not poison the original full-read fallback.
         for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
         throw std::runtime_error("E-mote resident readback GL error");
@@ -555,7 +601,7 @@ struct EmoteGLRenderBackend::Impl
             BufferData(GL_ARRAY_BUFFER, sizeof(positions), positions, GL_STATIC_DRAW);
             BindBuffer(GL_ELEMENT_ARRAY_BUFFER, candidateIbo);
             BufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
-            checkResidentError();
+            checkResidentError("damage-program");
             DeleteShader(vs); DeleteShader(fs); vs = fs = 0;
             damageProgram = candidate; damageVbo = candidateVbo; damageIbo = candidateIbo;
             damageCurrentLoc = currentLoc; damagePreviousLoc = previousLoc; damageSizeLoc = sizeLoc;
@@ -624,7 +670,7 @@ struct EmoteGLRenderBackend::Impl
         FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image.damageTexture, 0);
         if (CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
             throw std::runtime_error("E-mote damage framebuffer incomplete");
-        checkResidentError();
+        checkResidentError("ensure");
         image.damageWidth = mapW; image.damageHeight = mapH;
         image.residentBytes = static_cast<std::size_t>(bytes);
         residentStats.liveGPUBytes += bytes;
@@ -638,7 +684,7 @@ struct EmoteGLRenderBackend::Impl
         ActiveTexture(GL_TEXTURE0);
         BindTexture(GL_TEXTURE_2D, image.previousTexture);
         CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, image.width, image.height);
-        checkResidentError();
+        checkResidentError("baseline");
         image.previousValid = true;
         ++residentStats.baselineCopies;
         // This counter describes GPU-to-GPU payload, not CPU readback bytes.
@@ -663,7 +709,7 @@ struct EmoteGLRenderBackend::Impl
                               rect.w, rect.h);
             bytes += std::uint64_t(rect.w) * std::uint64_t(rect.h) * 4u;
         }
-        checkResidentError();
+        checkResidentError("baseline-rects");
         ++residentStats.baselineCopies;
         perf.Bytes(bytes);
     }
@@ -748,7 +794,7 @@ struct EmoteGLRenderBackend::Impl
                 EnableVertexAttribArray(0);
                 VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
                 DrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nullptr);
-                checkResidentError();
+                checkResidentError("damage-draw");
             }
             {
                 KrkrNSPerfScope mapPerf(KrkrNSPerfOp::GpuDamageMap);
@@ -774,7 +820,7 @@ struct EmoteGLRenderBackend::Impl
                         KrkrNSPerfScope readPerf(KrkrNSPerfOp::GpuReadback);
                         ReadPixels(x, 0, width, image.damageHeight,
                                    GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-                        checkResidentError();
+                        checkResidentError("damage-read");
                         readPerf.Bytes(bytes);
                     }
                     ++residentStats.mapReads;
@@ -788,7 +834,7 @@ struct EmoteGLRenderBackend::Impl
                 mapPerf.Bytes(image.damagePixels.size());
             }
         }
-        checkResidentError();
+        checkResidentError("damage-end");
     }
     void validateResidentCopy(Image& image)
     {
@@ -875,7 +921,7 @@ struct EmoteGLRenderBackend::Impl
                 KrkrNSPerfScope perf(KrkrNSPerfOp::GpuResidentCopy);
                 BindTexture(GL_TEXTURE_2D, image.previousTexture);
                 CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, image.width, image.height);
-                checkResidentError();
+                checkResidentError("validate-copy");
                 ++residentStats.probeCopies;
                 perf.Bytes(bytes);
             }
@@ -890,7 +936,7 @@ struct EmoteGLRenderBackend::Impl
             Viewport(0, 0, image.width, image.height);
             Disable(GL_SCISSOR_TEST); ColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             ClearColor(0, 0, 0, 0); Clear(GL_COLOR_BUFFER_BIT);
-            checkResidentError();
+            checkResidentError("validate-probe");
             readDamageMap(image, probe.texture);
             for (std::size_t p = 0; p < image.damagePixels.size(); p += 4)
                 if (image.damagePixels[p] == 0)
@@ -922,7 +968,7 @@ struct EmoteGLRenderBackend::Impl
             {
                 KrkrNSPerfScope perf(KrkrNSPerfOp::GpuReadback);
                 ReadPixels(x, rect.y, width, rect.h, GL_RGBA, GL_UNSIGNED_BYTE, readScratch.data());
-                checkResidentError();
+                checkResidentError("read-rect");
                 perf.Bytes(bytes);
             }
             ++residentStats.dataRects;
@@ -944,7 +990,7 @@ struct EmoteGLRenderBackend::Impl
         bool used = false;
         try
         {
-            checkResidentError();
+            drainResidentErrors("entry");
             if (ensureResident(image))
             {
                 used = true;
@@ -956,7 +1002,40 @@ struct EmoteGLRenderBackend::Impl
                     readResidentFull(image);
                     copyResidentBaseline(image);
                 }
-                else if (!image.dirtyValid && !image.cleared)
+                else if (image.cleared)
+                {
+                    // A clear only zeroes the target. Let the damage map decide
+                    // which pixels actually have to come back: a full read here
+                    // cost 11 MB per lock on every cleared frame (~21 ms), and
+                    // the map already reports the erased pixels as changed.
+                    readDamageMap(image);
+                    krkrns_emote_readback::Plan plan;
+                    if (!krkrns_emote_readback::BuildPlan(image.damagePixels.data(),
+                        image.damagePixels.size(), std::size_t(image.damageWidth) * 4,
+                        image.width, image.height, readTileWidth, plan, 256))
+                        throw std::runtime_error("E-mote damage readback plan invalid");
+                    if (plan.rects.empty())
+                    {
+                        ++residentStats.cacheHits;
+                        image.layerDamage.SetDamage({});
+                    }
+                    else
+                    {
+                        for (const auto& rect : plan.rects)
+                            readResidentRect(image, rect);
+                        copyResidentBaselineRects(image, plan.rects);
+                        EmoteLayerBounds bounds{image.width, image.height, 0, 0};
+                        for (const auto& rect : plan.rects)
+                        {
+                            bounds.left = std::min(bounds.left, rect.x);
+                            bounds.top = std::min(bounds.top, rect.y);
+                            bounds.right = std::max(bounds.right, rect.x + rect.w);
+                            bounds.bottom = std::max(bounds.bottom, rect.y + rect.h);
+                        }
+                        image.layerDamage.SetDamage(bounds);
+                    }
+                }
+                else if (!image.dirtyValid)
                 {
                     ++residentStats.cacheHits;
                     image.layerDamage.SetDamage({});
@@ -1051,13 +1130,37 @@ struct EmoteGLRenderBackend::Impl
             for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
             used = false;
         }
+        KRKRNS_STAGE("emote-readback");
         if (!used)
         {
             // A failed rectangle transfer may already have written some CPU
             // pixels. Overwrite the complete target, including all old clears.
             image.previousValid = false;
             ++residentStats.fallbacks;
-            readResidentFull(image);
+            // The full read below still uses the resident rectangle reader, so
+            // it can raise the same GL error again.  That second failure must
+            // not escape: fall back to the plain tiled read, which never checks
+            // the GL error queue (the Switch GLES driver reported this during
+            // affine transitions and the exception used to reach KAG as a
+            // fatal script error).
+            try
+            {
+                readResidentFull(image);
+            }
+            catch (const std::exception& error)
+            {
+                KRKRNS_LOG("[emote-resident] plain readback fallback: %s", error.what());
+                for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+                image.residentUnavailable = true;
+                readPixels(&image, image.pixels.data(), readTileWidth);
+            }
+            catch (...)
+            {
+                KRKRNS_LOG("[emote-resident] plain readback fallback: unknown error");
+                for (int i = 0; i < 16 && GetError() != GL_NO_ERROR; ++i) {}
+                image.residentUnavailable = true;
+                readPixels(&image, image.pixels.data(), readTileWidth);
+            }
         }
         bind(&image);
         UseProgram(program);
@@ -1081,6 +1184,7 @@ struct EmoteGLRenderBackend::Impl
         Scope scope(*this);
         auto image = std::make_unique<Image>();
         image->width = width; image->height = height; image->target = renderTarget;
+        if (renderTarget && !primaryAssigned) { image->primary = true; primaryAssigned = true; }
         image->pixels.resize(size_t(width) * height * 4);
         GenTextures(1, &image->texture);
         BindTexture(GL_TEXTURE_2D, image->texture);
@@ -1152,6 +1256,161 @@ struct EmoteGLRenderBackend::Impl
         TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image->width, image->height,
                      GL_RGBA, GL_UNSIGNED_BYTE, image->pixels.data());
         if (!image->target) GenerateMipmap(GL_TEXTURE_2D);
+    }
+    // Dirty-region readback verification (N2).
+    //
+    // The incremental readback assumes the untouched part of the CPU mirror
+    // still matches the framebuffer. That assumption is what the marker file
+    // checks: read the whole target and compare every pixel the incremental
+    // read did not refresh. Enabled by
+    //   sdmc:/switch/KRKR-ns/emote-readback-verify.txt
+    // and limited to the first frames so the extra full read cannot hide in a
+    // long session's timing.
+    void verifyReadback(Image& target, bool preDirtyValid, bool preCleared,
+                        int preX0, int preY0, int preX1, int preY1)
+    {
+        static const bool requested = [] {
+#ifdef __SWITCH__
+            if (FILE* marker = std::fopen("sdmc:/switch/KRKR-ns/emote-readback-verify.txt", "rb"))
+            {
+                std::fclose(marker);
+                return true;
+            }
+#endif
+            return false;
+        }();
+        // Forced plain readback for A/B verification: disables the resident
+        // damage-map path so the incremental read can be compared against it.
+        static const bool plainRequested = [] {
+#ifdef __SWITCH__
+            if (FILE* marker = std::fopen("sdmc:/switch/KRKR-ns/emote-plain-readback.txt", "rb"))
+            {
+                std::fclose(marker);
+                return true;
+            }
+#endif
+            return false;
+        }();
+        if (plainRequested) residentRequested = false;
+        if (!requested || !target.primary) return;
+        static unsigned frames = 0;
+        static unsigned long long mismatches = 0;
+        static constexpr unsigned kVerifyFrames = 120;
+        if (frames >= kVerifyFrames) return;
+        ++frames;
+
+        // Bind the render target itself: the resident path may leave its damage
+        // FBO bound, and reading that would compare the wrong image.
+        bind(&target);
+        PixelStorei(GL_PACK_ALIGNMENT, 1);
+        std::vector<uint8_t> scratch(size_t(target.width) * target.height * 4);
+        ReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, scratch.data());
+        // The guarantee the layer consumes is "every pixel this read refreshed
+        // is current". A clear refreshes everything; otherwise only the damage
+        // rectangle is refreshed and the rest of the mirror is legitimately
+        // older, so comparing it would test a contract the engine never makes.
+        bool verifyRect = false;
+        int x0 = 0, y0 = 0, x1 = target.width, y1 = target.height;
+        if (preCleared)
+        {
+            verifyRect = true;
+        }
+        else if (preDirtyValid)
+        {
+            verifyRect = true;
+            x0 = std::max(0, preX0); y0 = std::max(0, preY0);
+            x1 = std::min(target.width, preX1); y1 = std::min(target.height, preY1);
+        }
+        unsigned long long frameMismatches = 0;
+        int firstX = -1, firstY = -1;
+        if (verifyRect && x0 < x1 && y0 < y1)
+        {
+            for (int y = y0; y < y1; ++y)
+            {
+                const uint8_t* expected = scratch.data() + size_t(y) * target.width * 4;
+                const uint8_t* actual = target.pixels.data() + size_t(y) * target.width * 4;
+                for (int x = x0; x < x1; ++x)
+                {
+                    if (std::memcmp(expected + size_t(x) * 4, actual + size_t(x) * 4, 4) != 0)
+                    {
+                        if (firstX < 0) { firstX = x; firstY = y; }
+                        ++frameMismatches;
+                    }
+                }
+            }
+        }
+        if (!verifyRect)
+        {
+            if ((frames % 30) == 0)
+                KRKRNS_LOG("[emote-verify] frames=%u no-damage-frames (nothing to compare)", frames);
+            return;
+        }
+        mismatches += frameMismatches;
+        if (frameMismatches)
+        {
+            // Offset probe: if the mirror is only shifted against the
+            // framebuffer, one of these shifts collapses the mismatch count.
+            // Vertical flip probe: a bottom-up/top-down mix-up shows up as a
+            // collapse to zero here while row shifts stay high.
+            unsigned long long flipped = 0;
+            for (int y = 0; y < target.height; ++y)
+            {
+                const uint8_t* expected = scratch.data() + size_t(target.height - 1 - y) * target.width * 4;
+                const uint8_t* actual = target.pixels.data() + size_t(y) * target.width * 4;
+                for (int x = 0; x < target.width; ++x)
+                {
+                    if (x < x0 || x >= x1 || y < y0 || y >= y1) continue;
+                    if (std::memcmp(expected + size_t(x) * 4, actual + size_t(x) * 4, 4) != 0) ++flipped;
+                }
+            }
+            unsigned long long flippedBytes = 0;
+            for (int y = 0; y < target.height; ++y)
+            {
+                const uint8_t* expected = scratch.data() + size_t(y) * target.width * 4;
+                const uint8_t* actual = target.pixels.data() + size_t(y) * target.width * 4;
+                for (int x = 0; x < target.width; ++x)
+                {
+                    if (x < x0 || x >= x1 || y < y0 || y >= y1) continue;
+                    const uint8_t* e = expected + size_t(x) * 4;
+                    const uint8_t* a = actual + size_t(x) * 4;
+                    if (e[0] == a[2] && e[1] == a[1] && e[2] == a[0] && e[3] == a[3]) ++flippedBytes;
+                }
+            }
+            char sample[160] = {};
+            if (firstX >= 0)
+            {
+                const uint8_t* e = scratch.data() + (size_t(firstY) * target.width + size_t(firstX)) * 4;
+                const uint8_t* a = target.pixels.data() + (size_t(firstY) * target.width + size_t(firstX)) * 4;
+                std::snprintf(sample, sizeof(sample), " fbo=%02x%02x%02x%02x mirror=%02x%02x%02x%02x swapped=%llu",
+                    e[0], e[1], e[2], e[3], a[0], a[1], a[2], a[3], flippedBytes);
+            }
+            unsigned long long shifted[5] = {};
+            const int shifts[5] = {-2, -1, 0, 1, 2};
+            for (int s = 0; s < 5; ++s)
+            {
+                const int shift = shifts[s];
+                for (int y = 0; y < target.height; ++y)
+                {
+                    const int sy = y + shift;
+                    if (sy < 0 || sy >= target.height) continue;
+                    const uint8_t* expected = scratch.data() + size_t(sy) * target.width * 4;
+                    const uint8_t* actual = target.pixels.data() + size_t(y) * target.width * 4;
+                    for (int x = 0; x < target.width; ++x)
+                    {
+                        if (x < x0 || x >= x1 || y < y0 || y >= y1) continue;
+                        if (std::memcmp(expected + size_t(x) * 4, actual + size_t(x) * 4, 4) != 0)
+                            ++shifted[s];
+                    }
+                }
+            }
+            KRKRNS_LOG("[emote-verify] frame=%u mismatches=%llu first=%d,%d dirty=%d,%d-%d,%d dirtyValid=%d cleared=%d shift[-2/-1/0/+1/+2]=%llu/%llu/%llu/%llu/%llu flip=%llu%s",
+                frames - 1, frameMismatches, firstX, firstY, x0, y0, x1, y1,
+                preDirtyValid ? 1 : 0, preCleared ? 1 : 0,
+                shifted[0], shifted[1], shifted[2], shifted[3], shifted[4], flipped, sample);
+        }
+        if (frames == kVerifyFrames || (frames % 30) == 0)
+            KRKRNS_LOG("[emote-verify] frames=%u total-mismatches=%llu size=%dx%d",
+                frames, mismatches, target.width, target.height);
     }
 };
 
@@ -1368,26 +1627,57 @@ void EmoteGLRenderBackend::ClearTarget(bool clear)
 }
 uint8_t* EmoteGLRenderBackend::LockTarget(void* handle, int& pitch)
 {
+    KRKRNS_STAGE("emote-lock");
     auto* target = impl->find(handle);
     if (!target || !target->target) return nullptr;
     target->layerDamage.BeginLock();
     impl->bind(target);
     pitch = target->width * 4;
+    // Capture the damage state the incremental read is about to consume; the
+    // verification compares against what the tracker claimed at that moment.
+    const bool preDirtyValid = target->dirtyValid;
+    const bool preCleared = target->cleared;
+    const int preX0 = target->dirtyX0, preY0 = target->dirtyY0;
+    const int preX1 = target->dirtyX1, preY1 = target->dirtyY1;
     {
         // GPU->CPU readback is the E-mote frame's biggest single cost; timed
         // separately from the RGBA->BGRA convert that follows in the layer
         // bridge so the next optimization (direct/format readback vs
         // passthrough) can be chosen from data.
         const Uint64 t0 = SDL_GetPerformanceCounter();
+        try
+        {
 #if defined(KRKRNS_EMOTE_RESIDENT_READBACK)
-        if (impl->residentRequested && !target->residentUnavailable && !impl->residentProgramFailed)
-            impl->readResident(*target);
-        else
+            if (impl->residentRequested && !target->residentUnavailable && !impl->residentProgramFailed)
+                impl->readResident(*target);
+            else
 #endif
+                impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+        }
+        catch (const std::exception& error)
+        {
+            // LockTarget is called from script-driven draw paths; an escaping
+            // exception becomes a KAG fatal error.  This call only has to
+            // deliver pixels, so degrade to the plain read instead.
+            KRKRNS_LOG("[emote-resident] lock fallback: %s", error.what());
+            for (int i = 0; i < 16 && impl->GetError() != GL_NO_ERROR; ++i) {}
+            target->residentUnavailable = true;
+            target->previousValid = false;
+            impl->bind(target);
             impl->readPixels(target, target->pixels.data(), impl->readTileWidth);
+        }
         krkrsdl2_prof_emote_lock(
             (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 /
             (double)SDL_GetPerformanceFrequency());
+    }
+    try
+    {
+        impl->verifyReadback(*target, preDirtyValid, preCleared, preX0, preY0, preX1, preY1);
+    }
+    catch (...)
+    {
+        // Verification is diagnostic only (marker file); never fail a lock.
+        for (int i = 0; i < 16 && impl->GetError() != GL_NO_ERROR; ++i) {}
     }
     target->clearDirty();
     // Preserve the upstream framebuffer's RGBA/alpha equations exactly.

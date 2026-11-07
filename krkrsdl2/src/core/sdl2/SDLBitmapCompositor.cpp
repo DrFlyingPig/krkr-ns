@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "SDLBitmapCompositor.h"
 #include "KrkrNSResourcePolicy.h"
+#include "KrkrNSLog.h"
 #include "KrkrNSPerf.h"
 #include <algorithm>
 #include <array>
@@ -135,6 +136,36 @@ struct LoadedBitmapSourceState
         auto* result = static_cast<std::uint8_t*>(const_cast<void*>(base));
         if (result && pitch < 0) result += std::size_t(height - 1) * std::size_t(-std::int64_t(pitch));
         return result;
+    }
+    // The GPU compositor keeps the decoded pixels of every loaded image so a
+    // texture eviction can re-upload without decoding again. That mirror is the
+    // game's bitmap cache by another allocator, and it is invisible to the
+    // engine's bitmap accounting, so a budget can ask for the cheapest mirrors
+    // back: zlib them into `compressed` and free the raw pixels. CPUBuffer()
+    // restores the mirror from there when the layer needs CPU pixels again.
+    bool CompressRetainedCPU() noexcept
+    {
+        try {
+            void* pixels = nullptr;
+            std::shared_ptr<const std::vector<std::uint8_t>> packed;
+            {
+                std::lock_guard<std::mutex> lock(cpuMutex);
+                if (!cpu || !release || !bytes) return false;
+                uLongf bound = compressBound(bytes);
+                auto buffer = std::make_shared<std::vector<std::uint8_t>>(bound);
+                uLongf count = bound;
+                if (compress2(buffer->data(), &count, static_cast<const Bytef*>(cpu), bytes, 1) != Z_OK)
+                    return false;
+                buffer->resize(count);
+                packed = std::move(buffer);
+                pixels = cpu;
+                cpu = nullptr;
+                cpuPublished = false;
+                compressed = packed;
+            }
+            release(pixels);
+            return true;
+        } catch (...) { return false; }
     }
     bool Matches(const BitmapView& view) const noexcept
     {
@@ -423,10 +454,54 @@ struct SDLBitmapCompositor::Impl
     std::vector<std::array<std::uint64_t, 2>> scenePoolUsed;
     KrkrNSGpuResourceLease lease;
     std::uint64_t clock = 0;
+    // Decoded CPU mirrors retained for re-upload. Bounded by
+    // gpu-cpu-mirror-budget.txt; over-budget mirrors are compressed so the
+    // texture stays authoritative and the pixels remain restorable.
+    struct MirrorRecord
+    {
+        std::weak_ptr<LoadedBitmapSourceState> source;
+        std::uint64_t bytes = 0;
+    };
+    std::vector<MirrorRecord> mirrors;
+    std::uint64_t mirrorBytes = 0;
     unsigned batchDepth = 0;
     std::unique_ptr<RendererScope> drawScope;
     std::shared_ptr<ResidentFrameState> drawResource;
     SDL_Texture* drawTarget = nullptr;
+
+    void RegisterMirror(const std::shared_ptr<LoadedBitmapSourceState>& source)
+    {
+        if (!source || !source->bytes) return;
+        mirrors.push_back(MirrorRecord{source, source->bytes});
+        mirrorBytes += source->bytes;
+        TrimMirrors();
+    }
+    void TrimMirrors()
+    {
+        const std::uint64_t budget = krkrsdl2_gpu_cpu_mirror_budget();
+        if (!budget) return;
+        unsigned evicted = 0;
+        std::uint64_t evictedBytes = 0;
+        for (std::size_t i = 0; i < mirrors.size() && mirrorBytes > budget && evicted < 8;) {
+            auto source = mirrors[i].source.lock();
+            const std::uint64_t bytes = mirrors[i].bytes;
+            mirrorBytes -= bytes <= mirrorBytes ? bytes : mirrorBytes;
+            mirrors.erase(mirrors.begin() + std::ptrdiff_t(i));
+            if (!source) continue;
+            if (source->CompressRetainedCPU()) { evictedBytes += bytes; ++evicted; }
+        }
+        if (evicted) {
+            KRKRNS_LOG("[gpu-layer] cpu-mirror compressed=%u bytes=%llu retained=%llu budget=%llu",
+                evicted, static_cast<unsigned long long>(evictedBytes),
+                static_cast<unsigned long long>(mirrorBytes),
+                static_cast<unsigned long long>(budget));
+        }
+        // Dead handles otherwise accumulate one record per scene change.
+        if (mirrors.size() > 512) {
+            mirrors.erase(std::remove_if(mirrors.begin(), mirrors.end(),
+                [](const MirrorRecord& record) { return record.source.expired(); }), mirrors.end());
+        }
+    }
 
     void EndTarget()
     {
@@ -520,6 +595,7 @@ struct SDLBitmapCompositor::Impl
     }
     bool Reserve(std::uint64_t bytes, const Entry* protectedEntry)
     {
+        KRKRNS_STAGE("gpu-reserve");
         const auto budget = TextureBudget();
         if (bytes > budget) return false;
         DrainRetired(epoch);
@@ -562,6 +638,7 @@ struct SDLBitmapCompositor::Impl
         if (!Reserve(bytes, protect)) return {};
         if (!lease.Acquire()) return {};
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasCreate, bytes);
+        KRKRNS_STAGE("gpu-create");
         // Upload textures of a matching shape come from the recycle pool; a
         // render target is never pooled (its contents are assumed undefined).
         SDL_Texture* texture = target ? nullptr : TakePooledTexture(*epoch, view.width, view.height, opaque);
@@ -602,6 +679,7 @@ struct SDLBitmapCompositor::Impl
     }
     bool Upload(const std::shared_ptr<ResidentFrameState>& resource, const BitmapView& view)
     {
+        KRKRNS_STAGE("gpu-upload");
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasUpload,
             std::uint64_t(view.width) * view.height * 4);
         const void* pixels = view.row0;
@@ -625,6 +703,7 @@ struct SDLBitmapCompositor::Impl
     {
         if (!Owner() || !resource || !resource->texture.load()) return false;
         EndTarget();
+        KRKRNS_STAGE("gpu-readback");
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasReadback,
             std::uint64_t(resource->width) * resource->height * 4);
         RendererScope scope(renderer);
@@ -790,11 +869,15 @@ struct SDLBitmapCompositor::Impl
         if (SDL_SetTextureBlendMode(texture, blend) != 0 ||
             SDL_SetTextureColorMod(texture, color, color, color) != 0 ||
             SDL_SetTextureAlphaMod(texture, Uint8(opacity)) != 0) return false;
+        // Draw() must never sample the canvas it is writing: that is a
+        // feedback loop for GLES and a stall on the emulator's backend.
+        if (target.target && texture == target.target->texture.load()) return false;
         if (!BeginTarget(target.target)) return false;
         // Mark before executing: even a failed partially executed submission
         // must synchronize its current GPU pixels before any CPU fallback.
         target.cpuStale = true;
         target.rgbaValid = target.opaqueValid = target.sceneOpaqueValid = false;
+        KRKRNS_STAGE("gpu-draw");
         KrkrNSPerfScope perf(KrkrNSPerfOp::GpuCanvasDraw,
             std::uint64_t(to.w) * to.h * 4);
         const bool good = SDL_RenderCopy(renderer, texture, &from, &to) == 0;
@@ -988,6 +1071,9 @@ LoadedBitmapSource SDLBitmapCompositor::CreateLoadedSource(const BitmapView& vie
             asset->ownsCPU = true;
             cpuAllocation = nullptr;
         }
+        // Compressing an over-budget mirror releases engine-allocated pixels,
+        // so do it outside impl_->mutex (the allocator can compact caches).
+        impl_->RegisterMirror(asset);
         return LoadedBitmapSource(std::move(asset));
     } catch (const SubmittedGPUFailure&) { throw; }
       catch (...) { return {}; }
@@ -1334,6 +1420,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
         // Allocation failures are still safe fallback, but an oversized scene
         // cannot churn through its CPU uploads before discovering the budget.
         std::unordered_map<Key, std::array<std::shared_ptr<ResidentFrameState>, 2>, KeyHash> sources;
+        KRKRNS_STAGE("gpu-scene-sources");
         for (const auto& item : sourceNeeds) {
             auto* entry = impl_->Find(sourceViews.at(item.first));
             auto& textures = sources[item.first];
@@ -1342,6 +1429,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
                 if (!textures[opaque]) return false;
             }
         }
+        KRKRNS_STAGE("gpu-scene-create");
         if (!impl_->Target(*destination, true)) return false;
         for (std::size_t depth = 1; depth < sizes.size(); ++depth) for (unsigned opaque = 0; opaque != 2; ++opaque) {
             const auto size = sizes[depth][opaque]; auto& target = impl_->scenePool[depth][opaque];
@@ -1459,6 +1547,17 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
         };
         build(build, 0, 0);
 
+        // Sampling the texture that is currently bound as the render target is
+        // a feedback loop: GLES rejects it and some drivers (and the emulator's
+        // Vulkan backend) stall instead of returning an error. Detect it before
+        // the first pixel is written so the caller falls back to the CPU path.
+        for (const auto& command : commands) {
+            if (command.source && command.source->texture.load() == command.target->texture.load()) {
+                SDL_SetError("GPU scene: source is the render target (feedback)");
+                return false;
+            }
+        }
+
         // Probe every target and every blend/modulation combination before
         // the first scene pixel write. The command array also removes all
         // application-side allocation from the submission loop.
@@ -1483,6 +1582,7 @@ bool SDLBitmapCompositor::TryRenderScene(const BitmapView& output,
             }
         }
         if (!scope.Restore()) throw SubmittedGPUFailure();
+        KRKRNS_STAGE("gpu-scene-submit");
         RendererScope submissionScope(impl_->renderer);
         KrkrNSPerfScope scenePerf(KrkrNSPerfOp::GpuGroupRender);
         SDL_Texture* bound = nullptr;

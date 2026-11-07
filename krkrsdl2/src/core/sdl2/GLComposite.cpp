@@ -219,7 +219,7 @@ static int gComposeW = 1280, gComposeH = 720;
 static int gFboW = 1280, gFboH = 720, gVisH = 720;
 
 static GLuint gProgram = 0;
-static GLint gSizeLoc = -1, gOpaLoc = -1, gImageLoc = -1, gSwapLoc = -1;
+static GLint gSizeLoc = -1, gOpaLoc = -1, gImageLoc = -1, gSwapLoc = -1, gRgbMulLoc = -1;
 static GLuint gVbo = 0;
 static std::map<const void*, TextureEntry> gTextures;
 static std::map<const void*, unsigned long long> gBitmapVersions;
@@ -330,7 +330,7 @@ static bool UploadBitmap(const void* bmp, int w, int h, int pitch,
  * in display order. */
 static void DrawQuad(int dstX, int dstY, int dstW, int dstH,
                      int srcX, int srcY, int srcW, int srcH,
-                     int texW, int texH, float opa, bool premultiply,
+                     int texW, int texH, float opa, float rgbMul,
                      int tw = 0, int th = 0, bool swapRGB = true)
 {
     if (tw <= 0 || th <= 0) { tw = gComposeW; th = gComposeH; }
@@ -362,6 +362,7 @@ static void DrawQuad(int dstX, int dstY, int dstW, int dstH,
                            reinterpret_cast<void*>(2 * sizeof(float)));
     gl.Uniform2f(gSizeLoc, (float)tw, (float)th);
     gl.Uniform1f(gOpaLoc, opa / 255.0f);
+    gl.Uniform1f(gRgbMulLoc, rgbMul);
     gl.Uniform1i(gImageLoc, 0);
     gl.Uniform1i(gSwapLoc, swapRGB ? 1 : 0);
     gl.DrawArrays(GL_TRIANGLES, 0, 6);
@@ -398,11 +399,12 @@ static const char* gFrag =
     "varying vec2 vUv;"
     "uniform sampler2D image;"
     "uniform float opa;"
+    "uniform float rgbMul;"
     "uniform int swapRGB;"
     "void main() {"
     "  vec4 c = texture2D(image, vUv);"
     "  if (swapRGB == 1) c.rgb = c.bgr;"
-    "  gl_FragColor = vec4(c.rgb, c.a * opa);"
+    "  gl_FragColor = vec4(c.rgb * rgbMul, c.a * opa);"
     "}";
 
 static bool EnsureProgram()
@@ -430,6 +432,7 @@ static bool EnsureProgram()
     gOpaLoc = gl.GetUniformLocation(gProgram, "opa");
     gImageLoc = gl.GetUniformLocation(gProgram, "image");
     gSwapLoc = gl.GetUniformLocation(gProgram, "swapRGB");
+    gRgbMulLoc = gl.GetUniformLocation(gProgram, "rgbMul");
     gl.GenBuffers(1, &gVbo);
     gl.Disable(GL_DEPTH_TEST);
     gl.Disable(GL_SCISSOR_TEST);
@@ -856,7 +859,7 @@ bool krkrsdl2_glc_overlay_frame()
     gl.Viewport(0, 0, gFboW, gFboH);
     gl.Disable(GL_BLEND);
     // Same coordinate space as the layer quads (canvas coords -> visible rows).
-    DrawQuad(dx, dy, dw, dh, 0, 0, bw, bh, bw, bh, 255, false, gComposeW, gVisH);
+    DrawQuad(dx, dy, dw, dh, 0, 0, bw, bh, bw, bh, 255.0f, 1.0f, gComposeW, gVisH);
     GLErr("glc_overlay");
     EndContext();
     return true;
@@ -1112,7 +1115,7 @@ bool krkrsdl2_glc_try_blt(void* dest, tjs_int x, tjs_int y,
     {
         gl.Disable(GL_BLEND);
         DrawQuad(x, y, sw, sh, srcRect->left, srcRect->top, sw, sh,
-                 sw_tex, sh_tex, 255.0f, false, dtwin->w, dtwin->h);
+                 sw_tex, sh_tex, 255.0f, 1.0f, dtwin->w, dtwin->h);
     }
     else
     {
@@ -1127,11 +1130,12 @@ bool krkrsdl2_glc_try_blt(void* dest, tjs_int x, tjs_int y,
         }
         else
         {
-            // engine TVPAddBlend: dst += src (fully additive, no alpha)
-            gl.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
+            // Reference AddBlend (K2S RenderManager_ogl: CONSTANT_COLOR, ONE, ZERO, ONE):
+            // RGB += src*opacity (shader rgbMul), destination alpha is preserved.
+            gl.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
         }
         DrawQuad(x, y, sw, sh, srcRect->left, srcRect->top, sw, sh,
-                 sw_tex, sh_tex, (float)opa, true, dtwin->w, dtwin->h);
+                 sw_tex, sh_tex, (float)opa, method == 2 ? opa / 255.0f : 1.0f, dtwin->w, dtwin->h);
     }
     return true;
 }
@@ -1251,24 +1255,34 @@ void krkrsdl2_glc_layer(tjs_int x, tjs_int y,
     }
 
     // Blit onto the compose FBO with the layer's blend type.
-    const bool alpha = (type == 2 || type == 12);      // ltAlpha / ltAddAlpha
-    const bool additive = (type == 3 || type == 12);   // ltAdditive
+    // Layer blend types, matching the engine software RenderManager methods that
+    // K2S RenderManager_ogl and K3 LayerSetBlend implement:
+    //   ltAlpha(2)     -> AlphaBlend          (SRC_ALPHA, ONE_MINUS_SRC_ALPHA, SRC_ALPHA, ONE_MINUS_SRC_ALPHA)
+    //   ltAdditive(3)  -> AddBlend            (ONE, ONE, ZERO, ONE), RGB scaled by opacity
+    //   ltAddAlpha(12) -> AdditiveAlphaBlend  (ONE, ONE_MINUS_SRC_ALPHA, ZERO, ONE), RGB scaled by opacity
+    const bool isAlpha = (type == 2);
+    const bool isAdd = (type == 3);
+    const bool isAddAlpha = (type == 12);
+    const bool blend = isAlpha || isAdd || isAddAlpha;
+    const float rgbMul = (isAdd || isAddAlpha) ? opacity / 255.0f : 1.0f;
     gl.BindFramebuffer(GL_FRAMEBUFFER, gComposeFbo);
     gl.Viewport(0, 0, gFboW, gFboH);
     gl.Disable(GL_BLEND);
-    if (alpha || additive)
+    if (blend)
     {
         gl.Enable(GL_BLEND);
         gl.BlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-        if (additive)
-            gl.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ONE, GL_ONE);
-        else
+        if (isAlpha)
             gl.BlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA,
                                  GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        else if (isAddAlpha)
+            gl.BlendFuncSeparate(GL_ONE, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+        else
+            gl.BlendFuncSeparate(GL_ONE, GL_ONE, GL_ZERO, GL_ONE);
     }
     DrawQuad(x, y, sw, sh,
              cliprect.left, cliprect.top, sw, sh,
-             w, h, (float)opacity, alpha || additive, gComposeW, gVisH);
+             w, h, (float)opacity, rgbMul, gComposeW, gVisH);
     GLErr("glc_layer");
     gLayerMs += SDL_GetTicks() - l_t0;
 }
@@ -1360,7 +1374,7 @@ bool krkrsdl2_glc_readback(void* surface, int w, int h, int pitch)
                 gl.BindTexture(GL_TEXTURE_2D, gComposeTex);
                 DrawQuad(0, 0, gFboW, gFboH,
                          0, gFboH, gFboW, -gFboH,
-                         gFboW, gFboH, 255, false, gFboW, gFboH, false);
+                         gFboW, gFboH, 255.0f, 1.0f, gFboW, gFboH, false);
                 gl.Flush();
                 // First frames after (re)start or a window switch: probe the real
                 // display buffer (READ=0) at center + 4 corners so a wrong

@@ -263,8 +263,17 @@ private:
 	std::vector<tjs_uint32> ChunkLengths;
 	std::vector<tjs_uint32> ExtraChunkOffsets;
 	std::vector<tjs_uint32> ExtraChunkLengths;
-	std::map<tjs_uint32, tjs_string> ResourceNames;
-	std::map<tjs_uint32, tjs_string> ExtraResourceNames;
+	// Keyed by property name, not by chunk index: a packer that stores
+	// identical slices once binds several layer names to one chunk (event
+	// images do this for shared parts).  Index-keyed bookkeeping kept only the
+	// first of those names, so every alias answered "not found" and the game
+	// substituted its error image over the layer.
+	std::map<tjs_string, std::pair<tjs_uint32, bool>> ResourceByName;
+
+	void RegisterResourceName(const ttstr &name, bool extra, tjs_uint32 index)
+	{
+		ResourceByName.emplace(name.AsStdString(), std::make_pair(index, extra));
+	}
 
 	void Require(size_t offset, size_t length, const char *what) const
 	{
@@ -681,11 +690,7 @@ private:
 					TicksSetMember += ProbeCounter() - tSet;
 					::krkr_exact_proof::TransactionPoint(krkr_lazy_transaction_test::Point::AfterInsert,dictionary,i+1);
 					if (item.IsResource)
-					{
-						auto &resourceNames = item.IsExtraResource ? ExtraResourceNames : ResourceNames;
-						if (resourceNames.find(item.ResourceIndex) == resourceNames.end())
-							resourceNames[item.ResourceIndex] = name.AsStdString();
-					}
+						RegisterResourceName(name, item.IsExtraResource, item.ResourceIndex);
 				}
 				result.Value = tTJSVariant(dictionary, dictionary);
 			}
@@ -745,11 +750,8 @@ private:
                 const auto nameIndex = ReadArrayViewElement(names, i);
                 if (nameIndex >= Names.size()) throw std::runtime_error("Invalid PSB property name index");
                 const auto child = UnsafeValidateValue(offsets.End + ReadArrayViewElement(offsets, i), depth + 1);
-                if (child.resource) {
-                    auto &resourceNames = child.extra ? ExtraResourceNames : ResourceNames;
-                    if (resourceNames.find(child.index) == resourceNames.end())
-                        resourceNames[child.index] = Names[nameIndex].AsStdString();
-                }
+                if (child.resource)
+                    RegisterResourceName(Names[nameIndex], child.extra, child.index);
             }
             return result;
         }
@@ -897,15 +899,13 @@ public:
 	std::map<tjs_string, KrkrSharedBytes> NamedResources() const
 	{
 		std::map<tjs_string, KrkrSharedBytes> result;
-		for (const auto &entry : ResourceNames)
-			result[entry.second] = ResourceBytes(entry.first, false);
-		for (const auto &entry : ExtraResourceNames)
-			result[entry.second] = ResourceBytes(entry.first, true);
+		for (const auto &entry : ResourceByName)
+			result[entry.first] = ResourceBytes(entry.second.first, entry.second.second);
 		return result;
 	}
 
 	tjs_uint16 Version() const { return Header.Version; }
-	size_t ResourceCount() const { return ResourceNames.size() + ExtraResourceNames.size(); }
+	size_t ResourceCount() const { return ResourceByName.size(); }
 };
 
 static iTJSDispatch2 *UnsafeCreateLazyPsbValue(std::shared_ptr<PsbReader> reader,
