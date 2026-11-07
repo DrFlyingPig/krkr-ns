@@ -4,11 +4,15 @@
 #include "SDLApplication.h"
 #include "SysInitImpl.h"
 #include "KrkrNSResourcePolicy.h"
+#include "KrkrNSLog.h"
 #ifdef USE_SDL_MAIN
 #include <SDL_main.h>
 #endif
 #ifdef __SWITCH__
 extern void krkrsdl2_set_own_path(const char* path);
+// Reads sdmc:/switch/KRKR-ns/heap-audit.txt away from the allocator: the marker
+// check itself allocates, and doing that inside __wrap_malloc deadlocked.
+extern "C" void KrkrNSSwitchHeapInit(void);
 #endif
 
 #if defined(USE_SDL_MAIN)
@@ -24,10 +28,15 @@ extern "C" int main(int argc, char **argv)
 	{
 		~RestorePerformanceMode() { krkrsdl2_resource_policy_end_session(); }
 	} restorePerformanceMode;
+	KRKRNS_THREAD_NAME("main");
 #endif
 	try
 	{
 		krkrsdl2_pre_init_platform();
+
+#ifdef __SWITCH__
+		KrkrNSSwitchHeapInit();
+#endif
 
 #ifdef __SWITCH__
 		// Remember where this NRO was launched from: ending a game restarts the

@@ -362,7 +362,16 @@ struct ShrinkCopy : public LayerUtils
 
     void* allocAvgBuffer(AvgInfoT*& hi, AvgInfoT*& vi, long w, long h)
     {
-        void* ret = malloc(sizeof(AvgInfoT) * w * h);
+        // Two per-axis tables share one block: hi holds w entries and i`r
+        // holds h.  The port allocated w*h entries, which is smaller than w+h
+        // whenever an axis is 1 pixel wide, so makeAvgTable(vert) wrote
+        // sizeof(AvgInfoT) bytes past the block (the heap canary caught exactly
+        // that on 48-byte blocks).
+        if (w <= 0 || h <= 0) return 0;
+        const size_t entries = static_cast<size_t>(w) + static_cast<size_t>(h);
+        if (entries > SIZE_MAX / sizeof(AvgInfoT)) return 0;
+        void* ret = malloc(sizeof(AvgInfoT) * entries);
+        if (!ret) return 0;
         hi = (AvgInfoT*)ret;
         vi = hi + w;
         return ret;
