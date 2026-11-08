@@ -28,6 +28,9 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <cstring>
+#include "KrkrNSLog.h"
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -137,6 +140,61 @@ public:
 /**
  * ファイルシステム経由でのFreeType Face クラス
  */
+//---------------------------------------------------------------------------
+// KRKR-ns: shared font file bytes.
+//
+// Every tGenericFreeTypeFace opens its font storage lazily and keeps a private
+// stream, so a host that registers fonts repeatedly pays for the whole TTF in
+// storage reads each time.  Measured on the bundled CJK font: 490 opens in one
+// session and 15k storage reads inside a single timer event, which is exactly
+// the frame hitch the player sees.  Cache the bytes once per resolved path so
+// the faces read from memory instead.
+static std::mutex gFontFileCacheMutex;
+static std::map<std::string, std::shared_ptr<std::vector<unsigned char> > > gFontFileCache;
+static size_t gFontFileCacheBytes = 0;
+static const size_t gFontFileCacheLimit = 96u * 1024u * 1024u;
+
+static std::shared_ptr<std::vector<unsigned char> > TVPGetCachedFontFile(const ttstr &path)
+{
+	std::string key;
+	try { key = path.AsNarrowStdString(); } catch(...) { return std::shared_ptr<std::vector<unsigned char> >(); }
+	if (key.empty()) return std::shared_ptr<std::vector<unsigned char> >();
+	{
+		std::lock_guard<std::mutex> lock(gFontFileCacheMutex);
+		std::map<std::string, std::shared_ptr<std::vector<unsigned char> > >::iterator it = gFontFileCache.find(key);
+		if (it != gFontFileCache.end()) return it->second;
+	}
+	std::shared_ptr<std::vector<unsigned char> > bytes;
+	try
+	{
+		std::unique_ptr<tTJSBinaryStream> stream(TVPCreateBinaryStreamForRead(path, TJS_W("")));
+		if (stream)
+		{
+			const tjs_uint64 size = stream->GetSize();
+			if (size > 0 && size <= gFontFileCacheLimit)
+			{
+				bytes.reset(new std::vector<unsigned char>(static_cast<size_t>(size)));
+				stream->SetPosition(0);
+				stream->ReadBuffer(&(*bytes)[0], static_cast<tjs_uint>(size));
+			}
+		}
+	}
+	catch(...) { bytes.reset(); }
+	if (!bytes) return std::shared_ptr<std::vector<unsigned char> >();
+	{
+		std::lock_guard<std::mutex> lock(gFontFileCacheMutex);
+		if (gFontFileCacheBytes + bytes->size() <= gFontFileCacheLimit)
+		{
+			gFontFileCacheBytes += bytes->size();
+			gFontFileCache[key] = bytes;
+			KRKRNS_LOG("[font] cached file bytes=%u total=%u", (unsigned)bytes->size(),
+				(unsigned)gFontFileCacheBytes);
+		}
+	}
+	return bytes;
+}
+//---------------------------------------------------------------------------
+
 class tGenericFreeTypeFace : public tBaseFreeTypeFace
 {
 protected:
@@ -146,6 +204,7 @@ protected:
 	std::vector<tjs_string> FaceNames; //!< Face名を列挙した配列
 	//std::unique_ptr<tjs_uint8[]> FontImage;
 	ttstr FontPath;
+	std::shared_ptr<std::vector<unsigned char> > CachedBytes; // KRKR-ns: font file kept in memory
 
 private:
 	FT_StreamRec Stream;
@@ -667,6 +726,23 @@ unsigned long tGenericFreeTypeFace::IoFunc( FT_Stream stream, unsigned long offs
 {
 	tGenericFreeTypeFace * _this =
 		static_cast<tGenericFreeTypeFace*>(stream->descriptor.pointer);
+
+	if (!_this->CachedBytes)
+	{
+		_this->CachedBytes = TVPGetCachedFontFile(_this->FontPath);
+	}
+	if (_this->CachedBytes)
+	{
+		// Serve from the memory copy: FreeType re-reads tables and glyph data
+		// constantly, and every seek used to be a storage call.
+		const std::vector<unsigned char> &data = *_this->CachedBytes;
+		if (count == 0) return 0;
+		if (offset >= data.size()) return 0;
+		unsigned long available = static_cast<unsigned long>(data.size() - offset);
+		if (count > available) count = available;
+		std::memcpy(buffer, data.data() + offset, count);
+		return count;
+	}
 
 	if (!_this->File)
 	{
