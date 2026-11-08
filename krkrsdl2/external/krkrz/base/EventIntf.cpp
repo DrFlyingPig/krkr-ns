@@ -16,6 +16,9 @@
 #endif
 
 #include <algorithm>
+#include <typeinfo> // KRKR-ns: [slow-event] diagnostics name the handler type
+#include <string>
+#include <cstdio>
 #include "SysInitIntf.h"
 #include "EventIntf.h"
 #include "WindowIntf.h"
@@ -69,6 +72,9 @@ public:
 		if(Source) Source->AddRef();
 	}
 
+
+	// KRKR-ns: [slow-event] diagnostics need the script-level event name
+	const ttstr & GetEventNameForDiagnostics() const { return EventName; }
 
 	tTVPEvent(const tTVPEvent &ref)
 	{
@@ -515,7 +521,30 @@ static void _TVPDeliverEventByPrio(tjs_uint prio)
 		try
 		{
 			KrkrNSPerfScope perfEvent(KrkrNSPerfOp::ScriptEvent);
+#ifdef __SWITCH__
+			// A queued event whose handler runs longer than a frame is what turns
+			// a 60 FPS scene into stutter, and [stall-ops] could only say
+			// "script-event".  Name the handler that ate the frame instead.
+			const tjs_uint64 eventStart = TVPGetTickCount();
+#endif
 			e->Deliver();
+#ifdef __SWITCH__
+			const tjs_uint64 eventMs = TVPGetTickCount() - eventStart;
+			if (eventMs >= 16)
+			{
+				static unsigned reported = 0;
+				if (reported < 256)
+				{
+					++reported;
+					char eventName[96] = {0};
+					try { const std::string narrowed = e->GetEventNameForDiagnostics().AsNarrowStdString(); snprintf(eventName, sizeof(eventName), "%s", narrowed.c_str()); } catch (...) { snprintf(eventName, sizeof(eventName), "<non-ascii>"); }
+					KRKRNS_LOG("[slow-event] name=%s ms=%llu prio=%u flags=0x%x queue=%u vtbl=%p",
+						eventName, (unsigned long long)eventMs, (unsigned)prio,
+						(unsigned)e->GetFlags(), (unsigned)TVPEventQueue.size(),
+						*reinterpret_cast<void *const *>(e));
+				}
+			}
+#endif
 		}
 		catch(...)
 		{

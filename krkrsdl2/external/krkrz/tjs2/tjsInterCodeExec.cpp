@@ -1855,12 +1855,40 @@ void tTJSInterCodeContext::GetPropertyIndirect(tTJSVariant *ra,
 		tTJSVariantString *str;
 		str = ra_code3->AsString();
 
+		// KRKR-ns: an EMPTY string key yields a NULL member name here, and a NULL
+		// member name means "index by number" to the dispatch layer: a Dictionary
+		// answers invalid type instead of void.  Scripts legitimately index with a
+		// name that failed to resolve (empty), so return void like a missing member.
+		if (!str || str->GetLength() == 0)
+		{
+			if (str) str->Release();
+			TJS_GET_VM_REG_ADDR(ra, code[1])->Clear();
+			return;
+		}
+
 		try
 		{
 			// TODO: verify here needs hint holding
 			hr = clo.PropGet(flags, *str, NULL, TJS_GET_VM_REG_ADDR(ra, code[1]),
 				clo.ObjThis?clo.ObjThis:ra[-1].AsObjectNoAddRef());
-			if(TJS_FAILED(hr)) TJSThrowFrom_tjs_error(hr, *str);
+			if(TJS_FAILED(hr))
+			{
+#ifdef __SWITCH__
+				// KRKR-ns: name the receiver's class when a compound index fails;
+				// the game-side message says only "invalid method/property type".
+				if (hr == TJS_E_INVALIDTYPE)
+				{
+					iTJSDispatch2 *obj = clo.Object;
+					KRKRNS_LOG("[vmprop] invalidtype key=%ls keylen=%u obj=%p array=%d dict=%d str=%d objcls=%d",
+						(const tjs_char *)*str, (unsigned)(str?str->GetLength():0), obj,
+						obj?(int)obj->IsInstanceOf(0,NULL,NULL,TJS_W("Array"),obj):-1,
+						obj?(int)obj->IsInstanceOf(0,NULL,NULL,TJS_W("Dictionary"),obj):-1,
+						obj?(int)obj->IsInstanceOf(0,NULL,NULL,TJS_W("String"),obj):-1,
+						obj?(int)obj->IsInstanceOf(0,NULL,NULL,TJS_W("Object"),obj):-1);
+				}
+#endif
+				TJSThrowFrom_tjs_error(hr, *str);
+			}
 		}
 		catch(...)
 		{
@@ -2612,8 +2640,22 @@ tjs_int tTJSInterCodeContext::CallFunctionDirect(tTJSVariant *ra,
 	TJS_END_FUNC_CALL_ARGS
 
 	if(TJS_FAILED(hr))
+	{
+#ifdef __SWITCH__
+		// KRKR-ns: the script-visible message ("Not a function or invalid
+		// method/property type") does not say WHICH member failed.  Log the member
+		// name and the receiver's variant type: type 0/void means the receiver
+		// itself was undefined, which names the missing plugin API directly.
+		{
+			const tTJSVariant &recv = TJS_GET_VM_REG(ra, code[2]);
+			KRKRNS_LOG("[vmerror] hr=0x%08x member=%ls receiver_type=%d object=%p",
+				(unsigned)hr, ttstr(TJS_GET_VM_REG(DataArea, code[3])).c_str(),
+				(int)recv.Type(), recv.Type() == tvtObject ? recv.AsObjectNoAddRef() : nullptr);
+		}
+#endif
 		TJSThrowFrom_tjs_error(hr,
 			ttstr(TJS_GET_VM_REG(DataArea, code[3])).c_str());
+	}
 
 	return code_size + 4;
 }
