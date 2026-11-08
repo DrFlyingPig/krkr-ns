@@ -466,7 +466,20 @@ tTJSNI_BaseLayer::Construct(tjs_int numparams, tTJSVariant **param,
 	class iTVPLayerTreeOwner* lto = NULL;
 	tTJSVariant iface_v;
 	if(TJS_FAILED(clo.PropGet(0, TJS_W("layerTreeOwnerInterface"), NULL, &iface_v, NULL)))
+	{
+#ifdef __SWITCH__
+		// KRKR-ns: name the receiver's class.  A game aborted its UI setup here
+		// with a black screen, and "which object was passed as the window" is
+		// the only thing that identifies the missing piece.
+		KRKRNS_LOG("[layer-ctor] no layerTreeOwnerInterface obj=%p window=%d layer=%d dict=%d objcls=%d",
+			clo.Object,
+			clo.Object?(int)clo.Object->IsInstanceOf(0,NULL,NULL,TJS_W("Window"),clo.Object):-1,
+			clo.Object?(int)clo.Object->IsInstanceOf(0,NULL,NULL,TJS_W("Layer"),clo.Object):-1,
+			clo.Object?(int)clo.Object->IsInstanceOf(0,NULL,NULL,TJS_W("Dictionary"),clo.Object):-1,
+			clo.Object?(int)clo.Object->IsInstanceOf(0,NULL,NULL,TJS_W("Object"),clo.Object):-1);
+#endif
 		TVPThrowExceptionMessage( TJS_W("Cannot Retrive Layer Tree Owner Interface.") );
+	}
 	lto = reinterpret_cast<iTVPLayerTreeOwner *>((tjs_intptr_t)(tjs_int64)iface_v);
 
 	// get the layer native instance
