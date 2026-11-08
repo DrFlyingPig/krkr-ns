@@ -1468,11 +1468,251 @@ static tTJSVariant TVPCloneScriptValue(const tTJSVariant &source)
 }
 
 tjs_uint32 tTJSNC_Scripts::ClassID = -1;
+//----------------------------------------------------------------------
+// KRKR-ns: Scripts.evalJSONStorage
+//
+// KiriKiri Z titles call Scripts.evalJSONStorage to read small JSON manifests
+// (the save index, CG tables).  The base engine only ships evalStorage, so the
+// call raised "member not found" and the manifest stayed empty.  Parse the text
+// straight into TJS values: objects become Dictionary, arrays become Array.
+namespace
+{
+struct tJSONParseError {};
+
+class tJSONParser
+{
+public:
+	const tjs_char *P;
+	const tjs_char *End;
+	iTJSDispatch2 *Global;
+	int Depth;
+
+	tJSONParser(const tjs_char *text, tjs_uint length, iTJSDispatch2 *global)
+		: P(text), End(text + length), Global(global), Depth(0) {}
+
+	void SkipSpace()
+	{
+		while (P < End)
+		{
+			const tjs_char c = *P;
+			if (c == TJS_W(' ') || c == TJS_W('\t') || c == TJS_W('\n') || c == TJS_W('\r')) ++P;
+			else break;
+		}
+	}
+	void Fail() { throw tJSONParseError(); }
+
+	void Expect(const tjs_char *word)
+	{
+		while (*word)
+		{
+			if (P >= End || *P != *word) Fail();
+			++P; ++word;
+		}
+	}
+
+	iTJSDispatch2 *CreateClassInstance(const tjs_char *classname)
+	{
+		if (!Global) return NULL;
+		tTJSVariant cls;
+		if (TJS_FAILED(Global->PropGet(0, classname, NULL, &cls, Global))) return NULL;
+		iTJSDispatch2 *clsdispatch = cls.AsObjectNoAddRef();
+		if (!clsdispatch) return NULL;
+		iTJSDispatch2 *created = NULL;
+		if (TJS_FAILED(clsdispatch->CreateNew(0, NULL, NULL, &created, 0, NULL, clsdispatch)))
+			return NULL;
+		return created;
+	}
+
+	ttstr ParseString()
+	{
+		// opening quote already consumed
+		ttstr result;
+		for (;;)
+		{
+			if (P >= End) Fail();
+			const tjs_char c = *P++;
+			if (c == TJS_W('"')) break;
+			if (c != TJS_W('\\'))
+			{
+				result += c;
+				continue;
+			}
+			if (P >= End) Fail();
+			const tjs_char e = *P++;
+			switch (e)
+			{
+			case TJS_W('"'): result += TJS_W('"'); break;
+			case TJS_W('\\'): result += TJS_W('\\'); break;
+			case TJS_W('/'): result += TJS_W('/'); break;
+			case TJS_W('b'): result += TJS_W('\b'); break;
+			case TJS_W('f'): result += TJS_W('\f'); break;
+			case TJS_W('n'): result += TJS_W('\n'); break;
+			case TJS_W('r'): result += TJS_W('\r'); break;
+			case TJS_W('t'): result += TJS_W('\t'); break;
+			case TJS_W('u'):
+				{
+					if (End - P < 4) Fail();
+					int code = 0;
+					for (int i = 0; i < 4; ++i)
+					{
+						const tjs_char h = *P++;
+						code <<= 4;
+						if (h >= TJS_W('0') && h <= TJS_W('9')) code += h - TJS_W('0');
+						else if (h >= TJS_W('a') && h <= TJS_W('f')) code += h - TJS_W('a') + 10;
+						else if (h >= TJS_W('A') && h <= TJS_W('F')) code += h - TJS_W('A') + 10;
+						else Fail();
+					}
+					result += (tjs_char)code;
+				}
+				break;
+			default:
+				Fail();
+			}
+		}
+		return result;
+	}
+
+	tTJSVariant ParseNumber()
+	{
+		const tjs_char *start = P;
+		if (P < End && (*P == TJS_W('-') || *P == TJS_W('+'))) ++P;
+		bool isfloat = false;
+		while (P < End)
+		{
+			const tjs_char c = *P;
+			if (c >= TJS_W('0') && c <= TJS_W('9')) { ++P; continue; }
+			if (c == TJS_W('.') || c == TJS_W('e') || c == TJS_W('E') ||
+				((c == TJS_W('+') || c == TJS_W('-')) && P > start)) { isfloat = true; ++P; continue; }
+			break;
+		}
+		if (P == start) Fail();
+		char narrow[64];
+		const tjs_uint length = (tjs_uint)(P - start);
+		if (length >= sizeof(narrow)) Fail();
+		for (tjs_uint i = 0; i < length; ++i) narrow[i] = (char)start[i];
+		narrow[length] = '\0';
+		if (!isfloat)
+		{
+			tjs_int64 ivalue = 0;
+			bool overflow = false;
+			for (tjs_uint i = 0; i < length; ++i)
+			{
+				if (narrow[i] == '-' || narrow[i] == '+') continue;
+				const tjs_int64 next = ivalue * 10 + (narrow[i] - '0');
+				if (next < ivalue) { overflow = true; break; }
+				ivalue = next;
+			}
+			if (!overflow && narrow[0] == '-') ivalue = -ivalue;
+			if (!overflow && ivalue >= -0x7fffffffLL && ivalue <= 0x7fffffffLL)
+				return tTJSVariant((tjs_int)ivalue);
+		}
+		return tTJSVariant((tjs_real)atof(narrow));
+	}
+
+	tTJSVariant ParseObject()
+	{
+		if (++Depth > 64) Fail();
+		iTJSDispatch2 *dict = CreateClassInstance(TJS_W("Dictionary"));
+		if (!dict) Fail();
+		tTJSVariant holder(dict, dict);
+		tTJSVariant result;
+		try
+		{
+			++P; // {
+			SkipSpace();
+			if (P < End && *P == TJS_W('}'))
+			{
+				++P;
+			}
+			else
+			{
+				for (;;)
+				{
+					SkipSpace();
+					if (P >= End || *P != TJS_W('"')) Fail();
+					++P;
+					ttstr key = ParseString();
+					SkipSpace();
+					if (P >= End || *P != TJS_W(':')) Fail();
+					++P;
+					tTJSVariant value = ParseValue();
+					dict->PropSet(TJS_MEMBERENSURE, key.c_str(), NULL, &value, dict);
+					SkipSpace();
+					if (P < End && *P == TJS_W(',')) { ++P; continue; }
+					if (P < End && *P == TJS_W('}')) { ++P; break; }
+					Fail();
+				}
+			}
+		}
+		catch (...)
+		{
+			--Depth;
+			dict->Release();
+			throw;
+		}
+		--Depth;
+		return holder;
+	}
+
+	tTJSVariant ParseArray()
+	{
+		if (++Depth > 64) Fail();
+		iTJSDispatch2 *array = CreateClassInstance(TJS_W("Array"));
+		if (!array) Fail();
+		tTJSVariant holder(array, array);
+		try
+		{
+			++P; // [
+			SkipSpace();
+			if (P < End && *P == TJS_W(']'))
+			{
+				++P;
+			}
+			else
+			{
+				tjs_int index = 0;
+				for (;;)
+				{
+					tTJSVariant value = ParseValue();
+					array->PropSetByNum(TJS_MEMBERENSURE, index++, &value, array);
+					SkipSpace();
+					if (P < End && *P == TJS_W(',')) { ++P; continue; }
+					if (P < End && *P == TJS_W(']')) { ++P; break; }
+					Fail();
+				}
+			}
+		}
+		catch (...)
+		{
+			--Depth;
+			array->Release();
+			throw;
+		}
+		--Depth;
+		return holder;
+	}
+
+	tTJSVariant ParseValue()
+	{
+		SkipSpace();
+		if (P >= End) Fail();
+		const tjs_char c = *P;
+		if (c == TJS_W('{')) return ParseObject();
+		if (c == TJS_W('[')) return ParseArray();
+		if (c == TJS_W('"')) { ++P; return tTJSVariant(ParseString()); }
+		if (c == TJS_W('t')) { Expect(TJS_W("true")); return tTJSVariant((tjs_int)1); }
+		if (c == TJS_W('f')) { Expect(TJS_W("false")); return tTJSVariant((tjs_int)0); }
+		if (c == TJS_W('n')) { Expect(TJS_W("null")); return tTJSVariant(); }
+		return ParseNumber();
+	}
+};
+} // namespace
 tTJSNC_Scripts::tTJSNC_Scripts() : inherited(TJS_W("Scripts"))
 {
 	// registration of native members
 
-	TJS_BEGIN_NATIVE_MEMBERS(Scripts)
+	
+TJS_BEGIN_NATIVE_MEMBERS(Scripts)
 	TJS_DECL_EMPTY_FINALIZE_METHOD
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_CONSTRUCTOR_DECL_NO_INSTANCE(/*TJS class name*/Scripts)
@@ -1584,6 +1824,47 @@ TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/evalStorage)
 	return TJS_S_OK;
 }
 TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/evalStorage)
+TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/evalJSONStorage)
+{
+	if (numparams < 1) return TJS_E_BADPARAMCOUNT;
+	const ttstr name = *param[0];
+	const ttstr place = TVPSearchPlacedPath(name);
+	if (place.IsEmpty()) return TJS_S_OK; // missing storage => void, like evalStorage
+	iTJSTextReadStream *stream = TVPCreateTextStreamForReadByEncoding(place, ttstr(), TJS_W("utf-8"));
+	ttstr text;
+	try
+	{
+		stream->Read(text, 0);
+	}
+	catch (...)
+	{
+		stream->Destruct();
+		throw;
+	}
+	stream->Destruct();
+	// Tolerate a UTF-8 BOM.
+	const tjs_char *body = text.c_str();
+	tjs_uint length = text.GetLen();
+	if (length >= 1 && body[0] == (tjs_char)0xfeff) { ++body; --length; }
+	iTJSDispatch2 *global = TVPGetScriptDispatch();
+	try
+	{
+		tJSONParser parser(body, length, global);
+		tTJSVariant value = parser.ParseValue();
+		if (result) *result = value;
+	}
+	catch (...)
+	{
+		if (global) global->Release();
+		TJS_eTJSError(ttstr(TJS_W("Scripts.evalJSONStorage: invalid JSON")));
+	}
+	if (global) global->Release();
+	return TJS_S_OK;
+}
+TJS_END_NATIVE_STATIC_METHOD_DECL(/*func. name*/evalJSONStorage)
+
+//----------------------------------------------------------------------
+
 //----------------------------------------------------------------------
 TJS_BEGIN_NATIVE_METHOD_DECL(/*func. name*/clone)
 {
